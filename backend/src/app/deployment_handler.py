@@ -1,0 +1,1128 @@
+"""Deployment Lambda handler for the AgentCore Visual Workflow Platform.
+
+Lightweight FastAPI app wrapped with Mangum that handles deployment-related
+API endpoints:
+
+- POST /api/deploy          → start Step Functions execution
+- GET  /api/deploy/{id}     → query deployment state
+- POST /api/test-runtime    → invoke a deployed runtime
+- DELETE /api/runtime/{id}  → delete runtime and clean up resources
+
+Requirements: 3.1, 3.7, 9.1, 9.2, 9.3, 9.4
+"""
+
+import json
+import logging
+import os
+import re
+import time
+import uuid
+from datetime import datetime, timezone
+from typing import Optional
+
+import boto3
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from mangum import Mangum
+
+from app.models.deployment_models import (
+    DeploymentState,
+    DeploymentStatusEnum,
+    DeployRequest,
+    DeployResponse,
+    DeleteResponse,
+    TestRequest,
+    TestResponse,
+)
+from app.models.tool_generation_models import (
+    ToolGenerateRequest,
+    ToolGenerateResponse,
+    ToolTestRequest,
+)
+from app.services.config import load_config
+from app.services.deployment_state_store import DeploymentStateStore
+from app.services.gateway_deployer import cleanup_gateway_resources, get_cognito_token
+from app.services.runtime_deployer import destroy_runtime
+from app.services.tool_generator import generate_tool
+from app.services.tool_tester import test_tool
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Application configuration
+# ---------------------------------------------------------------------------
+
+config = load_config()
+
+DEPLOYMENT_TABLE_NAME = os.environ.get(
+    "DEPLOYMENTS_TABLE_NAME",
+    os.environ.get("DEPLOYMENT_TABLE_NAME", "AgentCoreDeployments"),
+)
+STATE_MACHINE_ARN = os.environ.get("STATE_MACHINE_ARN", "")
+
+
+# ---------------------------------------------------------------------------
+# Boto3 wrapper functions
+# ---------------------------------------------------------------------------
+
+
+def _create_sfn_client(region: str):
+    return boto3.client("stepfunctions", region_name=region)
+
+
+def _start_sfn_execution(sfn_client, state_machine_arn: str, name: str, input_json: str) -> dict:
+    return sfn_client.start_execution(
+        stateMachineArn=state_machine_arn,
+        name=name,
+        input=input_json,
+    )
+
+
+def _create_agentcore_client(region: str):
+    from botocore.config import Config
+
+    # 28s read timeout — maximise time for AgentCore cold starts while staying
+    # just under API Gateway's 29s hard limit.
+    # The frontend has retry logic (5 attempts) for cold start timeouts.
+    return boto3.client(
+        "bedrock-agentcore",
+        region_name=region,
+        config=Config(read_timeout=25, connect_timeout=5, retries={"max_attempts": 0}),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Deployment state store (lazy-initialised)
+# ---------------------------------------------------------------------------
+
+_state_store: Optional[DeploymentStateStore] = None
+
+
+def _get_state_store() -> DeploymentStateStore:
+    global _state_store
+    if _state_store is None:
+        _state_store = DeploymentStateStore(
+            table_name=DEPLOYMENT_TABLE_NAME,
+            region=config.aws_region,
+        )
+    return _state_store
+
+
+def _scan_for_runtime(table, runtime_id: str) -> Optional[dict]:
+    """Scan DynamoDB for a deployment record matching the given runtime_id.
+
+    Paginates through all items to avoid the DynamoDB Limit pitfall
+    (Limit caps items *evaluated*, not items *returned*).
+    """
+    kwargs = {
+        "FilterExpression": "runtime_id = :rid",
+        "ExpressionAttributeValues": {":rid": runtime_id},
+    }
+    while True:
+        resp = table.scan(**kwargs)
+        items = resp.get("Items", [])
+        if items:
+            return items[0]
+        if "LastEvaluatedKey" not in resp:
+            break
+        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# FastAPI application
+# ---------------------------------------------------------------------------
+
+
+def _get_user_id(request: Request) -> Optional[str]:
+    """Extract user sub from JWT claims (API Gateway HTTP API JWT authorizer)."""
+    try:
+        return request.scope.get("aws.event", {}).get(
+            "requestContext", {}
+        ).get("authorizer", {}).get("jwt", {}).get("claims", {}).get("sub")
+    except Exception:
+        return None
+
+
+deployment_app = FastAPI(
+    title="AgentCore Deployment API",
+    description="Deployment orchestration endpoints",
+    version="0.1.0",
+)
+
+# SECURITY: Restrict allowed methods and headers instead of wildcard "*"
+deployment_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-Amz-Date", "X-Api-Key"],
+)
+
+
+@deployment_app.get("/health")
+async def health_check() -> dict:
+    checks = {"api": "ok"}
+    try:
+        store = _get_state_store()
+        store._table.table_status  # lightweight DynamoDB connectivity check
+        checks["dynamodb"] = "ok"
+    except Exception:
+        checks["dynamodb"] = "degraded"
+    overall = "healthy" if all(v == "ok" for v in checks.values()) else "degraded"
+    return {"status": overall, "checks": checks}
+
+
+# ---------------------------------------------------------------------------
+# POST /api/deploy
+# ---------------------------------------------------------------------------
+
+
+@deployment_app.post(
+    "/api/deploy",
+    status_code=202,
+    response_model=DeployResponse,
+    response_model_by_alias=True,
+)
+async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployResponse:
+    """Start a Step Functions execution for a new deployment."""
+    deployment_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    user_id = _get_user_id(raw_request)
+
+    state = DeploymentState(
+        deployment_id=deployment_id,
+        workflow_id=request.node_id,
+        user_id=user_id,
+        status=DeploymentStatusEnum.PENDING,
+        started_at=now,
+    )
+
+    store = _get_state_store()
+    store.create(state)
+
+    sfn_input = {
+        "deployment_id": deployment_id,
+        "workflow_id": request.node_id,
+        "config": request.config.model_dump(mode="json", by_alias=True),
+        "connected_tools": request.connected_tools or [],
+        "template_id": request.template_id,
+    }
+    # Only include gateway fields if gateway is configured
+    if request.gateway_config:
+        sfn_input["gateway_config"] = request.gateway_config
+    if request.gateway_tools:
+        sfn_input["gateway_tools"] = request.gateway_tools
+    if request.identity_config:
+        sfn_input["identity_config"] = request.identity_config.model_dump(mode="json", by_alias=True)
+    if request.custom_tools:
+        sfn_input["custom_tools"] = [t.model_dump(mode="json", by_alias=True) for t in request.custom_tools]
+    if request.memory_config:
+        sfn_input["memory_config"] = request.memory_config
+    if request.evaluation_config:
+        sfn_input["evaluation_config"] = request.evaluation_config
+    if request.policy_config:
+        sfn_input["policy_config"] = request.policy_config
+    if request.mcp_server_config:
+        sfn_input["mcp_server_config"] = request.mcp_server_config
+    if request.knowledge_base_config:
+        sfn_input["knowledge_base_config"] = request.knowledge_base_config
+    if request.guardrails_config:
+        sfn_input["guardrails_config"] = request.guardrails_config
+
+    execution_arn: Optional[str] = None
+    try:
+        sfn_client = _create_sfn_client(config.aws_region)
+        sfn_response = _start_sfn_execution(
+            sfn_client,
+            state_machine_arn=STATE_MACHINE_ARN,
+            name=f"deploy-{deployment_id}",
+            input_json=json.dumps(sfn_input, default=str),
+        )
+        execution_arn = sfn_response.get("executionArn")
+
+        store.update_status(deployment_id, DeploymentStatusEnum.PENDING)
+        _update_execution_arn(store, deployment_id, execution_arn)
+
+    except Exception as exc:
+        logger.error("Failed to start Step Functions execution: %s", exc)
+        store.update_status(
+            deployment_id,
+            DeploymentStatusEnum.FAILED,
+            error_details=f"Failed to start execution: {exc}",
+        )
+        # SECURITY: Do not leak internal error details to the client.
+        # Full error is logged server-side and stored in DynamoDB for debugging.
+        raise HTTPException(
+            status_code=500,
+            detail="Deployment initiation failed. Check deployment status for details.",
+        )
+
+    return DeployResponse(
+        deployment_id=deployment_id,
+        execution_arn=execution_arn,
+        status=DeploymentStatusEnum.PENDING,
+        message="Deployment started",
+    )
+
+
+def _update_execution_arn(store: DeploymentStateStore, deployment_id: str, execution_arn: str) -> None:
+    from app.services.deployment_state_store import _update_item
+
+    _update_item(
+        store._table,
+        key={"deployment_id": deployment_id},
+        update_expr="SET execution_arn = :arn",
+        expr_values={":arn": execution_arn},
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/deploy/{deployment_id}
+# ---------------------------------------------------------------------------
+
+
+@deployment_app.get("/api/deploy/{deployment_id}")
+async def handle_deploy_status(deployment_id: str) -> dict:
+    """Query deployment state from DynamoDB."""
+    deployment_id = _validate_deployment_id(deployment_id)
+    store = _get_state_store()
+    state = store.get(deployment_id)
+
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Deployment '{deployment_id}' not found")
+
+    return state.model_dump(mode="json")
+
+
+# ---------------------------------------------------------------------------
+# GET /api/deployments?workflow_id=...
+# ---------------------------------------------------------------------------
+
+
+@deployment_app.get("/api/deployments")
+async def handle_list_deployments(
+    request: Request,
+    workflow_id: Optional[str] = None,
+    status: Optional[str] = None,
+) -> list[dict]:
+    """List deployments by workflow_id or user_id (from JWT), optionally filtered by status."""
+    store = _get_state_store()
+    user_id = _get_user_id(request)
+    if user_id:
+        states = store.query_by_user(user_id, status_filter=status)
+    elif workflow_id and workflow_id.strip():
+        states = store.query_by_workflow(workflow_id.strip(), status_filter=status)
+    else:
+        raise HTTPException(status_code=400, detail="workflow_id query parameter is required")
+    return [s.model_dump(mode="json") for s in states]
+
+
+# ---------------------------------------------------------------------------
+# POST /api/test-runtime
+# ---------------------------------------------------------------------------
+
+
+@deployment_app.post("/api/test-runtime", response_model=TestResponse, response_model_by_alias=True)
+async def handle_test_runtime(request: TestRequest) -> TestResponse:
+    """Invoke a deployed runtime via boto3 API.
+
+    Requirements: 9.1, 9.2, 9.4
+    """
+    if request.simulated:
+        return TestResponse(
+            success=True,
+            response="[Simulated] Mock response - deploy a real agent to test.",
+        )
+
+    try:
+        runtime_id = request.runtime_id
+        if not runtime_id:
+            return TestResponse(success=False, error="No runtime_id provided")
+        # SECURITY: Validate runtime_id format
+        if not re.match(r"^[a-zA-Z0-9_-]+$", runtime_id) or len(runtime_id) > 128:
+            return TestResponse(success=False, error="Invalid runtime_id format")
+
+        region = config.aws_region
+
+        # Look up deployment state to get runtime_arn and gateway_config
+        store = _get_state_store()
+        deployment_state = None
+
+        # Find deployment record by runtime_id
+        try:
+            table = store._table
+            deployment_state = _scan_for_runtime(table, runtime_id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to look up deployment state for runtime_id=%s: %s",
+                runtime_id,
+                exc,
+            )
+
+        # Build prompt with conversation history
+        prompt = request.input
+        if request.history:
+            history_text = "\n".join(
+                f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}" for m in request.history[-6:]
+            )
+            prompt = f"Previous conversation:\n{history_text}\n\nUser: {request.input}"
+
+        # Get runtime ARN
+        runtime_arn = ""
+        if deployment_state:
+            runtime_arn = deployment_state.get("runtime_arn", "")
+
+        if not runtime_arn:
+            # Construct ARN directly from runtime_id instead of calling control plane API
+            try:
+                sts = boto3.client("sts", region_name=region)
+                account_id = sts.get_caller_identity()["Account"]
+                runtime_arn = f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{runtime_id}"
+                logger.info("Constructed runtime ARN: %s", runtime_arn)
+            except Exception as e:
+                logger.warning("Could not construct runtime ARN: %s", e)
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Cannot resolve runtime ARN for runtime_id={runtime_id}. Check logs for details.",
+                )
+
+        # Validate auth token if gateway was deployed
+        if deployment_state:
+            gateway_result = deployment_state.get("gateway_result") or {}
+            client_info = gateway_result.get("client_info")
+            if client_info:
+                try:
+                    get_cognito_token(client_info)
+                except Exception:
+                    logger.warning("Could not get Cognito token for gateway auth validation")
+
+        # Invoke runtime via boto3 API
+        try:
+            agentcore_client = _create_agentcore_client(region)
+            invoke_params = {
+                "agentRuntimeArn": runtime_arn,
+                "payload": json.dumps({"prompt": prompt}),
+            }
+            if request.session_id:
+                invoke_params["runtimeSessionId"] = request.session_id
+
+            resp = agentcore_client.invoke_agent_runtime(**invoke_params)
+
+            # The AgentCore data-plane API returns:
+            #   resp['response'] — the agent's response body (str or StreamingBody)
+            #   resp['runtimeSessionId'] — session ID for follow-ups
+            #   resp['statusCode'] — HTTP status from the agent
+            # Legacy path: resp['body'] (streaming body) — fallback only
+            raw_response = resp.get("response", "") or resp.get("body", b"")
+
+            # Handle StreamingBody or bytes
+            if hasattr(raw_response, "read"):
+                raw_response = raw_response.read()
+            if isinstance(raw_response, bytes):
+                raw_response = raw_response.decode("utf-8", errors="replace")
+
+            session_id = resp.get("runtimeSessionId") or resp.get("sessionId")
+
+            # Parse response
+            response_text = _parse_response_body(raw_response)
+
+            return TestResponse(
+                success=True,
+                response=response_text,
+                session_id=session_id,
+                arn=runtime_arn,
+            )
+
+        except Exception as e:
+            error_msg = str(e)
+            if "ResourceNotFound" in error_msg:
+                return TestResponse(success=False, error="Runtime not found. It may have been deleted.")
+            return TestResponse(success=False, error=f"Runtime invocation error: {error_msg}")
+
+    except Exception:
+        logger.exception("Unexpected error in test-runtime")
+        return TestResponse(
+            success=False,
+            error="An internal error occurred. Check server logs for details.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/test-runtime-stream  (SSE streaming)
+# ---------------------------------------------------------------------------
+
+
+@deployment_app.post("/api/test-runtime-stream")
+async def handle_test_runtime_stream(request: TestRequest):
+    """Invoke a deployed runtime and return the response as SSE-formatted text.
+
+    NOTE: API Gateway + Lambda (Mangum) cannot truly stream — the entire
+    response is buffered before delivery. We collect the full response and
+    format it as SSE events so the frontend can reuse its SSE parser.
+    For real streaming, use Lambda Function URLs (future enhancement).
+    """
+    if request.simulated:
+        words = "[Simulated] Mock response - deploy a real agent to test.".split()
+        lines = [f"data: {json.dumps({'type': 'token', 'token': w + ' '})}\n\n" for w in words]
+        lines.append(f"data: {json.dumps({'type': 'done'})}\n\n")
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse("".join(lines), media_type="text/event-stream")
+
+    runtime_id = request.runtime_id
+    if not runtime_id or not re.match(r"^[a-zA-Z0-9_-]+$", runtime_id) or len(runtime_id) > 128:
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(
+            f"data: {json.dumps({'type': 'error', 'error': 'Invalid runtime_id'})}\n\n",
+            media_type="text/event-stream",
+        )
+
+    region = config.aws_region
+
+    # Build prompt
+    prompt = request.input
+    if request.history:
+        history_text = "\n".join(
+            f"{'User' if m['role'] == 'user' else 'Assistant'}: {m['content']}" for m in request.history[-6:]
+        )
+        prompt = f"Previous conversation:\n{history_text}\n\nUser: {request.input}"
+
+    # Resolve runtime ARN
+    store = _get_state_store()
+    deployment_state = None
+    try:
+        table = store._table
+        deployment_state = _scan_for_runtime(table, runtime_id)
+    except Exception:
+        pass
+
+    runtime_arn = (deployment_state or {}).get("runtime_arn", "")
+    if not runtime_arn:
+        try:
+            sts = boto3.client("sts", region_name=region)
+            account_id = sts.get_caller_identity()["Account"]
+            runtime_arn = f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{runtime_id}"
+        except Exception as e:
+            logger.exception("Cannot resolve runtime ARN")
+            from fastapi.responses import PlainTextResponse
+            return PlainTextResponse(
+                f"data: {json.dumps({'type': 'error', 'error': 'Cannot resolve runtime ARN'})}\n\n",
+                media_type="text/event-stream",
+            )
+
+    try:
+        agentcore_client = _create_agentcore_client(region)
+        invoke_params = {
+            "agentRuntimeArn": runtime_arn,
+            "payload": json.dumps({"prompt": prompt}),
+        }
+        if request.session_id:
+            invoke_params["runtimeSessionId"] = request.session_id
+
+        resp = agentcore_client.invoke_agent_runtime(**invoke_params)
+        session_id = resp.get("runtimeSessionId") or resp.get("sessionId")
+
+        raw_response = resp.get("response", "") or resp.get("body", b"")
+        if hasattr(raw_response, "read"):
+            raw_response = raw_response.read()
+        if isinstance(raw_response, bytes):
+            raw_response = raw_response.decode("utf-8", errors="replace")
+
+        parsed = _parse_response_body(str(raw_response))
+
+        # Build SSE events — word-by-word tokens + final done event
+        lines = []
+        words = parsed.split(" ")
+        for i, word in enumerate(words):
+            token = word + (" " if i < len(words) - 1 else "")
+            lines.append(f"data: {json.dumps({'type': 'token', 'token': token})}\n\n")
+        lines.append(f"data: {json.dumps({'type': 'done', 'session_id': session_id, 'full_response': parsed})}\n\n")
+
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse("".join(lines), media_type="text/event-stream")
+
+    except Exception as e:
+        logger.exception("Runtime invocation failed")
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(
+            f"data: {json.dumps({'type': 'error', 'error': 'Internal error'})}\n\n",
+            media_type="text/event-stream",
+        )
+
+
+def _parse_response_body(body: str) -> str:
+    """Parse an invocation response body.
+
+    Handles all AgentCore response formats:
+    1. JSON dict with "response" key (primary AgentCore data-plane format)
+    2. JSON dict with "body" key (legacy/alternative format)
+    3. JSON dict with "output" key (alternative format)
+    4. JSON dict with no known keys (fallback to str(dict))
+    5. JSON non-dict (return str of parsed value)
+    6. SSE stream format (data: prefixed lines)
+    7. Plain text fallback
+    """
+    try:
+        data = json.loads(body)
+        if isinstance(data, dict):
+            # Try known keys in priority order: response > body > output > str(dict)
+            for key in ("response", "body", "output"):
+                val = data.get(key)
+                if val is not None:
+                    return str(val) if not isinstance(val, str) else val
+            # No known keys — return the whole dict as JSON
+            return json.dumps(data)
+        return str(data)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        pass
+
+    # Handle SSE stream format
+    chunks = []
+    for line in body.split("\n"):
+        if line.startswith("data: "):
+            chunks.append(line[6:])
+    if chunks:
+        try:
+            last = json.loads(chunks[-1])
+            return last.get("response", " ".join(chunks))
+        except json.JSONDecodeError:
+            return " ".join(chunks)
+
+    return body
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/runtime/{runtime_id}
+# ---------------------------------------------------------------------------
+
+
+def _validate_runtime_id(runtime_id: str) -> str:
+    """Validate and sanitize a runtime_id to prevent injection.
+
+    SECURITY: Runtime IDs should be alphanumeric with hyphens only (UUID-like).
+    This prevents path traversal or injection via malicious IDs.
+    """
+    if not runtime_id or len(runtime_id) > 128:
+        raise HTTPException(status_code=400, detail="Invalid runtime_id: must be 1-128 characters")
+    if not re.match(r"^[a-zA-Z0-9_-]+$", runtime_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid runtime_id: only alphanumeric, hyphens, and underscores allowed",
+        )
+    return runtime_id
+
+
+def _validate_deployment_id(deployment_id: str) -> str:
+    """Validate and sanitize a deployment_id to prevent injection."""
+    if not deployment_id or len(deployment_id) > 128:
+        raise HTTPException(status_code=400, detail="Invalid deployment_id: must be 1-128 characters")
+    if not re.match(r"^[a-zA-Z0-9_-]+$", deployment_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid deployment_id: only alphanumeric, hyphens, and underscores allowed",
+        )
+    return deployment_id
+
+
+@deployment_app.delete(
+    "/api/runtime/{runtime_id}",
+    response_model=DeleteResponse,
+    response_model_by_alias=True,
+)
+async def handle_delete_runtime(runtime_id: str) -> DeleteResponse:
+    """Delete a runtime and clean up all associated resources."""
+    runtime_id = _validate_runtime_id(runtime_id)
+    cleanup_messages: list[str] = []
+    region = config.aws_region
+
+    # Look up deployment state for gateway config.
+    # Try by runtime_id first, then fall back to deployment_id (covers partial failures
+    # where the agent runtime was never created but gateway/MCP server were).
+    gateway_config = None
+    deployment_record = None
+    try:
+        store = _get_state_store()
+        table = store._table
+        deployment_record = _scan_for_runtime(table, runtime_id)
+        if not deployment_record:
+            # runtime_id might actually be a deployment_id (frontend fallback)
+            direct = store.get(runtime_id)
+            if direct:
+                deployment_record = direct.model_dump(mode="json")
+        if deployment_record:
+            gateway_result = deployment_record.get("gateway_result")
+            if gateway_result:
+                gateway_config = gateway_result
+    except Exception as exc:
+        cleanup_messages.append(f"State lookup error: {exc}")
+
+    # Step 0: Clean up MCP server runtime if one was deployed
+    mcp_server_runtime_id = deployment_record.get("mcp_server_runtime_id") if deployment_record else None
+    if mcp_server_runtime_id:
+        try:
+            mcp_destroy = destroy_runtime(mcp_server_runtime_id, region)
+            cleanup_messages.append(f"MCP server runtime destroyed: {mcp_destroy.get('message', 'ok')}")
+        except Exception as exc:
+            cleanup_messages.append(f"MCP server runtime cleanup error: {exc}")
+
+    # Step 0.5: Clean up policy engine if one was attached
+    # Correct order: detach from gateway → delete policies → delete engine
+    if deployment_record:
+        policy_result = deployment_record.get("policy_result") or {}
+        policy_engine_id = policy_result.get("engine_id")
+        if policy_engine_id:
+            try:
+                agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
+
+                # 1. Detach engine from gateway
+                gw_result = deployment_record.get("gateway_result") or {}
+                gw_id = gw_result.get("gateway_id")
+                if gw_id:
+                    try:
+                        gw_detail = agentcore_ctrl.get_gateway(gatewayIdentifier=gw_id)
+                        agentcore_ctrl.update_gateway(
+                            gatewayIdentifier=gw_id,
+                            name=gw_detail.get("name", ""),
+                            roleArn=gw_detail.get("roleArn", ""),
+                            authorizationConfig=gw_detail.get("authorizationConfig", {}),
+                        )
+                        cleanup_messages.append(f"Policy engine detached from gateway {gw_id}")
+                        # Wait for gateway to stabilize
+                        for _ in range(12):
+                            gw = agentcore_ctrl.get_gateway(gatewayIdentifier=gw_id)
+                            if gw.get("status") == "READY":
+                                break
+                            time.sleep(5)
+                    except Exception as detach_exc:
+                        cleanup_messages.append(f"Policy engine detach warning: {detach_exc}")
+
+                # 2. Delete all policies attached to the engine
+                try:
+                    policies_resp = agentcore_ctrl.list_policies(policyEngineId=policy_engine_id)
+                    for pol in policies_resp.get("policies", policies_resp.get("items", [])):
+                        pol_id = pol.get("policyId")
+                        if pol_id:
+                            agentcore_ctrl.delete_policy(policyEngineId=policy_engine_id, policyId=pol_id)
+                            cleanup_messages.append(f"Policy deleted: {pol_id}")
+                    # Wait for policy deletions to propagate
+                    time.sleep(5)
+                except Exception as pol_exc:
+                    cleanup_messages.append(f"Policy deletion warning: {pol_exc}")
+
+                # 3. Delete the engine itself
+                agentcore_ctrl.delete_policy_engine(policyEngineId=policy_engine_id)
+                cleanup_messages.append(f"Policy engine deleted: {policy_engine_id}")
+            except Exception as exc:
+                cleanup_messages.append(f"Policy engine cleanup error: {exc}")
+
+    # Step 0.6: Clean up memory if one was created
+    if deployment_record:
+        memory_result = deployment_record.get("memory_result") or {}
+        memory_id = memory_result.get("memory_id")
+        if memory_id:
+            try:
+                agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
+                agentcore_ctrl.delete_memory(memoryId=memory_id)
+                cleanup_messages.append(f"Memory deleted: {memory_id}")
+            except Exception as exc:
+                cleanup_messages.append(f"Memory cleanup error: {exc}")
+
+    # Step 0.7: Clean up guardrail if we created it
+    if deployment_record:
+        guardrails_result = deployment_record.get("guardrails_result") or {}
+        if guardrails_result.get("created_by_flow"):
+            guardrail_id = guardrails_result.get("guardrail_id")
+            if guardrail_id:
+                try:
+                    bedrock_client = boto3.client("bedrock", region_name=region)
+                    bedrock_client.delete_guardrail(guardrailIdentifier=guardrail_id)
+                    cleanup_messages.append(f"Guardrail deleted: {guardrail_id}")
+                except Exception as exc:
+                    cleanup_messages.append(f"Guardrail cleanup error: {exc}")
+
+    # Step 1: Clean up gateway resources
+    if gateway_config:
+        try:
+            gw_log = cleanup_gateway_resources(
+                runtime_id=runtime_id,
+                region=region,
+                gateway_config=gateway_config,
+            )
+            cleanup_messages.extend(gw_log)
+        except Exception as exc:
+            cleanup_messages.append(f"Gateway cleanup error: {exc}")
+
+    # Step 1.5: Clean up Knowledge Base resources
+    kb_result = (deployment_record or {}).get("knowledge_base_result") or {}
+    dep_id = (deployment_record or {}).get("deployment_id", "")
+    kb_lambda_suffix = dep_id[:8] if dep_id else ""
+    if kb_lambda_suffix:
+        try:
+            lambda_client = boto3.client("lambda", region_name=region)
+            kb_fn_name = f"AgentCore-KBTool-{kb_lambda_suffix}"
+            try:
+                lambda_client.delete_function(FunctionName=kb_fn_name)
+                cleanup_messages.append(f"KB Lambda deleted: {kb_fn_name}")
+            except Exception:
+                pass  # May not exist
+            iam_client = boto3.client("iam")
+            kb_role_name = f"AgentCoreKBToolRole-{kb_lambda_suffix}"
+            try:
+                # Detach policies and delete role
+                for policy in iam_client.list_attached_role_policies(RoleName=kb_role_name).get("AttachedPolicies", []):
+                    iam_client.detach_role_policy(RoleName=kb_role_name, PolicyArn=policy["PolicyArn"])
+                for policy_name in iam_client.list_role_policies(RoleName=kb_role_name).get("PolicyNames", []):
+                    iam_client.delete_role_policy(RoleName=kb_role_name, PolicyName=policy_name)
+                iam_client.delete_role(RoleName=kb_role_name)
+                cleanup_messages.append(f"KB Lambda role deleted: {kb_role_name}")
+            except Exception:
+                pass  # May not exist
+        except Exception as exc:
+            cleanup_messages.append(f"KB Lambda cleanup error: {exc}")
+    # Delete Knowledge Base if we created it
+    if kb_result.get("created_by_flow"):
+        try:
+            bedrock_agent = boto3.client("bedrock-agent", region_name=region)
+            kb_id = kb_result.get("kb_id")
+            ds_id = kb_result.get("data_source_id")
+            if ds_id and kb_id:
+                bedrock_agent.delete_data_source(knowledgeBaseId=kb_id, dataSourceId=ds_id)
+            if kb_id:
+                bedrock_agent.delete_knowledge_base(knowledgeBaseId=kb_id)
+                cleanup_messages.append(f"Knowledge Base deleted: {kb_id}")
+            # Delete KB IAM role
+            kb_role_arn = kb_result.get("kb_role_arn", "")
+            if kb_role_arn:
+                kb_iam_role_name = kb_role_arn.split("/")[-1] if "/" in kb_role_arn else ""
+                if kb_iam_role_name:
+                    iam_c = boto3.client("iam")
+                    for p in iam_c.list_attached_role_policies(RoleName=kb_iam_role_name).get("AttachedPolicies", []):
+                        iam_c.detach_role_policy(RoleName=kb_iam_role_name, PolicyArn=p["PolicyArn"])
+                    for pn in iam_c.list_role_policies(RoleName=kb_iam_role_name).get("PolicyNames", []):
+                        iam_c.delete_role_policy(RoleName=kb_iam_role_name, PolicyName=pn)
+                    iam_c.delete_role(RoleName=kb_iam_role_name)
+                    cleanup_messages.append(f"KB IAM role deleted: {kb_iam_role_name}")
+        except Exception as exc:
+            cleanup_messages.append(f"KB cleanup error: {exc}")
+
+    # Step 2: Destroy the runtime via boto3
+    try:
+        destroy_result = destroy_runtime(runtime_id, region)
+        cleanup_messages.append(destroy_result.get("message", "Runtime destroy completed"))
+    except Exception:
+        logger.exception("Runtime destroy error for %s", runtime_id)
+        cleanup_messages.append("Runtime destroy error (check server logs)")
+
+    summary = "; ".join(cleanup_messages) if cleanup_messages else "Cleanup completed"
+    return DeleteResponse(success=True, message=summary)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/generate-tool
+# ---------------------------------------------------------------------------
+
+
+@deployment_app.post("/api/generate-tool")
+async def handle_generate_tool(request: ToolGenerateRequest):
+    """Generate a Lambda tool using Claude Sonnet on Bedrock.
+
+    Clarification mode (first message, no history): synchronous (<5s).
+    Generation mode (has history): async self-invoke + polling to avoid
+    API Gateway's 30s hard timeout (Sonnet generation takes 40-60s).
+    """
+    has_prior_context = bool(request.conversation_history) or request.existing_tool is not None
+
+    if not has_prior_context:
+        # Clarification mode — fast, stays synchronous
+        result = generate_tool(
+            prompt=request.prompt,
+            conversation_history=request.conversation_history,
+            existing_tool=request.existing_tool,
+            region=config.aws_region,
+        )
+        return ToolGenerateResponse(**result)
+
+    # Generation mode — async to avoid 30s API Gateway timeout
+    job_id = f"gen-{uuid.uuid4().hex[:12]}"
+
+    table = _get_deploy_table()
+    table.put_item(
+        Item={
+            "deployment_id": job_id,
+            "status": "running",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+    lambda_client = boto3.client("lambda", region_name=config.aws_region)
+    function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
+    lambda_client.invoke(
+        FunctionName=function_name,
+        InvocationType="Event",
+        Payload=json.dumps(
+            {
+                "_async_generate": True,
+                "job_id": job_id,
+                "prompt": request.prompt,
+                "conversation_history": request.conversation_history,
+                "existing_tool": request.existing_tool,
+                "region": config.aws_region,
+            }
+        ).encode(),
+    )
+
+    return {"jobId": job_id, "status": "running"}
+
+
+@deployment_app.get("/api/generate-tool/{job_id}")
+async def handle_get_generate_result(job_id: str):
+    """Poll for async tool generation results."""
+    if not re.match(r"^[a-zA-Z0-9_-]+$", job_id) or len(job_id) > 256:
+        raise HTTPException(status_code=400, detail="Invalid job_id format")
+    table = _get_deploy_table()
+    try:
+        item = table.get_item(Key={"deployment_id": job_id}).get("Item")
+    except Exception as exc:
+        logger.warning("Failed to get generate result for job_id=%s: %s", job_id, exc)
+        item = None
+
+    if not item:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    status = item.get("status", "running")
+    if status == "running":
+        return {"jobId": job_id, "status": "running"}
+
+    # Completed — return full results
+    tool_json = item.get("tool_json")
+    test_cases_json = item.get("test_cases_json")
+    return {
+        "jobId": job_id,
+        "status": "completed",
+        "success": item.get("success", False),
+        "tool": json.loads(tool_json) if tool_json else None,
+        "message": item.get("message", ""),
+        "error": item.get("error"),
+        "responseType": item.get("response_type", "generation"),
+        "testCases": json.loads(test_cases_json) if test_cases_json else [],
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /api/test-tool
+# ---------------------------------------------------------------------------
+
+
+def _get_deploy_table():
+    """Get the DynamoDB deployments table resource."""
+    dynamodb = boto3.resource("dynamodb", region_name=config.aws_region)
+    return dynamodb.Table(DEPLOYMENT_TABLE_NAME)
+
+
+@deployment_app.post("/api/test-tool")
+async def handle_test_tool(request: ToolTestRequest):
+    """Start an async tool test. Returns a testId for polling.
+
+    The actual test runs in an async Lambda invocation to avoid the
+    API Gateway 30s timeout. Poll GET /api/test-tool/{testId} for results.
+    """
+    test_id = f"test-{uuid.uuid4().hex[:12]}"
+
+    # Store initial "running" state
+    table = _get_deploy_table()
+    table.put_item(
+        Item={
+            "deployment_id": test_id,
+            "status": "running",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+    )
+
+    # Async invoke self to run the test (InvocationType=Event returns immediately)
+    lambda_client = boto3.client("lambda", region_name=config.aws_region)
+    function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
+    lambda_client.invoke(
+        FunctionName=function_name,
+        InvocationType="Event",
+        Payload=json.dumps(
+            {
+                "_async_test": True,
+                "test_id": test_id,
+                "lambda_code": request.lambda_code,
+                "test_cases": [tc.model_dump(by_alias=True) for tc in request.test_cases],
+                "region": config.aws_region,
+            }
+        ).encode(),
+    )
+
+    return {"testId": test_id, "status": "running"}
+
+
+@deployment_app.get("/api/test-tool/{test_id}")
+async def handle_get_test_result(test_id: str):
+    """Poll for async test results."""
+    if not re.match(r"^[a-zA-Z0-9_-]+$", test_id) or len(test_id) > 256:
+        raise HTTPException(status_code=400, detail="Invalid test_id format")
+    table = _get_deploy_table()
+    try:
+        item = table.get_item(Key={"deployment_id": test_id}).get("Item")
+    except Exception as exc:
+        logger.warning("Failed to get test result for test_id=%s: %s", test_id, exc)
+        item = None
+
+    if not item:
+        raise HTTPException(status_code=404, detail="Test not found")
+
+    status = item.get("status", "running")
+    if status == "running":
+        return {"testId": test_id, "status": "running"}
+
+    # Test completed — return full results
+    return {
+        "testId": test_id,
+        "status": "completed",
+        "success": item.get("success", False),
+        "allPassed": item.get("all_passed", False),
+        "results": json.loads(item.get("results_json", "[]")),
+        "error": item.get("error"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# POST /api/generate-cfn-template
+# ---------------------------------------------------------------------------
+
+
+@deployment_app.post("/api/generate-cfn-template")
+async def handle_generate_cfn_template(request: DeployRequest):
+    """Generate a downloadable CloudFormation template bundle.
+
+    Returns a presigned S3 URL to download the zip, or the zip bytes
+    directly if no S3 bucket is configured.
+    """
+    try:
+        from app.services.cfn_template_generator import CfnTemplateGenerator
+
+        generator = CfnTemplateGenerator()
+        bundle = generator.generate(request)
+        zip_bytes = bundle.to_zip()
+
+        # Try to upload to S3 and return presigned URL
+        bucket = os.environ.get("ARTIFACTS_BUCKET_NAME", "")
+        if bucket:
+            s3_client = boto3.client("s3", region_name=config.aws_region)
+            s3_key = f"cfn-templates/{bundle.deployment_name}-{uuid.uuid4().hex[:8]}.zip"
+            s3_client.put_object(Bucket=bucket, Key=s3_key, Body=zip_bytes)
+
+            url = s3_client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": bucket, "Key": s3_key},
+                ExpiresIn=3600,
+            )
+            return {"download_url": url, "filename": f"{bundle.deployment_name}-cfn.zip"}
+
+        # Fallback: return base64-encoded zip
+        import base64
+
+        return {
+            "zip_base64": base64.b64encode(zip_bytes).decode(),
+            "filename": f"{bundle.deployment_name}-cfn.zip",
+        }
+
+    except Exception as e:
+        logger.exception("CFN template generation failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ---------------------------------------------------------------------------
+# Mangum handler (Lambda entry point)
+# ---------------------------------------------------------------------------
+
+_mangum_handler = Mangum(deployment_app, lifespan="off")
+
+
+def handler(event, context):
+    """Lambda entry point. Intercepts async events before Mangum."""
+    if isinstance(event, dict):
+        if event.get("_async_test"):
+            return _handle_async_test(event)
+        if event.get("_async_generate"):
+            return _handle_async_generate(event)
+
+    # Normal API Gateway request → Mangum/FastAPI
+    return _mangum_handler(event, context)
+
+
+def _handle_async_test(event: dict):
+    """Run tool test and store results in DynamoDB."""
+    test_id = event["test_id"]
+    table = _get_deploy_table()
+
+    try:
+        result = test_tool(
+            lambda_code=event["lambda_code"],
+            test_cases=event["test_cases"],
+            region=event.get("region", "us-east-1"),
+        )
+
+        table.update_item(
+            Key={"deployment_id": test_id},
+            UpdateExpression="SET #s = :s, success = :ok, all_passed = :ap, results_json = :rj, #e = :e",
+            ExpressionAttributeNames={"#s": "status", "#e": "error"},
+            ExpressionAttributeValues={
+                ":s": "completed",
+                ":ok": result.get("success", False),
+                ":ap": result.get("allPassed", False),
+                ":rj": json.dumps(result.get("results", [])),
+                ":e": result.get("error"),
+            },
+        )
+    except Exception as exc:
+        logger.exception("Async tool test failed: %s", exc)
+        table.update_item(
+            Key={"deployment_id": test_id},
+            UpdateExpression="SET #s = :s, #e = :e",
+            ExpressionAttributeNames={"#s": "status", "#e": "error"},
+            ExpressionAttributeValues={":s": "completed", ":e": str(exc)},
+        )
+
+
+def _handle_async_generate(event: dict):
+    """Run tool generation in background and store results in DynamoDB."""
+    job_id = event["job_id"]
+    table = _get_deploy_table()
+
+    try:
+        result = generate_tool(
+            prompt=event["prompt"],
+            conversation_history=event.get("conversation_history"),
+            existing_tool=event.get("existing_tool"),
+            region=event.get("region", "us-east-1"),
+        )
+
+        tool_data = result.get("tool")
+        test_cases = result.get("testCases", [])
+
+        table.update_item(
+            Key={"deployment_id": job_id},
+            UpdateExpression="SET #s = :s, success = :ok, message = :msg, #e = :e, response_type = :rt, tool_json = :tj, test_cases_json = :tcj",
+            ExpressionAttributeNames={"#s": "status", "#e": "error"},
+            ExpressionAttributeValues={
+                ":s": "completed",
+                ":ok": result.get("success", False),
+                ":msg": result.get("message", ""),
+                ":e": result.get("error"),
+                ":rt": result.get("responseType", "generation"),
+                ":tj": json.dumps(tool_data) if tool_data else None,
+                ":tcj": json.dumps(test_cases) if test_cases else "[]",
+            },
+        )
+    except Exception as exc:
+        logger.exception("Async tool generation failed: %s", exc)
+        table.update_item(
+            Key={"deployment_id": job_id},
+            UpdateExpression="SET #s = :s, success = :ok, #e = :e",
+            ExpressionAttributeNames={"#s": "status", "#e": "error"},
+            ExpressionAttributeValues={":s": "completed", ":ok": False, ":e": str(exc)},
+        )

@@ -23,6 +23,8 @@ from aws_cdk import aws_cloudfront as cloudfront
 from aws_cdk import aws_cloudfront_origins as origins
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
+from aws_cdk import aws_events as events
+from aws_cdk import aws_scheduler as scheduler
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as _lambda
 from aws_cdk import aws_logs as logs
@@ -59,6 +61,8 @@ class PlatformStack(cdk.Stack):
         self.workflows_table = self._create_workflows_table()
         self.deployments_table = self._create_deployments_table()
         self.flows_table = self._create_flows_table()
+        self.triggers_table = self._create_triggers_table()
+        self.trigger_invocations_table = self._create_trigger_invocations_table()
         self.logging_bucket = self._create_logging_bucket()
         self.artifacts_bucket = self._create_artifacts_bucket()
         self._upload_agentcore_deps()
@@ -66,8 +70,15 @@ class PlatformStack(cdk.Stack):
         # --- SSM Parameters ---
         self._create_ssm_parameters()
 
-        # --- Lambda Functions ---
+        # --- Lambda code asset (shared by all Lambdas) ---
         self.backend_code = self._get_backend_code()
+
+        # --- Trigger infrastructure (Scheduler group + router Lambda + roles) ---
+        self.trigger_schedule_group = self._create_trigger_schedule_group()
+        self.trigger_router_lambda = self._create_trigger_router_lambda()
+        self.trigger_scheduler_role = self._create_trigger_scheduler_role()
+
+        # --- Lambda Functions ---
         self.workflow_lambda = self._create_workflow_lambda()
         self.deployment_lambda = self._create_deployment_lambda()
         self.step_lambdas = self._create_step_lambdas()
@@ -181,6 +192,152 @@ class PlatformStack(cdk.Stack):
                 point_in_time_recovery_enabled=True,
             ),
         )
+
+    def _create_triggers_table(self) -> dynamodb.Table:
+        """DynamoDB table for agent triggers (Task 01)."""
+        table = dynamodb.Table(
+            self,
+            "TriggersTable",
+            table_name=f"{self._project}-{self._env}-triggers",
+            partition_key=dynamodb.Attribute(
+                name="trigger_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+        table.add_global_secondary_index(
+            index_name="user_id-index",
+            partition_key=dynamodb.Attribute(
+                name="user_id", type=dynamodb.AttributeType.STRING
+            ),
+        )
+        table.add_global_secondary_index(
+            index_name="deployment_id-index",
+            partition_key=dynamodb.Attribute(
+                name="deployment_id", type=dynamodb.AttributeType.STRING
+            ),
+        )
+        return table
+
+    def _create_trigger_invocations_table(self) -> dynamodb.Table:
+        """Append-only history of trigger executions. Entries expire via TTL (90d)."""
+        return dynamodb.Table(
+            self,
+            "TriggerInvocationsTable",
+            table_name=f"{self._project}-{self._env}-trigger-invocations",
+            partition_key=dynamodb.Attribute(
+                name="trigger_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="invoked_at", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            time_to_live_attribute="ttl",
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Trigger infrastructure
+    # ------------------------------------------------------------------
+
+    def _create_trigger_schedule_group(self) -> scheduler.CfnScheduleGroup:
+        """Dedicated EventBridge Scheduler group for our triggers."""
+        return scheduler.CfnScheduleGroup(
+            self,
+            "TriggerScheduleGroup",
+            name=f"{self._project}-{self._env}-triggers",
+        )
+
+    def _create_trigger_router_lambda(self) -> _lambda.Function:
+        """Lambda invoked by Scheduler and EventBridge when a trigger fires.
+
+        It reads the trigger config from DynamoDB and invokes the target
+        AgentCore runtime via the data-plane API.
+        """
+        role = iam.Role(
+            self,
+            "TriggerRouterLambdaRole",
+            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
+            managed_policies=[
+                iam.ManagedPolicy.from_aws_managed_policy_name(
+                    "service-role/AWSLambdaBasicExecutionRole"
+                ),
+            ],
+        )
+        self.triggers_table.grant_read_write_data(role)
+        self.trigger_invocations_table.grant_read_write_data(role)
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock-agentcore:InvokeAgentRuntime",
+                    "bedrock-agentcore-control:GetAgentRuntime",
+                ],
+                resources=["*"],  # runtime ARN is user-provided per trigger
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["sts:GetCallerIdentity"],
+                resources=["*"],
+            )
+        )
+
+        fn = _lambda.Function(
+            self,
+            "TriggerRouterLambda",
+            function_name=f"{self._project}-{self._env}-trigger-router",
+            runtime=_lambda.Runtime.PYTHON_3_12,
+            handler="src/app/trigger_router_handler.handler",
+            code=self.backend_code,
+            memory_size=256,
+            timeout=Duration.seconds(60),
+            role=role,
+            tracing=_lambda.Tracing.ACTIVE,
+            environment={
+                "TRIGGERS_TABLE_NAME": self.triggers_table.table_name,
+                "TRIGGER_INVOCATIONS_TABLE_NAME": self.trigger_invocations_table.table_name,
+                "ENVIRONMENT": self._env,
+                "APP_AWS_REGION": self.region,
+                "PYTHONPATH": "/var/task/src:/var/task:/var/task/lib",
+            },
+            log_group=logs.LogGroup(
+                self,
+                "TriggerRouterLambdaLogGroup",
+                log_group_name=f"/aws/lambda/{self._project}-{self._env}-trigger-router",
+                retention=logs.RetentionDays.ONE_MONTH,
+                removal_policy=RemovalPolicy.DESTROY,
+            ),
+        )
+        return fn
+
+    def _create_trigger_scheduler_role(self) -> iam.Role:
+        """Role assumed by EventBridge Scheduler to invoke the router Lambda."""
+        role = iam.Role(
+            self,
+            "TriggerSchedulerInvokeRole",
+            assumed_by=iam.ServicePrincipal(
+                "scheduler.amazonaws.com",
+                conditions={
+                    "StringEquals": {"aws:SourceAccount": self.account},
+                },
+            ),
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["lambda:InvokeFunction"],
+                resources=[self.trigger_router_lambda.function_arn],
+            )
+        )
+        return role
 
     # ------------------------------------------------------------------
     # SSM Parameters
@@ -335,6 +492,9 @@ class PlatformStack(cdk.Stack):
         self.workflows_table.grant_read_write_data(role)
         # DynamoDB flows table: read/write
         self.flows_table.grant_read_write_data(role)
+        # DynamoDB triggers tables: read/write
+        self.triggers_table.grant_read_write_data(role)
+        self.trigger_invocations_table.grant_read_write_data(role)
         # SSM read for app config
         role.add_to_policy(
             iam.PolicyStatement(
@@ -344,6 +504,101 @@ class PlatformStack(cdk.Stack):
                     "ssm:GetParametersByPath",
                 ],
                 resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter/agentcore-workflow/{self._env}/*"],
+            )
+        )
+
+        # --- Trigger management permissions ---
+        # EventBridge Scheduler
+        schedule_group_arn = (
+            f"arn:aws:scheduler:{self.region}:{self.account}:schedule-group/"
+            f"{self._project}-{self._env}-triggers"
+        )
+        schedule_arn_pattern = (
+            f"arn:aws:scheduler:{self.region}:{self.account}:schedule/"
+            f"{self._project}-{self._env}-triggers/*"
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "scheduler:CreateSchedule",
+                    "scheduler:UpdateSchedule",
+                    "scheduler:DeleteSchedule",
+                    "scheduler:GetSchedule",
+                    "scheduler:ListSchedules",
+                ],
+                resources=[schedule_arn_pattern, schedule_group_arn],
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["scheduler:GetScheduleGroup", "scheduler:CreateScheduleGroup"],
+                resources=[schedule_group_arn],
+            )
+        )
+        # EventBridge rules (default bus)
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "events:PutRule",
+                    "events:DeleteRule",
+                    "events:DescribeRule",
+                    "events:DisableRule",
+                    "events:EnableRule",
+                    "events:PutTargets",
+                    "events:RemoveTargets",
+                    "events:ListTargetsByRule",
+                ],
+                resources=[
+                    f"arn:aws:events:{self.region}:{self.account}:rule/"
+                    f"{self._project}-{self._env}-*"
+                ],
+            )
+        )
+        # Secrets Manager for webhook HMAC secrets
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "secretsmanager:CreateSecret",
+                    "secretsmanager:UpdateSecret",
+                    "secretsmanager:PutSecretValue",
+                    "secretsmanager:GetSecretValue",
+                    "secretsmanager:DescribeSecret",
+                    "secretsmanager:DeleteSecret",
+                    "secretsmanager:TagResource",
+                ],
+                resources=[
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:"
+                    f"/agentcore/{self._env}/trigger-webhook/*"
+                ],
+            )
+        )
+        # Pass the scheduler role to EventBridge Scheduler (for schedule targets)
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["iam:PassRole"],
+                resources=[self.trigger_scheduler_role.role_arn],
+                conditions={
+                    "StringEquals": {
+                        "iam:PassedToService": "scheduler.amazonaws.com"
+                    }
+                },
+            )
+        )
+        # Manage Lambda resource policy so EventBridge rules can invoke the router
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["lambda:AddPermission", "lambda:RemovePermission"],
+                resources=[self.trigger_router_lambda.function_arn],
+            )
+        )
+        # Invoke AgentCore runtime for manual "test trigger" requests
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock-agentcore:InvokeAgentRuntime",
+                    "sts:GetCallerIdentity",
+                ],
+                resources=["*"],
             )
         )
 
@@ -361,6 +616,13 @@ class PlatformStack(cdk.Stack):
             environment={
                 "DYNAMODB_TABLE_NAME": self.workflows_table.table_name,
                 "DYNAMODB_FLOWS_TABLE_NAME": self.flows_table.table_name,
+                "TRIGGERS_TABLE_NAME": self.triggers_table.table_name,
+                "TRIGGER_INVOCATIONS_TABLE_NAME": self.trigger_invocations_table.table_name,
+                "TRIGGER_SCHEDULE_GROUP": f"{self._project}-{self._env}-triggers",
+                "TRIGGER_SCHEDULER_ROLE_ARN": self.trigger_scheduler_role.role_arn,
+                "TRIGGER_ROUTER_LAMBDA_ARN": self.trigger_router_lambda.function_arn,
+                "TRIGGER_SECRET_PREFIX": f"/agentcore/{self._env}/trigger-webhook",
+                "PROJECT_NAME": self._project,
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
                 "POWERTOOLS_SERVICE_NAME": "workflow",
@@ -1199,6 +1461,33 @@ class PlatformStack(cdk.Stack):
             authorizer=jwt_authorizer,
         )
 
+        # --- Trigger routes (authenticated) ---
+        api.add_routes(
+            path="/api/triggers",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+            integration=workflow_integration,
+            authorizer=jwt_authorizer,
+        )
+        api.add_routes(
+            path="/api/triggers/{proxy+}",
+            methods=[
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.PUT,
+                apigwv2.HttpMethod.DELETE,
+                apigwv2.HttpMethod.POST,
+            ],
+            integration=workflow_integration,
+            authorizer=jwt_authorizer,
+        )
+
+        # --- Webhook route (public, HMAC-verified in Lambda) ---
+        api.add_routes(
+            path="/api/webhooks/{webhook_path}",
+            methods=[apigwv2.HttpMethod.POST],
+            integration=workflow_integration,
+            # intentionally no authorizer: verified via HMAC in the Lambda
+        )
+
         # --- Health check route ---
         api.add_routes(
             path="/health",
@@ -1439,6 +1728,7 @@ class PlatformStack(cdk.Stack):
         all_fns: dict[str, _lambda.Function] = {
             "workflow": self.workflow_lambda,
             "deployment": self.deployment_lambda,
+            "trigger-router": self.trigger_router_lambda,
             **{f"step-{k}": v for k, v in self.step_lambdas.items()},
         }
         for name, fn in all_fns.items():

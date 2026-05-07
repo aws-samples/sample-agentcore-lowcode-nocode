@@ -67,6 +67,7 @@ class PlatformStack(cdk.Stack):
         self.versions_table = self._create_versions_table()
         self.a2a_configs_table = self._create_a2a_configs_table()
         self.a2a_tasks_table = self._create_a2a_tasks_table()
+        self.guardrails_table = self._create_guardrails_table()
         self.logging_bucket = self._create_logging_bucket()
         self.artifacts_bucket = self._create_artifacts_bucket()
         self._upload_agentcore_deps()
@@ -280,6 +281,23 @@ class PlatformStack(cdk.Stack):
             table_name=f"{self._project}-{self._env}-a2a-configs",
             partition_key=dynamodb.Attribute(
                 name="deployment_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_guardrails_table(self) -> dynamodb.Table:
+        """Guardrail ownership mapping (Task 06). PK=guardrail_id."""
+        return dynamodb.Table(
+            self,
+            "GuardrailsTable",
+            table_name=f"{self._project}-{self._env}-guardrails",
+            partition_key=dynamodb.Attribute(
+                name="guardrail_id", type=dynamodb.AttributeType.STRING
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.DESTROY,
@@ -595,6 +613,23 @@ class PlatformStack(cdk.Stack):
         # A2A tables: read/write (Task 05)
         self.a2a_configs_table.grant_read_write_data(role)
         self.a2a_tasks_table.grant_read_write_data(role)
+        # Guardrails table: read/write (Task 06)
+        self.guardrails_table.grant_read_write_data(role)
+        # Bedrock Guardrails management + test
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock:CreateGuardrail",
+                    "bedrock:UpdateGuardrail",
+                    "bedrock:DeleteGuardrail",
+                    "bedrock:GetGuardrail",
+                    "bedrock:ListGuardrails",
+                    "bedrock:CreateGuardrailVersion",
+                    "bedrock:ApplyGuardrail",
+                ],
+                resources=["*"],
+            )
+        )
         # SSM read for app config
         role.add_to_policy(
             iam.PolicyStatement(
@@ -739,6 +774,7 @@ class PlatformStack(cdk.Stack):
                 "VERSIONS_TABLE_NAME": self.versions_table.table_name,
                 "A2A_CONFIGS_TABLE_NAME": self.a2a_configs_table.table_name,
                 "A2A_TASKS_TABLE_NAME": self.a2a_tasks_table.table_name,
+                "GUARDRAILS_TABLE_NAME": self.guardrails_table.table_name,
                 "PROJECT_NAME": self._project,
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
@@ -1673,6 +1709,25 @@ class PlatformStack(cdk.Stack):
             path="/a2a/{deployment_id}",
             methods=[apigwv2.HttpMethod.POST],
             integration=workflow_integration,
+        )
+
+        # --- Guardrails management (Task 06) ---
+        api.add_routes(
+            path="/api/guardrails",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+            integration=workflow_integration,
+            authorizer=jwt_authorizer,
+        )
+        api.add_routes(
+            path="/api/guardrails/{proxy+}",
+            methods=[
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.PUT,
+                apigwv2.HttpMethod.DELETE,
+                apigwv2.HttpMethod.POST,
+            ],
+            integration=workflow_integration,
+            authorizer=jwt_authorizer,
         )
 
         # --- Health check route ---

@@ -6,6 +6,8 @@ import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration } from '../../types/components';
 import { authFetch } from '../../auth/authFetch';
 import TriggersPanel from '../triggers/TriggersPanel';
+import VersionHistory from '../versions/VersionHistory';
+import { createSnapshot } from '../../services/versions';
 import { WORKFLOW_TEMPLATES } from '../../data/templates';
 import { useWorkflowStore } from '../../store/workflowStore';
 import type { AgentCoreComponentType } from '../../types/workflow';
@@ -94,7 +96,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
   const [, setTestResult] = useState<TestResult | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [activeTab, setActiveTab] = useState<'deploy' | 'chat' | 'triggers'>('deploy');
+  const [activeTab, setActiveTab] = useState<'deploy' | 'chat' | 'triggers' | 'versions'>('deploy');
   // Surfaces the backing deployment id (used by Triggers tab) — set once the SFN job returns.
   const [deploymentIdState, setDeploymentIdState] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -299,6 +301,38 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
             });
             setActiveTab('chat');
             warmupRuntime(rId, rEndpoint);
+            // Auto-capture a version snapshot (best-effort, non-blocking)
+            void createSnapshot({
+              deployment_id: deploymentId,
+              runtime_id: rId,
+              runtime_arn: statusResult.runtime_arn || statusResult.runtimeArn,
+              workflow_snapshot: {
+                nodeId,
+                templateId: templateId ?? null,
+                config: fullConfig,
+                connectedTools,
+                gatewayConfig,
+                gatewayTools,
+                memoryConfig,
+                policyConfig,
+                guardrailsConfig,
+                evaluationConfig,
+                knowledgeBaseConfig,
+                mcpServerConfig,
+                customTools,
+              },
+              model_config_snapshot: {
+                provider: (fullConfig as unknown as Record<string, unknown>)?.modelProvider,
+                modelId: (fullConfig as unknown as Record<string, unknown>)?.modelId,
+              },
+              tools_config: [...connectedTools.map((t) => ({ id: t })), ...gatewayTools.map((t) => ({ id: t }))],
+              system_prompt: (fullConfig as unknown as { systemPrompt?: string })?.systemPrompt,
+              memory_config: memoryConfig ?? undefined,
+              policy_config: policyConfig ?? undefined,
+              guardrails_config: guardrailsConfig ?? undefined,
+              knowledge_base_config: knowledgeBaseConfig ?? undefined,
+              change_description: templateId ? `Deployed template ${templateId}` : 'Deployed from canvas',
+            }).catch((err) => console.warn('version snapshot failed:', err));
             return;
           }
 
@@ -767,6 +801,22 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
               <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
             )}
           </button>
+          <button
+            onClick={() => setActiveTab('versions')}
+            disabled={deploymentStatus.state !== 'deployed'}
+            className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${
+              activeTab === 'versions'
+                ? 'text-[#0972d3]'
+                : deploymentStatus.state === 'deployed'
+                  ? 'text-[#5f6b7a] hover:text-[#16191f]'
+                  : 'text-[#d1d5db] cursor-not-allowed'
+            }`}
+          >
+            Versions
+            {activeTab === 'versions' && (
+              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
+            )}
+          </button>
         </div>
 
         {/* Content */}
@@ -1186,10 +1236,16 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
               onClose={() => setActiveTab('deploy')}
             />
           )}
+          {activeTab === 'versions' && deploymentStatus.state === 'deployed' && (
+            <VersionHistory
+              deploymentId={deploymentIdState || deploymentStatus.runtimeId || ''}
+              onClose={() => setActiveTab('deploy')}
+            />
+          )}
         </div>
 
         {/* Footer with Deploy button — visible on deploy tab */}
-        {activeTab !== 'chat' && activeTab !== 'triggers' && (
+        {activeTab !== 'chat' && activeTab !== 'triggers' && activeTab !== 'versions' && (
         <div className="border-t border-[#e9ebed] bg-[#fafafa] flex-shrink-0 p-3.5 space-y-2">
           {activeTab === 'deploy' && (deploymentStatus.state === 'idle' || deploymentStatus.state === 'error') && (
             <button

@@ -64,6 +64,7 @@ class PlatformStack(cdk.Stack):
         self.triggers_table = self._create_triggers_table()
         self.trigger_invocations_table = self._create_trigger_invocations_table()
         self.approvals_table = self._create_approvals_table()
+        self.versions_table = self._create_versions_table()
         self.logging_bucket = self._create_logging_bucket()
         self.artifacts_bucket = self._create_artifacts_bucket()
         self._upload_agentcore_deps()
@@ -240,6 +241,29 @@ class PlatformStack(cdk.Stack):
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.DESTROY,
             time_to_live_attribute="ttl",
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_versions_table(self) -> dynamodb.Table:
+        """DynamoDB table for agent version snapshots (Task 03).
+
+        PK=deployment_id, SK=version(Number). Append-only history.
+        """
+        return dynamodb.Table(
+            self,
+            "VersionsTable",
+            table_name=f"{self._project}-{self._env}-versions",
+            partition_key=dynamodb.Attribute(
+                name="deployment_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="version", type=dynamodb.AttributeType.NUMBER
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
             encryption=dynamodb.TableEncryption.AWS_MANAGED,
             point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
                 point_in_time_recovery_enabled=True,
@@ -529,6 +553,8 @@ class PlatformStack(cdk.Stack):
         self.trigger_invocations_table.grant_read_write_data(role)
         # Approvals table: read/write (Task 02)
         self.approvals_table.grant_read_write_data(role)
+        # Versions table: read/write (Task 03)
+        self.versions_table.grant_read_write_data(role)
         # SSM read for app config
         role.add_to_policy(
             iam.PolicyStatement(
@@ -657,6 +683,7 @@ class PlatformStack(cdk.Stack):
                 "TRIGGER_ROUTER_LAMBDA_ARN": self.trigger_router_lambda.function_arn,
                 "TRIGGER_SECRET_PREFIX": f"/agentcore/{self._env}/trigger-webhook",
                 "APPROVALS_TABLE_NAME": self.approvals_table.table_name,
+                "VERSIONS_TABLE_NAME": self.versions_table.table_name,
                 "PROJECT_NAME": self._project,
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
@@ -1532,6 +1559,23 @@ class PlatformStack(cdk.Stack):
         )
         api.add_routes(
             path="/api/approvals/{proxy+}",
+            methods=[
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.POST,
+            ],
+            integration=workflow_integration,
+            authorizer=jwt_authorizer,
+        )
+
+        # --- Version routes (Task 03) ---
+        api.add_routes(
+            path="/api/deployments/{deployment_id}/versions",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+            integration=workflow_integration,
+            authorizer=jwt_authorizer,
+        )
+        api.add_routes(
+            path="/api/deployments/{deployment_id}/versions/{proxy+}",
             methods=[
                 apigwv2.HttpMethod.GET,
                 apigwv2.HttpMethod.POST,

@@ -14,6 +14,8 @@ import { MemoryConfigurationModal } from './components/modals/MemoryConfiguratio
 import { PolicyConfigurationModal } from './components/modals/PolicyConfigurationModal';
 import { KnowledgeBaseConfigModal } from './components/modals/KnowledgeBaseConfigModal';
 import { GuardrailsConfigurationModal } from './components/modals/GuardrailsConfigurationModal';
+import { ApprovalInbox } from './components/approvals/ApprovalInbox';
+import { approvalStats } from './services/approvals';
 import { useWorkflowStore } from './store/workflowStore';
 import { useFlowStore } from './store/flowStore';
 import { useAutoSave } from './hooks/useAutoSave';
@@ -35,6 +37,8 @@ function App() {
   const [showDeployPanel, setShowDeployPanel] = useState(false);
   const [showTemplateGallery, setShowTemplateGallery] = useState(false);
   const [showToolGenerator, setShowToolGenerator] = useState(false);
+  const [showApprovalInbox, setShowApprovalInbox] = useState(false);
+  const [pendingApprovalCount, setPendingApprovalCount] = useState<number>(0);
   const [restoredDeployment, setRestoredDeployment] = useState<{
     runtimeId: string;
     endpoint: string;
@@ -236,6 +240,25 @@ function App() {
   const { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig } = getConnectedToolsAndGateway();
 
   // Handle pending node creation - open modal when node appears
+  // Poll pending approvals for badge (15s interval)
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const s = await approvalStats();
+        if (!cancelled) setPendingApprovalCount(s.pending);
+      } catch {
+        // unauthenticated or network — ignore
+      }
+    };
+    void poll();
+    const id = setInterval(poll, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+
   useEffect(() => {
     if (pendingNodeConfig) {
       const newNode = nodes.find((n) =>
@@ -398,6 +421,30 @@ function App() {
                 <path d="M22 2L11 13" /><path d="M22 2l-7 20-4-9-9-4 20-7z" />
               </svg>
               Deploy
+            </button>
+            <button
+              onClick={() => setShowApprovalInbox(true)}
+              className="relative px-3 py-1.5 rounded-md text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+              title="Approval Inbox"
+            >
+              Inbox
+              {pendingApprovalCount > 0 && (
+                <span
+                  style={{
+                    position: 'absolute',
+                    top: -4,
+                    right: -4,
+                    background: '#ff9900',
+                    color: '#232f3e',
+                    fontSize: 10,
+                    fontWeight: 700,
+                    padding: '2px 6px',
+                    borderRadius: 10,
+                  }}
+                >
+                  {pendingApprovalCount}
+                </span>
+              )}
             </button>
             <button
               onClick={() => signOut()}
@@ -578,6 +625,26 @@ function App() {
         onClose={() => setShowToolGenerator(false)}
         onAddToolToCanvas={handleAddGeneratedTool}
       />
+
+      {/* Approval Inbox drawer (Task 02) */}
+      {showApprovalInbox && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            right: 0,
+            width: 560,
+            maxWidth: '100vw',
+            height: '100vh',
+            background: '#fff',
+            boxShadow: '-2px 0 8px rgba(0,0,0,0.15)',
+            zIndex: 1000,
+            overflowY: 'auto',
+          }}
+        >
+          <ApprovalInbox onClose={() => setShowApprovalInbox(false)} />
+        </div>
+      )}
     </div>
   );
 }

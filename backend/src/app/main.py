@@ -15,6 +15,7 @@ from app.routers.flows import router as flows_router
 from app.routers.tools import router as tools_router
 from app.routers.triggers import router as triggers_router
 from app.routers.triggers import webhook_router as webhooks_router
+from app.routers.approvals import router as approvals_router
 from app.services.config import load_config
 from app.services.dynamodb_storage import DynamoDBWorkflowStorage
 from app.services.flow_storage import DynamoDBFlowStorage, set_flow_storage
@@ -80,6 +81,7 @@ app.include_router(deployment_router, prefix="/api", tags=["deployment"])
 app.include_router(tools_router, prefix="/api", tags=["tools"])
 app.include_router(triggers_router, prefix="/api", tags=["triggers"])
 app.include_router(webhooks_router, prefix="/api", tags=["webhooks"])
+app.include_router(approvals_router, prefix="/api", tags=["approvals"])
 
 
 @app.get("/health")

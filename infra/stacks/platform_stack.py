@@ -63,6 +63,7 @@ class PlatformStack(cdk.Stack):
         self.flows_table = self._create_flows_table()
         self.triggers_table = self._create_triggers_table()
         self.trigger_invocations_table = self._create_trigger_invocations_table()
+        self.approvals_table = self._create_approvals_table()
         self.logging_bucket = self._create_logging_bucket()
         self.artifacts_bucket = self._create_artifacts_bucket()
         self._upload_agentcore_deps()
@@ -244,6 +245,37 @@ class PlatformStack(cdk.Stack):
                 point_in_time_recovery_enabled=True,
             ),
         )
+
+    def _create_approvals_table(self) -> dynamodb.Table:
+        """DynamoDB table for human-in-the-loop approval requests (Task 02)."""
+        table = dynamodb.Table(
+            self,
+            "ApprovalsTable",
+            table_name=f"{self._project}-{self._env}-approvals",
+            partition_key=dynamodb.Attribute(
+                name="approval_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            time_to_live_attribute="ttl",
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+        table.add_global_secondary_index(
+            index_name="user_id-index",
+            partition_key=dynamodb.Attribute(
+                name="user_id", type=dynamodb.AttributeType.STRING
+            ),
+        )
+        table.add_global_secondary_index(
+            index_name="deployment_id-index",
+            partition_key=dynamodb.Attribute(
+                name="deployment_id", type=dynamodb.AttributeType.STRING
+            ),
+        )
+        return table
 
     # ------------------------------------------------------------------
     # Trigger infrastructure
@@ -495,6 +527,8 @@ class PlatformStack(cdk.Stack):
         # DynamoDB triggers tables: read/write
         self.triggers_table.grant_read_write_data(role)
         self.trigger_invocations_table.grant_read_write_data(role)
+        # Approvals table: read/write (Task 02)
+        self.approvals_table.grant_read_write_data(role)
         # SSM read for app config
         role.add_to_policy(
             iam.PolicyStatement(
@@ -622,6 +656,7 @@ class PlatformStack(cdk.Stack):
                 "TRIGGER_SCHEDULER_ROLE_ARN": self.trigger_scheduler_role.role_arn,
                 "TRIGGER_ROUTER_LAMBDA_ARN": self.trigger_router_lambda.function_arn,
                 "TRIGGER_SECRET_PREFIX": f"/agentcore/{self._env}/trigger-webhook",
+                "APPROVALS_TABLE_NAME": self.approvals_table.table_name,
                 "PROJECT_NAME": self._project,
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
@@ -1486,6 +1521,23 @@ class PlatformStack(cdk.Stack):
             methods=[apigwv2.HttpMethod.POST],
             integration=workflow_integration,
             # intentionally no authorizer: verified via HMAC in the Lambda
+        )
+
+        # --- Approval routes (Task 02) ---
+        api.add_routes(
+            path="/api/approvals",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+            integration=workflow_integration,
+            authorizer=jwt_authorizer,
+        )
+        api.add_routes(
+            path="/api/approvals/{proxy+}",
+            methods=[
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.POST,
+            ],
+            integration=workflow_integration,
+            authorizer=jwt_authorizer,
         )
 
         # --- Health check route ---

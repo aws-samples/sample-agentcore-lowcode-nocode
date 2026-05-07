@@ -105,6 +105,13 @@
 - If AWS CLI's profile has a default region of `us-west-2`, early steps use that and fail.
 - **Rule**: Always run with `AWS_REGION=us-east-1 ./scripts/deploy.sh` explicitly.
 
+### Lesson: Lambda resource policy 20 KiB limit and API Gateway routes
+- CDK's L2 `HttpLambdaIntegration` adds one `AWS::Lambda::Permission` per route, each ~250 bytes in the Lambda resource policy.
+- At ~80+ routes the aggregate policy exceeds AWS's hard 20480-byte limit and deploy fails with `Resource handler returned message: "The final policy size (20900) is bigger than the limit (20480)"`.
+- `ANY` vs specific methods does not help: CDK still emits a permission per route regardless of method.
+- **Fix**: use L1 `CfnIntegration` + `CfnRoute` + a single wildcard `lambda:InvokeFunction` permission with `source_arn=arn:aws:execute-api:<region>:<account>:<api_id>/*/*`. One permission covers all routes on that API.
+- **Rule**: Budget for ~60 CDK-managed routes before you hit the limit. If you need more, collapse to L1 constructs with a shared permission.
+
 ### Lesson: EventBridge Scheduler requires dedicated invoke role
 - `scheduler:CreateSchedule` with a Lambda target needs `RoleArn` pointing to a role that Scheduler can assume (principal `scheduler.amazonaws.com`) AND that has `lambda:InvokeFunction` on the target.
 - The caller Lambda needs `iam:PassRole` with `iam:PassedToService=scheduler.amazonaws.com` condition — otherwise the API returns cryptic "user is not authorized to perform: iam:PassRole".

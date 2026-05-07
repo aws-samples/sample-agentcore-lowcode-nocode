@@ -70,6 +70,8 @@ class PlatformStack(cdk.Stack):
         self.guardrails_table = self._create_guardrails_table()
         self.environments_table = self._create_environments_table()
         self.promotions_table = self._create_promotions_table()
+        self.marketplace_items_table = self._create_marketplace_items_table()
+        self.marketplace_reviews_table = self._create_marketplace_reviews_table()
         self.logging_bucket = self._create_logging_bucket()
         self.artifacts_bucket = self._create_artifacts_bucket()
         self._upload_agentcore_deps()
@@ -283,6 +285,40 @@ class PlatformStack(cdk.Stack):
             table_name=f"{self._project}-{self._env}-a2a-configs",
             partition_key=dynamodb.Attribute(
                 name="deployment_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_marketplace_items_table(self) -> dynamodb.Table:
+        """Marketplace items (Task 09). PK=item_id."""
+        return dynamodb.Table(
+            self,
+            "MarketplaceItemsTable",
+            table_name=f"{self._project}-{self._env}-marketplace-items",
+            partition_key=dynamodb.Attribute(
+                name="item_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_marketplace_reviews_table(self) -> dynamodb.Table:
+        """Marketplace reviews (Task 09). PK=review_id."""
+        return dynamodb.Table(
+            self,
+            "MarketplaceReviewsTable",
+            table_name=f"{self._project}-{self._env}-marketplace-reviews",
+            partition_key=dynamodb.Attribute(
+                name="review_id", type=dynamodb.AttributeType.STRING
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.DESTROY,
@@ -657,6 +693,9 @@ class PlatformStack(cdk.Stack):
         # Environments + promotions tables: read/write (Task 07)
         self.environments_table.grant_read_write_data(role)
         self.promotions_table.grant_read_write_data(role)
+        # Marketplace tables: read/write (Task 09)
+        self.marketplace_items_table.grant_read_write_data(role)
+        self.marketplace_reviews_table.grant_read_write_data(role)
         # Bedrock Guardrails management + test
         role.add_to_policy(
             iam.PolicyStatement(
@@ -819,6 +858,9 @@ class PlatformStack(cdk.Stack):
                 "GUARDRAILS_TABLE_NAME": self.guardrails_table.table_name,
                 "ENVIRONMENTS_TABLE_NAME": self.environments_table.table_name,
                 "PROMOTIONS_TABLE_NAME": self.promotions_table.table_name,
+                "MARKETPLACE_ITEMS_TABLE_NAME": self.marketplace_items_table.table_name,
+                "MARKETPLACE_REVIEWS_TABLE_NAME": self.marketplace_reviews_table.table_name,
+                "MARKETPLACE_ADMIN_IDS": self.node.try_get_context("marketplace_admin_ids") or "",
                 "PROJECT_NAME": self._project,
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
@@ -1658,139 +1700,85 @@ class PlatformStack(cdk.Stack):
             authorizer=jwt_authorizer,
         )
 
-        # --- Trigger routes (authenticated) ---
-        api.add_routes(
-            path="/api/triggers",
-            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
-            integration=workflow_integration,
-            authorizer=jwt_authorizer,
+        # --- Market-gaps routes (Tasks 01-09) ---
+        # CDK's L2 HttpLambdaIntegration emits one AWS::Lambda::Permission
+        # per route, blowing past Lambda's 20 KiB resource-policy cap when
+        # we add 14+ routes. Work around it by:
+        #   1) Creating ONE dedicated CfnIntegration for the workflow Lambda,
+        #   2) Granting a single wildcard InvokeFunction permission,
+        #   3) Declaring each market-gaps route with CfnRoute pointing to
+        #      the shared integration.
+        mg_integration = apigwv2.CfnIntegration(
+            self,
+            "MarketGapsIntegration",
+            api_id=api.api_id,
+            integration_type="AWS_PROXY",
+            integration_uri=self.workflow_lambda.function_arn,
+            integration_method="POST",
+            payload_format_version="2.0",
         )
-        api.add_routes(
-            path="/api/triggers/{proxy+}",
-            methods=[
-                apigwv2.HttpMethod.GET,
-                apigwv2.HttpMethod.PUT,
-                apigwv2.HttpMethod.DELETE,
-                apigwv2.HttpMethod.POST,
-            ],
-            integration=workflow_integration,
-            authorizer=jwt_authorizer,
+        self.workflow_lambda.add_permission(
+            "ApiGatewayInvokeMarketGaps",
+            principal=iam.ServicePrincipal("apigateway.amazonaws.com"),
+            action="lambda:InvokeFunction",
+            source_arn=(
+                f"arn:aws:execute-api:{self.region}:{self.account}:"
+                f"{api.api_id}/*/*"
+            ),
         )
-
-        # --- Webhook route (public, HMAC-verified in Lambda) ---
-        api.add_routes(
-            path="/api/webhooks/{webhook_path}",
-            methods=[apigwv2.HttpMethod.POST],
-            integration=workflow_integration,
-            # intentionally no authorizer: verified via HMAC in the Lambda
+        # Grab the JWT authorizer id (L2 exposes it only through binding)
+        cfn_jwt = apigwv2.CfnAuthorizer(
+            self,
+            "MarketGapsJwtAuthorizer",
+            api_id=api.api_id,
+            authorizer_type="JWT",
+            identity_source=["$request.header.Authorization"],
+            name=f"{self._project}-{self._env}-mg-jwt",
+            jwt_configuration=apigwv2.CfnAuthorizer.JWTConfigurationProperty(
+                audience=[self.user_pool_client.user_pool_client_id],
+                issuer=f"https://cognito-idp.{self.region}.amazonaws.com/{self.user_pool.user_pool_id}",
+            ),
         )
-
-        # --- Approval routes (Task 02) ---
-        api.add_routes(
-            path="/api/approvals",
-            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
-            integration=workflow_integration,
-            authorizer=jwt_authorizer,
-        )
-        api.add_routes(
-            path="/api/approvals/{proxy+}",
-            methods=[
-                apigwv2.HttpMethod.GET,
-                apigwv2.HttpMethod.POST,
-            ],
-            integration=workflow_integration,
-            authorizer=jwt_authorizer,
-        )
-
-        # --- Version routes (Task 03) ---
-        api.add_routes(
-            path="/api/deployments/{deployment_id}/versions",
-            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
-            integration=workflow_integration,
-            authorizer=jwt_authorizer,
-        )
-        api.add_routes(
-            path="/api/deployments/{deployment_id}/versions/{proxy+}",
-            methods=[
-                apigwv2.HttpMethod.GET,
-                apigwv2.HttpMethod.POST,
-            ],
-            integration=workflow_integration,
-            authorizer=jwt_authorizer,
-        )
-
-        # --- Analytics routes (Task 04) ---
-        api.add_routes(
-            path="/api/analytics/{deployment_id}/{proxy+}",
-            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
-            integration=workflow_integration,
-            authorizer=jwt_authorizer,
-        )
-
-        # --- A2A config routes (Task 05, authenticated) ---
-        api.add_routes(
-            path="/api/a2a/config",
-            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.PUT],
-            integration=workflow_integration,
-            authorizer=jwt_authorizer,
-        )
-        api.add_routes(
-            path="/api/a2a/config/{deployment_id}",
-            methods=[
-                apigwv2.HttpMethod.GET,
-                apigwv2.HttpMethod.DELETE,
-            ],
-            integration=workflow_integration,
-            authorizer=jwt_authorizer,
-        )
-        # --- Public A2A routes: agent card + JSON-RPC ---
-        api.add_routes(
-            path="/.well-known/agents/{deployment_id}",
-            methods=[apigwv2.HttpMethod.GET],
-            integration=workflow_integration,
-        )
-        api.add_routes(
-            path="/a2a/{deployment_id}",
-            methods=[apigwv2.HttpMethod.POST],
-            integration=workflow_integration,
-        )
-
-        # --- Guardrails management (Task 06) ---
-        api.add_routes(
-            path="/api/guardrails",
-            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
-            integration=workflow_integration,
-            authorizer=jwt_authorizer,
-        )
-        api.add_routes(
-            path="/api/guardrails/{proxy+}",
-            methods=[
-                apigwv2.HttpMethod.GET,
-                apigwv2.HttpMethod.PUT,
-                apigwv2.HttpMethod.DELETE,
-                apigwv2.HttpMethod.POST,
-            ],
-            integration=workflow_integration,
-            authorizer=jwt_authorizer,
-        )
-
-        # --- Environment promotion (Task 07) ---
-        api.add_routes(
-            path="/api/environments/{deployment_id}",
-            methods=[apigwv2.HttpMethod.GET],
-            integration=workflow_integration,
-            authorizer=jwt_authorizer,
-        )
-        api.add_routes(
-            path="/api/environments/{deployment_id}/{proxy+}",
-            methods=[
-                apigwv2.HttpMethod.GET,
-                apigwv2.HttpMethod.POST,
-                apigwv2.HttpMethod.PUT,
-            ],
-            integration=workflow_integration,
-            authorizer=jwt_authorizer,
-        )
+        mg_auth_paths = [
+            "/api/triggers",
+            "/api/triggers/{proxy+}",
+            "/api/approvals",
+            "/api/approvals/{proxy+}",
+            "/api/deployments/{deployment_id}/versions",
+            "/api/deployments/{deployment_id}/versions/{proxy+}",
+            "/api/analytics/{deployment_id}/{proxy+}",
+            "/api/a2a/config",
+            "/api/a2a/config/{deployment_id}",
+            "/api/guardrails",
+            "/api/guardrails/{proxy+}",
+            "/api/environments/{deployment_id}",
+            "/api/environments/{deployment_id}/{proxy+}",
+            "/api/marketplace/{proxy+}",
+        ]
+        mg_public_paths = [
+            "/api/webhooks/{webhook_path}",
+            "/.well-known/agents/{deployment_id}",
+            "/a2a/{deployment_id}",
+        ]
+        for idx, p in enumerate(mg_auth_paths):
+            apigwv2.CfnRoute(
+                self,
+                f"MgAuthRoute{idx}",
+                api_id=api.api_id,
+                route_key=f"ANY {p}",
+                target=f"integrations/{mg_integration.ref}",
+                authorization_type="JWT",
+                authorizer_id=cfn_jwt.ref,
+            )
+        for idx, p in enumerate(mg_public_paths):
+            apigwv2.CfnRoute(
+                self,
+                f"MgPublicRoute{idx}",
+                api_id=api.api_id,
+                route_key=f"ANY {p}",
+                target=f"integrations/{mg_integration.ref}",
+                authorization_type="NONE",
+            )
 
         # --- Health check route ---
         api.add_routes(

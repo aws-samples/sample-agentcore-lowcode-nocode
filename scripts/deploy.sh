@@ -213,7 +213,8 @@ run_cdk_deploy() {
     -c environment_name="${ENVIRONMENT_NAME}" \
     -c aws_region="${AWS_REGION}" \
     -c project_name="${PROJECT_NAME}" \
-    -c cognito_users="${COGNITO_USERS}"
+    -c cognito_users="${COGNITO_USERS}" \
+    -c marketplace_admin_ids="${MARKETPLACE_ADMIN_IDS:-}"
   cd "${PROJECT_ROOT}"
   log_success "CDK stack deployed."
 }

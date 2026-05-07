@@ -68,6 +68,8 @@ class PlatformStack(cdk.Stack):
         self.a2a_configs_table = self._create_a2a_configs_table()
         self.a2a_tasks_table = self._create_a2a_tasks_table()
         self.guardrails_table = self._create_guardrails_table()
+        self.environments_table = self._create_environments_table()
+        self.promotions_table = self._create_promotions_table()
         self.logging_bucket = self._create_logging_bucket()
         self.artifacts_bucket = self._create_artifacts_bucket()
         self._upload_agentcore_deps()
@@ -281,6 +283,43 @@ class PlatformStack(cdk.Stack):
             table_name=f"{self._project}-{self._env}-a2a-configs",
             partition_key=dynamodb.Attribute(
                 name="deployment_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_environments_table(self) -> dynamodb.Table:
+        """Per-(deployment, env) binding (Task 07). PK=deployment_id, SK=env."""
+        return dynamodb.Table(
+            self,
+            "EnvironmentsTable",
+            table_name=f"{self._project}-{self._env}-environments",
+            partition_key=dynamodb.Attribute(
+                name="deployment_id", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="env", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_promotions_table(self) -> dynamodb.Table:
+        """Promotion audit records (Task 07). PK=promotion_id."""
+        return dynamodb.Table(
+            self,
+            "PromotionsTable",
+            table_name=f"{self._project}-{self._env}-promotions",
+            partition_key=dynamodb.Attribute(
+                name="promotion_id", type=dynamodb.AttributeType.STRING
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.DESTROY,
@@ -615,6 +654,9 @@ class PlatformStack(cdk.Stack):
         self.a2a_tasks_table.grant_read_write_data(role)
         # Guardrails table: read/write (Task 06)
         self.guardrails_table.grant_read_write_data(role)
+        # Environments + promotions tables: read/write (Task 07)
+        self.environments_table.grant_read_write_data(role)
+        self.promotions_table.grant_read_write_data(role)
         # Bedrock Guardrails management + test
         role.add_to_policy(
             iam.PolicyStatement(
@@ -775,6 +817,8 @@ class PlatformStack(cdk.Stack):
                 "A2A_CONFIGS_TABLE_NAME": self.a2a_configs_table.table_name,
                 "A2A_TASKS_TABLE_NAME": self.a2a_tasks_table.table_name,
                 "GUARDRAILS_TABLE_NAME": self.guardrails_table.table_name,
+                "ENVIRONMENTS_TABLE_NAME": self.environments_table.table_name,
+                "PROMOTIONS_TABLE_NAME": self.promotions_table.table_name,
                 "PROJECT_NAME": self._project,
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
@@ -1725,6 +1769,24 @@ class PlatformStack(cdk.Stack):
                 apigwv2.HttpMethod.PUT,
                 apigwv2.HttpMethod.DELETE,
                 apigwv2.HttpMethod.POST,
+            ],
+            integration=workflow_integration,
+            authorizer=jwt_authorizer,
+        )
+
+        # --- Environment promotion (Task 07) ---
+        api.add_routes(
+            path="/api/environments/{deployment_id}",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=workflow_integration,
+            authorizer=jwt_authorizer,
+        )
+        api.add_routes(
+            path="/api/environments/{deployment_id}/{proxy+}",
+            methods=[
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.POST,
+                apigwv2.HttpMethod.PUT,
             ],
             integration=workflow_integration,
             authorizer=jwt_authorizer,

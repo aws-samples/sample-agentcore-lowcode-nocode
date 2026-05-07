@@ -661,6 +661,19 @@ class PlatformStack(cdk.Stack):
                 resources=["*"],
             )
         )
+        # CloudWatch for analytics dashboard (Task 04). GetMetric* actions
+        # only support Resource=* — CloudWatch scopes by namespace inside the
+        # call, which we always pin to AgentCore/Agents.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "cloudwatch:GetMetricStatistics",
+                    "cloudwatch:GetMetricData",
+                    "cloudwatch:ListMetrics",
+                ],
+                resources=["*"],
+            )
+        )
 
         fn = _lambda.Function(
             self,
@@ -1580,6 +1593,14 @@ class PlatformStack(cdk.Stack):
                 apigwv2.HttpMethod.GET,
                 apigwv2.HttpMethod.POST,
             ],
+            integration=workflow_integration,
+            authorizer=jwt_authorizer,
+        )
+
+        # --- Analytics routes (Task 04) ---
+        api.add_routes(
+            path="/api/analytics/{deployment_id}/{proxy+}",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
             integration=workflow_integration,
             authorizer=jwt_authorizer,
         )

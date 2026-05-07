@@ -8,6 +8,8 @@ import { authFetch } from '../../auth/authFetch';
 import TriggersPanel from '../triggers/TriggersPanel';
 import VersionHistory from '../versions/VersionHistory';
 import { createSnapshot } from '../../services/versions';
+import AnalyticsPanel from '../analytics/AnalyticsPanel';
+import { recordInvocation } from '../../services/analytics';
 import { WORKFLOW_TEMPLATES } from '../../data/templates';
 import { useWorkflowStore } from '../../store/workflowStore';
 import type { AgentCoreComponentType } from '../../types/workflow';
@@ -96,7 +98,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
   const [, setTestResult] = useState<TestResult | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [activeTab, setActiveTab] = useState<'deploy' | 'chat' | 'triggers' | 'versions'>('deploy');
+  const [activeTab, setActiveTab] = useState<'deploy' | 'chat' | 'triggers' | 'versions' | 'analytics'>('deploy');
   // Surfaces the backing deployment id (used by Triggers tab) — set once the SFN job returns.
   const [deploymentIdState, setDeploymentIdState] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -649,6 +651,20 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
               }];
             });
             setTestInput('');
+            // Best-effort: record an invocation metric (Task 04).
+            // Token counts are approximations (response body length / 4).
+            const approxInputTokens = Math.ceil(testInput.length / 4);
+            const approxOutputTokens = Math.ceil((result.response || '').length / 4);
+            const deploymentIdForMetrics = deploymentIdState || deploymentStatus.runtimeId || '';
+            if (deploymentIdForMetrics) {
+              void recordInvocation(deploymentIdForMetrics, {
+                model_id: (config as unknown as { modelId?: string })?.modelId,
+                input_tokens: approxInputTokens,
+                output_tokens: approxOutputTokens,
+                latency_ms: Date.now() - startTime,
+                is_error: false,
+              }).catch(() => { /* swallow — analytics is best-effort */ });
+            }
           }
 
           setTestResult({
@@ -663,6 +679,16 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
           });
           if (!result.success && result.error) {
             setChatMessages(prev => [...prev.filter(m => m.id !== 'warming-up'), { id: `error-${Date.now()}`, role: 'system' as const, content: result.error, timestamp: new Date() }]);
+            const deploymentIdForMetrics = deploymentIdState || deploymentStatus.runtimeId || '';
+            if (deploymentIdForMetrics) {
+              void recordInvocation(deploymentIdForMetrics, {
+                model_id: (config as unknown as { modelId?: string })?.modelId,
+                input_tokens: Math.ceil(testInput.length / 4),
+                output_tokens: 0,
+                latency_ms: Date.now() - startTime,
+                is_error: true,
+              }).catch(() => { /* best-effort */ });
+            }
           }
           return;
         } catch (error) {
@@ -814,6 +840,22 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
           >
             Versions
             {activeTab === 'versions' && (
+              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
+            )}
+          </button>
+          <button
+            onClick={() => setActiveTab('analytics')}
+            disabled={deploymentStatus.state !== 'deployed'}
+            className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${
+              activeTab === 'analytics'
+                ? 'text-[#0972d3]'
+                : deploymentStatus.state === 'deployed'
+                  ? 'text-[#5f6b7a] hover:text-[#16191f]'
+                  : 'text-[#d1d5db] cursor-not-allowed'
+            }`}
+          >
+            Analytics
+            {activeTab === 'analytics' && (
               <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
             )}
           </button>
@@ -1242,10 +1284,16 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
               onClose={() => setActiveTab('deploy')}
             />
           )}
+          {activeTab === 'analytics' && deploymentStatus.state === 'deployed' && (
+            <AnalyticsPanel
+              deploymentId={deploymentIdState || deploymentStatus.runtimeId || ''}
+              onClose={() => setActiveTab('deploy')}
+            />
+          )}
         </div>
 
         {/* Footer with Deploy button — visible on deploy tab */}
-        {activeTab !== 'chat' && activeTab !== 'triggers' && activeTab !== 'versions' && (
+        {activeTab !== 'chat' && activeTab !== 'triggers' && activeTab !== 'versions' && activeTab !== 'analytics' && (
         <div className="border-t border-[#e9ebed] bg-[#fafafa] flex-shrink-0 p-3.5 space-y-2">
           {activeTab === 'deploy' && (deploymentStatus.state === 'idle' || deploymentStatus.state === 'error') && (
             <button

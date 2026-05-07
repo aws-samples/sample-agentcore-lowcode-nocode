@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentcore-cli"
+version = "0.1.0"
+description = "CLI for the AgentCore Visual Workflow Platform"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "AgentCore Platform" }]
+license = { text = "Apache-2.0" }
+dependencies = [
+    "click>=8.1",
+    "httpx>=0.27",
+    "boto3>=1.34",
+    "pyyaml>=6",
+    "agentcore-sdk>=0.1.0",
+]
+
+[project.scripts]
+agentcore = "agentcore_cli.main:cli"
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agentcore_cli*"]

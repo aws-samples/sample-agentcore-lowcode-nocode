@@ -65,6 +65,8 @@ class PlatformStack(cdk.Stack):
         self.trigger_invocations_table = self._create_trigger_invocations_table()
         self.approvals_table = self._create_approvals_table()
         self.versions_table = self._create_versions_table()
+        self.a2a_configs_table = self._create_a2a_configs_table()
+        self.a2a_tasks_table = self._create_a2a_tasks_table()
         self.logging_bucket = self._create_logging_bucket()
         self.artifacts_bucket = self._create_artifacts_bucket()
         self._upload_agentcore_deps()
@@ -264,6 +266,41 @@ class PlatformStack(cdk.Stack):
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.DESTROY,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_a2a_configs_table(self) -> dynamodb.Table:
+        """A2A per-deployment config (Task 05). PK=deployment_id."""
+        return dynamodb.Table(
+            self,
+            "A2AConfigsTable",
+            table_name=f"{self._project}-{self._env}-a2a-configs",
+            partition_key=dynamodb.Attribute(
+                name="deployment_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_a2a_tasks_table(self) -> dynamodb.Table:
+        """A2A task lifecycle (Task 05). PK=task_id, TTL 30d."""
+        return dynamodb.Table(
+            self,
+            "A2ATasksTable",
+            table_name=f"{self._project}-{self._env}-a2a-tasks",
+            partition_key=dynamodb.Attribute(
+                name="task_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            time_to_live_attribute="ttl",
             encryption=dynamodb.TableEncryption.AWS_MANAGED,
             point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
                 point_in_time_recovery_enabled=True,
@@ -555,6 +592,9 @@ class PlatformStack(cdk.Stack):
         self.approvals_table.grant_read_write_data(role)
         # Versions table: read/write (Task 03)
         self.versions_table.grant_read_write_data(role)
+        # A2A tables: read/write (Task 05)
+        self.a2a_configs_table.grant_read_write_data(role)
+        self.a2a_tasks_table.grant_read_write_data(role)
         # SSM read for app config
         role.add_to_policy(
             iam.PolicyStatement(
@@ -697,6 +737,8 @@ class PlatformStack(cdk.Stack):
                 "TRIGGER_SECRET_PREFIX": f"/agentcore/{self._env}/trigger-webhook",
                 "APPROVALS_TABLE_NAME": self.approvals_table.table_name,
                 "VERSIONS_TABLE_NAME": self.versions_table.table_name,
+                "A2A_CONFIGS_TABLE_NAME": self.a2a_configs_table.table_name,
+                "A2A_TASKS_TABLE_NAME": self.a2a_tasks_table.table_name,
                 "PROJECT_NAME": self._project,
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
@@ -1603,6 +1645,34 @@ class PlatformStack(cdk.Stack):
             methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
             integration=workflow_integration,
             authorizer=jwt_authorizer,
+        )
+
+        # --- A2A config routes (Task 05, authenticated) ---
+        api.add_routes(
+            path="/api/a2a/config",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.PUT],
+            integration=workflow_integration,
+            authorizer=jwt_authorizer,
+        )
+        api.add_routes(
+            path="/api/a2a/config/{deployment_id}",
+            methods=[
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.DELETE,
+            ],
+            integration=workflow_integration,
+            authorizer=jwt_authorizer,
+        )
+        # --- Public A2A routes: agent card + JSON-RPC ---
+        api.add_routes(
+            path="/.well-known/agents/{deployment_id}",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=workflow_integration,
+        )
+        api.add_routes(
+            path="/a2a/{deployment_id}",
+            methods=[apigwv2.HttpMethod.POST],
+            integration=workflow_integration,
         )
 
         # --- Health check route ---

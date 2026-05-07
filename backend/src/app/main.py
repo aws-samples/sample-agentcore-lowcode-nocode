@@ -18,6 +18,11 @@ from app.routers.triggers import webhook_router as webhooks_router
 from app.routers.approvals import router as approvals_router
 from app.routers.versions import router as versions_router
 from app.routers.analytics import router as analytics_router
+from app.routers.a2a import (
+    config_router as a2a_config_router,
+    jsonrpc_router as a2a_jsonrpc_router,
+    well_known_router as a2a_well_known_router,
+)
 from app.services.config import load_config
 from app.services.dynamodb_storage import DynamoDBWorkflowStorage
 from app.services.flow_storage import DynamoDBFlowStorage, set_flow_storage
@@ -86,6 +91,9 @@ app.include_router(webhooks_router, prefix="/api", tags=["webhooks"])
 app.include_router(approvals_router, prefix="/api", tags=["approvals"])
 app.include_router(versions_router, prefix="/api", tags=["versions"])
 app.include_router(analytics_router, prefix="/api", tags=["analytics"])
+app.include_router(a2a_config_router, prefix="/api", tags=["a2a-config"])
+app.include_router(a2a_well_known_router, tags=["a2a-well-known"])
+app.include_router(a2a_jsonrpc_router, tags=["a2a-jsonrpc"])
 
 
 @app.get("/health")

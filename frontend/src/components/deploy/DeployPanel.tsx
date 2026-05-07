@@ -5,6 +5,7 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration } from '../../types/components';
 import { authFetch } from '../../auth/authFetch';
+import TriggersPanel from '../triggers/TriggersPanel';
 import { WORKFLOW_TEMPLATES } from '../../data/templates';
 import { useWorkflowStore } from '../../store/workflowStore';
 import type { AgentCoreComponentType } from '../../types/workflow';
@@ -93,7 +94,9 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
   const [, setTestResult] = useState<TestResult | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [activeTab, setActiveTab] = useState<'deploy' | 'chat'>('deploy');
+  const [activeTab, setActiveTab] = useState<'deploy' | 'chat' | 'triggers'>('deploy');
+  // Surfaces the backing deployment id (used by Triggers tab) — set once the SFN job returns.
+  const [deploymentIdState, setDeploymentIdState] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [conversationHistory, setConversationHistory] = useState<Array<{role: string, content: string}>>([]);
   const [chatMessages, setChatMessages] = useState<Array<{
@@ -222,6 +225,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
       if (!deploymentId) {
         throw new Error('No deployment ID returned from server');
       }
+      setDeploymentIdState(deploymentId);
 
       setDeploymentStatus({ state: 'deploying', message: 'Deployment started. Waiting for completion... (this may take 5-10 minutes)' });
 
@@ -747,6 +751,22 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
               <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
             )}
           </button>
+          <button
+            onClick={() => setActiveTab('triggers')}
+            disabled={deploymentStatus.state !== 'deployed'}
+            className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${
+              activeTab === 'triggers'
+                ? 'text-[#0972d3]'
+                : deploymentStatus.state === 'deployed'
+                  ? 'text-[#5f6b7a] hover:text-[#16191f]'
+                  : 'text-[#d1d5db] cursor-not-allowed'
+            }`}
+          >
+            Triggers
+            {activeTab === 'triggers' && (
+              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
+            )}
+          </button>
         </div>
 
         {/* Content */}
@@ -1158,10 +1178,18 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
               </div>
             </div>
           )}
+          {activeTab === 'triggers' && deploymentStatus.state === 'deployed' && (
+            <TriggersPanel
+              deploymentId={deploymentIdState || deploymentStatus.runtimeId || ''}
+              runtimeId={deploymentStatus.runtimeId}
+              apiBaseUrl={import.meta.env.VITE_API_BASE_URL || ''}
+              onClose={() => setActiveTab('deploy')}
+            />
+          )}
         </div>
 
         {/* Footer with Deploy button — visible on deploy tab */}
-        {activeTab !== 'chat' && (
+        {activeTab !== 'chat' && activeTab !== 'triggers' && (
         <div className="border-t border-[#e9ebed] bg-[#fafafa] flex-shrink-0 p-3.5 space-y-2">
           {activeTab === 'deploy' && (deploymentStatus.state === 'idle' || deploymentStatus.state === 'error') && (
             <button

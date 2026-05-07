@@ -92,6 +92,24 @@
 - "Session memory not working" — tester sent only `sessionId` without `history` field. Backend requires explicit `history` array for context.
 - **Rule**: Before filing a bug from integration tests, verify the expected behavior by reading the source code. Multi-turn APIs need history, not just session IDs.
 
+## 2026-05-07: Market Gaps Execution
+
+### Lesson: CloudFront SPA Fallback Masks API Errors
+- CloudFront is configured so 403/404 from any origin rewrite to `/index.html` (for SPA routing).
+- Result: `GET /api/does-not-exist` through CloudFront returns `text/html` with HTTP 200 — not the JSON 404 the Lambda produced.
+- Integration tests and curl-based bug-bashing MUST hit the raw API Gateway URL when verifying error codes.
+- **Rule**: For HTTP-status-sensitive tests, use the API Gateway URL (stack output `ApiGatewayUrl`), not CloudFront.
+
+### Lesson: Deploy script default region is the caller's AWS CLI default
+- `./scripts/deploy.sh` reads `AWS_REGION` env var, defaulting to `us-east-1` only inside the script's own variable.
+- If AWS CLI's profile has a default region of `us-west-2`, early steps use that and fail.
+- **Rule**: Always run with `AWS_REGION=us-east-1 ./scripts/deploy.sh` explicitly.
+
+### Lesson: EventBridge Scheduler requires dedicated invoke role
+- `scheduler:CreateSchedule` with a Lambda target needs `RoleArn` pointing to a role that Scheduler can assume (principal `scheduler.amazonaws.com`) AND that has `lambda:InvokeFunction` on the target.
+- The caller Lambda needs `iam:PassRole` with `iam:PassedToService=scheduler.amazonaws.com` condition — otherwise the API returns cryptic "user is not authorized to perform: iam:PassRole".
+- **Rule**: When introducing a new service that uses PassRole, always add the PassedToService condition and least-privilege it to just that service.
+
 ### Bug 14: Memory Strategy API Key Format Mismatch
 - `create_memory()` `memoryStrategies` list expects keys like `semanticMemoryStrategy`, `summaryMemoryStrategy`, `episodicMemoryStrategy`, `userPreferenceMemoryStrategy`, `customMemoryStrategy`
 - Code was passing raw type names like `SEMANTIC`, `summary` as the dict key

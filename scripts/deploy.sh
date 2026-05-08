@@ -214,7 +214,9 @@ run_cdk_deploy() {
     -c aws_region="${AWS_REGION}" \
     -c project_name="${PROJECT_NAME}" \
     -c cognito_users="${COGNITO_USERS}" \
-    -c marketplace_admin_ids="${MARKETPLACE_ADMIN_IDS:-}"
+    -c marketplace_admin_ids="${MARKETPLACE_ADMIN_IDS:-}" \
+    -c platform_admin_ids="${PLATFORM_ADMIN_IDS:-}" \
+    -c rbac_default_role="${RBAC_DEFAULT_ROLE:-agent_creator}"
   cd "${PROJECT_ROOT}"
   log_success "CDK stack deployed."
 }

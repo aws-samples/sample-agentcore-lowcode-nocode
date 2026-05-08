@@ -26,6 +26,11 @@ from app.routers.a2a import (
 from app.routers.guardrails import router as guardrails_router
 from app.routers.environments import router as environments_router
 from app.routers.marketplace import router as marketplace_router
+from app.routers.admin import (
+    router as admin_router,
+    rbac_router as rbac_router,
+    dlp_router as dlp_router,
+)
 from app.services.config import load_config
 from app.services.dynamodb_storage import DynamoDBWorkflowStorage
 from app.services.flow_storage import DynamoDBFlowStorage, set_flow_storage
@@ -100,6 +105,9 @@ app.include_router(a2a_jsonrpc_router, tags=["a2a-jsonrpc"])
 app.include_router(guardrails_router, prefix="/api", tags=["guardrails"])
 app.include_router(environments_router, prefix="/api", tags=["environments"])
 app.include_router(marketplace_router, prefix="/api", tags=["marketplace"])
+app.include_router(admin_router, prefix="/api", tags=["admin"])
+app.include_router(rbac_router, prefix="/api", tags=["rbac"])
+app.include_router(dlp_router, prefix="/api", tags=["dlp"])
 
 
 @app.get("/health")

@@ -72,6 +72,9 @@ class PlatformStack(cdk.Stack):
         self.promotions_table = self._create_promotions_table()
         self.marketplace_items_table = self._create_marketplace_items_table()
         self.marketplace_reviews_table = self._create_marketplace_reviews_table()
+        self.rbac_table = self._create_rbac_table()
+        self.audit_table = self._create_audit_table()
+        self.dlp_policies_table = self._create_dlp_policies_table()
         self.logging_bucket = self._create_logging_bucket()
         self.artifacts_bucket = self._create_artifacts_bucket()
         self._upload_agentcore_deps()
@@ -283,6 +286,60 @@ class PlatformStack(cdk.Stack):
             self,
             "A2AConfigsTable",
             table_name=f"{self._project}-{self._env}-a2a-configs",
+            partition_key=dynamodb.Attribute(
+                name="deployment_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_rbac_table(self) -> dynamodb.Table:
+        """Per-user role assignments (Task 10). PK=user_id."""
+        return dynamodb.Table(
+            self,
+            "RbacTable",
+            table_name=f"{self._project}-{self._env}-rbac",
+            partition_key=dynamodb.Attribute(
+                name="user_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_audit_table(self) -> dynamodb.Table:
+        """Append-only audit log (Task 10). PK=date_partition, SK=timestamp."""
+        return dynamodb.Table(
+            self,
+            "AuditTable",
+            table_name=f"{self._project}-{self._env}-audit",
+            partition_key=dynamodb.Attribute(
+                name="date_partition", type=dynamodb.AttributeType.STRING
+            ),
+            sort_key=dynamodb.Attribute(
+                name="timestamp", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_dlp_policies_table(self) -> dynamodb.Table:
+        """Per-deployment DLP policies (Task 10). PK=deployment_id."""
+        return dynamodb.Table(
+            self,
+            "DlpPoliciesTable",
+            table_name=f"{self._project}-{self._env}-dlp-policies",
             partition_key=dynamodb.Attribute(
                 name="deployment_id", type=dynamodb.AttributeType.STRING
             ),
@@ -696,6 +753,17 @@ class PlatformStack(cdk.Stack):
         # Marketplace tables: read/write (Task 09)
         self.marketplace_items_table.grant_read_write_data(role)
         self.marketplace_reviews_table.grant_read_write_data(role)
+        # RBAC + audit + DLP tables (Task 10)
+        self.rbac_table.grant_read_write_data(role)
+        self.audit_table.grant_read_write_data(role)
+        self.dlp_policies_table.grant_read_write_data(role)
+        # Comprehend for PII detection
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["comprehend:DetectPiiEntities"],
+                resources=["*"],
+            )
+        )
         # Bedrock Guardrails management + test
         role.add_to_policy(
             iam.PolicyStatement(
@@ -861,6 +929,11 @@ class PlatformStack(cdk.Stack):
                 "MARKETPLACE_ITEMS_TABLE_NAME": self.marketplace_items_table.table_name,
                 "MARKETPLACE_REVIEWS_TABLE_NAME": self.marketplace_reviews_table.table_name,
                 "MARKETPLACE_ADMIN_IDS": self.node.try_get_context("marketplace_admin_ids") or "",
+                "RBAC_TABLE_NAME": self.rbac_table.table_name,
+                "AUDIT_TABLE_NAME": self.audit_table.table_name,
+                "DLP_POLICIES_TABLE_NAME": self.dlp_policies_table.table_name,
+                "RBAC_PLATFORM_ADMIN_IDS": self.node.try_get_context("platform_admin_ids") or "",
+                "RBAC_DEFAULT_ROLE": self.node.try_get_context("rbac_default_role") or "agent_creator",
                 "PROJECT_NAME": self._project,
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
@@ -1754,6 +1827,9 @@ class PlatformStack(cdk.Stack):
             "/api/environments/{deployment_id}",
             "/api/environments/{deployment_id}/{proxy+}",
             "/api/marketplace/{proxy+}",
+            "/api/admin/{proxy+}",
+            "/api/rbac/{proxy+}",
+            "/api/dlp/{proxy+}",
         ]
         mg_public_paths = [
             "/api/webhooks/{webhook_path}",

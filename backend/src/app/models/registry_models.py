@@ -41,12 +41,16 @@ class RegistryRecordStatus(str, Enum):
 
 
 class McpServerDescriptor(BaseModel):
-    schema_version: Optional[str] = "1.0"
+    # AWS requires date-based schema versions like "2025-12-11". Default to
+    # the value observed on workshop-registry's existing records; callers can
+    # override if AWS publishes a newer version.
+    schema_version: Optional[str] = "2025-12-11"
     inline_content: str = Field(..., min_length=1, max_length=262_144)
 
 
 class McpToolsDescriptor(BaseModel):
-    protocol_version: Optional[str] = "1.0"
+    # AWS expects MCP protocol date ("2024-11-05" observed live).
+    protocol_version: Optional[str] = "2024-11-05"
     inline_content: str = Field(..., min_length=1, max_length=262_144)
 
 
@@ -56,7 +60,13 @@ class McpDescriptor(BaseModel):
 
 
 class A2AAgentCardDescriptor(BaseModel):
-    schema_version: Optional[str] = "0.2"
+    # A2A schema versions: AWS validates against an internal allowlist that's
+    # not exposed in the SDK model. The accepted value at the time of this
+    # commit is unknown — the 4 candidates "0.2", "1.0", "2024-11-05",
+    # "2025-06-01", "2025-12-11" all return ValidationException. Leave as
+    # None by default; callers must supply a value AWS accepts for their
+    # account/region.
+    schema_version: Optional[str] = None
     inline_content: str = Field(..., min_length=1, max_length=262_144)
 
 
@@ -204,6 +214,30 @@ class RecordCreateRequest(BaseModel):
             raise ValueError(
                 "record name must start with a letter and contain alphanumerics/_/- (max 128)"
             )
+        return v
+
+    @field_validator("sync_from_url")
+    @classmethod
+    def _https_only(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v == "":
+            return v
+        # SSRF defense-in-depth: reject non-HTTPS and obvious internal IPs.
+        if not v.startswith("https://"):
+            raise ValueError("sync_from_url must use https://")
+        # Quick-check internal IP patterns (AWS metadata, loopback, RFC1918)
+        import re
+
+        host = re.match(r"https://([^/:]+)", v)
+        if host:
+            h = host.group(1).lower()
+            if (
+                h in ("localhost", "127.0.0.1", "169.254.169.254", "0.0.0.0")
+                or h.startswith("10.")
+                or h.startswith("192.168.")
+                or h.startswith("169.254.")
+                or re.match(r"^172\.(1[6-9]|2\d|3[01])\.", h)
+            ):
+                raise ValueError(f"sync_from_url host {h} is not allowed")
         return v
 
 

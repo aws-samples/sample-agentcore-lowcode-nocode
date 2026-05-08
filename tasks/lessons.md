@@ -105,6 +105,35 @@
 - If AWS CLI's profile has a default region of `us-west-2`, early steps use that and fail.
 - **Rule**: Always run with `AWS_REGION=us-east-1 ./scripts/deploy.sh` explicitly.
 
+### Lesson: Stale boto3 looks like "API doesn't exist"
+- I claimed Harness, ConfigurationBundle, and Evaluator APIs didn't exist because `dir(client)` returned nothing matching them. I was running boto3 1.42.88.
+- After `pip install --upgrade boto3 botocore` to 1.43.6, all 15+ Harness / bundle / evaluator / online-evaluation-config / registry ops appeared.
+- **Rule**: Before concluding an API is missing, check `pip show boto3`, then upgrade to the latest matching the docs URL the user cited, then re-introspect.
+
+### Lesson: Harness IAM actions live in bedrock-agentcore:, not bedrock-agentcore-control:
+- Despite the client being named `bedrock-agentcore-control`, the IAM action prefix for Harness ops is `bedrock-agentcore:` (data-plane namespace).
+- CreateHarness also requires `CreateAgentRuntime`, `CreateAgentRuntimeEndpoint`, `CreateWorkloadIdentity` because the service provisions those under the hood using the caller's credentials.
+- The harness execution role trust policy must NOT scope SourceArn to `harness/*` — the downstream AgentRuntime call uses a runtime-scoped SourceArn, which fails the condition. Keep the trust policy to just `aws:SourceAccount`.
+- **Rule**: When adding IAM for a managed-service API, test a full create and let the error messages tell you which adjacent actions and conditions AWS needs.
+
+### Lesson: Harness invocation is InvokeHarness, not InvokeAgentRuntime
+- Harness-managed runtimes explicitly refuse `InvokeAgentRuntime` with "managed by a harness" error.
+- `bedrock-agentcore:InvokeHarness` returns an EventStream of Bedrock Converse-style events: `{"role":"assistant"}`, `{"contentBlockIndex":0,"delta":{"text":"Hi"}}`, `{"stopReason":"end_turn"}`, `{"usage":{...}}`.
+- To get clean assistant text out of that stream, concat only `delta.text` fragments; skip the metadata events.
+
+### Lesson: Bedrock on-demand throughput requires inference profile IDs
+- `anthropic.claude-3-5-haiku-20241022-v1:0` -> ValidationException "on-demand throughput isn't supported, use an inference profile".
+- Use the cross-region profile prefix: `us.anthropic.claude-3-5-haiku-20241022-v1:0` (or `us.anthropic.claude-sonnet-4-5-20250929-v1:0`).
+- Some older models are gated: "marked as Legacy and you have not been actively using the model in the last 30 days" — pick active ones.
+
+### Lesson: AgentCore clientToken regex is not aws-standard
+- Several `create_*` and `update_*` APIs reject clientTokens with underscores: `Member must satisfy regular expression pattern: [a-zA-Z0-9](-*[a-zA-Z0-9]){0,256}`.
+- **Rule**: Derive clientToken as `hashlib.sha256(seed).hexdigest()[:64]` — it's always alphanumeric.
+
+### Lesson: UpdateConfigurationBundle needs parentVersionIds when components change
+- AWS returns `ValidationException: parentVersionIds required when updating components`.
+- **Rule**: Default to `[rec.latest_version_id]` if the caller didn't provide `parent_version_ids` and `components` is set. This keeps the version chain linear without the user having to know.
+
 ### Lesson: "Tested" != "tested end-to-end"
 - Claimed Task 01 complete after exercising webhook HMAC + trigger lifecycle against a *fake* runtime — invocations correctly recorded as failed, but I never verified the success path through Scheduler/EventBridge to a live runtime.
 - User pushed back and asked to test for real; on retest, all 3 trigger modes (schedule, webhook, event) fired against `omar1-U1lidv6KS1` with real status=success + realistic latency.

@@ -75,6 +75,12 @@ class PlatformStack(cdk.Stack):
         self.rbac_table = self._create_rbac_table()
         self.audit_table = self._create_audit_table()
         self.dlp_policies_table = self._create_dlp_policies_table()
+        self.harness_table = self._create_harness_table()
+        self.harness_execution_role = self._create_harness_execution_role()
+        self.optimization_bundles_table = self._create_optimization_bundles_table()
+        self.optimization_online_evals_table = self._create_optimization_online_evals_table()
+        self.online_eval_execution_role = self._create_online_eval_execution_role()
+        self.registry_ownership_table = self._create_registry_ownership_table()
         self.logging_bucket = self._create_logging_bucket()
         self.artifacts_bucket = self._create_artifacts_bucket()
         self._upload_agentcore_deps()
@@ -350,6 +356,181 @@ class PlatformStack(cdk.Stack):
                 point_in_time_recovery_enabled=True,
             ),
         )
+
+    def _create_harness_table(self) -> dynamodb.Table:
+        """Harness ownership mapping (Task 11). PK=harness_id."""
+        return dynamodb.Table(
+            self,
+            "HarnessTable",
+            table_name=f"{self._project}-{self._env}-harness",
+            partition_key=dynamodb.Attribute(
+                name="harness_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_harness_execution_role(self) -> iam.Role:
+        """Execution role assumed by AgentCore Harness sessions (Task 11).
+
+        Harness sessions need to invoke Bedrock models + optionally access
+        memory, gateway, code interpreter, browser resources.
+
+        NOTE: We intentionally do NOT scope by SourceArn, because Harness
+        internally creates an AgentRuntime and then passes this same role
+        to it — at that time the SourceArn on the assume call is the
+        runtime ARN, not the harness ARN. Scoping by SourceArn causes the
+        CreateHarness to fail with "Role validation failed".
+        """
+        role = iam.Role(
+            self,
+            "HarnessExecutionRole",
+            role_name=f"AgentCore-Harness-{self._env}-exec",
+            assumed_by=iam.ServicePrincipal(
+                "bedrock-agentcore.amazonaws.com",
+                conditions={
+                    "StringEquals": {"aws:SourceAccount": self.account},
+                },
+            ),
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                ],
+                resources=["*"],
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock-agentcore:*",
+                ],
+                resources=["*"],
+            )
+        )
+        # CloudWatch Logs for harness execution traces
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents",
+                    "logs:DescribeLogStreams",
+                ],
+                resources=[f"arn:aws:logs:{self.region}:{self.account}:log-group:/aws/bedrock-agentcore/*"],
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["xray:PutTelemetryRecords", "xray:PutTraceSegments"],
+                resources=["*"],
+            )
+        )
+        return role
+
+    def _create_optimization_bundles_table(self) -> dynamodb.Table:
+        """Ownership mapping for Optimization configuration bundles (Task 12)."""
+        return dynamodb.Table(
+            self,
+            "OptimizationBundlesTable",
+            table_name=f"{self._project}-{self._env}-optimization-bundles",
+            partition_key=dynamodb.Attribute(
+                name="bundle_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_optimization_online_evals_table(self) -> dynamodb.Table:
+        """Ownership mapping for online evaluation configs (Task 12)."""
+        return dynamodb.Table(
+            self,
+            "OptimizationOnlineEvalsTable",
+            table_name=f"{self._project}-{self._env}-optimization-online-evals",
+            partition_key=dynamodb.Attribute(
+                name="config_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_registry_ownership_table(self) -> dynamodb.Table:
+        """Per-record ownership mapping for AWS Agent Registry (Task 13).
+
+        Registry records don't have a per-user owner dimension on AWS's side
+        — we mirror (registry_id, record_id) -> user_id here so user B can't
+        delete/submit user A's records.
+        """
+        return dynamodb.Table(
+            self,
+            "RegistryOwnershipTable",
+            table_name=f"{self._project}-{self._env}-registry-ownership",
+            partition_key=dynamodb.Attribute(
+                name="record_id", type=dynamodb.AttributeType.STRING
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=RemovalPolicy.DESTROY,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_online_eval_execution_role(self) -> iam.Role:
+        """Execution role assumed by AgentCore Online Evaluation runs (Task 12).
+
+        Needs CloudWatch Logs read (for trace scraping), Bedrock InvokeModel
+        (for LLM-as-a-judge evaluators), and write access to an output log
+        group for emitted evaluator scores.
+        """
+        role = iam.Role(
+            self,
+            "OnlineEvalExecutionRole",
+            role_name=f"AgentCore-OnlineEval-{self._env}-exec",
+            assumed_by=iam.ServicePrincipal(
+                "bedrock-agentcore.amazonaws.com",
+                conditions={
+                    "StringEquals": {"aws:SourceAccount": self.account},
+                },
+            ),
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock:InvokeModel",
+                    "bedrock:InvokeModelWithResponseStream",
+                ],
+                resources=["*"],
+            )
+        )
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents",
+                    "logs:DescribeLogStreams",
+                    "logs:FilterLogEvents",
+                    "logs:GetLogEvents",
+                ],
+                resources=[f"arn:aws:logs:{self.region}:{self.account}:log-group:*"],
+            )
+        )
+        return role
 
     def _create_marketplace_items_table(self) -> dynamodb.Table:
         """Marketplace items (Task 09). PK=item_id."""
@@ -757,6 +938,181 @@ class PlatformStack(cdk.Stack):
         self.rbac_table.grant_read_write_data(role)
         self.audit_table.grant_read_write_data(role)
         self.dlp_policies_table.grant_read_write_data(role)
+        # Harness table (Task 11)
+        self.harness_table.grant_read_write_data(role)
+        # Optimization tables (Task 12)
+        self.optimization_bundles_table.grant_read_write_data(role)
+        self.optimization_online_evals_table.grant_read_write_data(role)
+        # Registry ownership table (Task 13)
+        self.registry_ownership_table.grant_read_write_data(role)
+        # AWS Agent Registry APIs (Task 13)
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock-agentcore-control:CreateRegistry",
+                    "bedrock-agentcore-control:GetRegistry",
+                    "bedrock-agentcore-control:ListRegistries",
+                    "bedrock-agentcore-control:UpdateRegistry",
+                    "bedrock-agentcore-control:DeleteRegistry",
+                    "bedrock-agentcore-control:CreateRegistryRecord",
+                    "bedrock-agentcore-control:GetRegistryRecord",
+                    "bedrock-agentcore-control:UpdateRegistryRecord",
+                    "bedrock-agentcore-control:ListRegistryRecords",
+                    "bedrock-agentcore-control:DeleteRegistryRecord",
+                    "bedrock-agentcore-control:SubmitRegistryRecordForApproval",
+                    "bedrock-agentcore-control:UpdateRegistryRecordStatus",
+                ],
+                resources=["*"],
+            )
+        )
+        # Also grant under the data-plane namespace (some preview cycles have
+        # these under bedrock-agentcore: instead).
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock-agentcore:CreateRegistry",
+                    "bedrock-agentcore:GetRegistry",
+                    "bedrock-agentcore:ListRegistries",
+                    "bedrock-agentcore:UpdateRegistry",
+                    "bedrock-agentcore:DeleteRegistry",
+                    "bedrock-agentcore:CreateRegistryRecord",
+                    "bedrock-agentcore:GetRegistryRecord",
+                    "bedrock-agentcore:UpdateRegistryRecord",
+                    "bedrock-agentcore:ListRegistryRecords",
+                    "bedrock-agentcore:DeleteRegistryRecord",
+                    "bedrock-agentcore:SubmitRegistryRecordForApproval",
+                    "bedrock-agentcore:UpdateRegistryRecordStatus",
+                ],
+                resources=["*"],
+            )
+        )
+        # AgentCore Optimization APIs (Task 12). These are under the control-plane
+        # namespace per boto3 1.43.6 models.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock-agentcore-control:CreateConfigurationBundle",
+                    "bedrock-agentcore-control:UpdateConfigurationBundle",
+                    "bedrock-agentcore-control:GetConfigurationBundle",
+                    "bedrock-agentcore-control:GetConfigurationBundleVersion",
+                    "bedrock-agentcore-control:ListConfigurationBundles",
+                    "bedrock-agentcore-control:ListConfigurationBundleVersions",
+                    "bedrock-agentcore-control:DeleteConfigurationBundle",
+                    "bedrock-agentcore-control:CreateOnlineEvaluationConfig",
+                    "bedrock-agentcore-control:GetOnlineEvaluationConfig",
+                    "bedrock-agentcore-control:UpdateOnlineEvaluationConfig",
+                    "bedrock-agentcore-control:DeleteOnlineEvaluationConfig",
+                    "bedrock-agentcore-control:ListOnlineEvaluationConfigs",
+                    "bedrock-agentcore-control:CreateEvaluator",
+                    "bedrock-agentcore-control:GetEvaluator",
+                    "bedrock-agentcore-control:UpdateEvaluator",
+                    "bedrock-agentcore-control:DeleteEvaluator",
+                    "bedrock-agentcore-control:ListEvaluators",
+                ],
+                resources=["*"],
+            )
+        )
+        # Fallback to the data-plane namespace too — AWS has inconsistently
+        # placed these across preview cycles.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock-agentcore:CreateConfigurationBundle",
+                    "bedrock-agentcore:UpdateConfigurationBundle",
+                    "bedrock-agentcore:GetConfigurationBundle",
+                    "bedrock-agentcore:GetConfigurationBundleVersion",
+                    "bedrock-agentcore:ListConfigurationBundles",
+                    "bedrock-agentcore:ListConfigurationBundleVersions",
+                    "bedrock-agentcore:DeleteConfigurationBundle",
+                    "bedrock-agentcore:CreateOnlineEvaluationConfig",
+                    "bedrock-agentcore:GetOnlineEvaluationConfig",
+                    "bedrock-agentcore:UpdateOnlineEvaluationConfig",
+                    "bedrock-agentcore:DeleteOnlineEvaluationConfig",
+                    "bedrock-agentcore:ListOnlineEvaluationConfigs",
+                    "bedrock-agentcore:CreateEvaluator",
+                    "bedrock-agentcore:GetEvaluator",
+                    "bedrock-agentcore:ListEvaluators",
+                    "bedrock-agentcore:DeleteEvaluator",
+                ],
+                resources=["*"],
+            )
+        )
+        # Pass the online-eval execution role to AgentCore
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["iam:PassRole"],
+                resources=[self.online_eval_execution_role.role_arn],
+                conditions={
+                    "StringEquals": {
+                        "iam:PassedToService": "bedrock-agentcore.amazonaws.com"
+                    }
+                },
+            )
+        )
+        # AgentCore Harness management (Task 11).
+        # Note: harness API actions live under the `bedrock-agentcore:` action
+        # namespace (not `-control`) even though calls go to the control-plane
+        # endpoint. Verified by live testing against us-east-1 May-2026.
+        # The CreateHarness backend internally provisions an AgentRuntime
+        # using the *caller's* credentials (not the execution role), so we
+        # also need CreateAgentRuntime + GetAgentRuntime + DeleteAgentRuntime.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "bedrock-agentcore:CreateHarness",
+                    "bedrock-agentcore:GetHarness",
+                    "bedrock-agentcore:ListHarnesses",
+                    "bedrock-agentcore:UpdateHarness",
+                    "bedrock-agentcore:DeleteHarness",
+                    "bedrock-agentcore:TagResource",
+                    "bedrock-agentcore:UntagResource",
+                    "bedrock-agentcore:ListTagsForResource",
+                    # Harness data-plane invoke
+                    "bedrock-agentcore:InvokeHarness",
+                    # Backing AgentRuntime + endpoint that harness provisions under the hood
+                    "bedrock-agentcore:CreateAgentRuntime",
+                    "bedrock-agentcore:GetAgentRuntime",
+                    "bedrock-agentcore:UpdateAgentRuntime",
+                    "bedrock-agentcore:DeleteAgentRuntime",
+                    "bedrock-agentcore:ListAgentRuntimes",
+                    "bedrock-agentcore:CreateAgentRuntimeEndpoint",
+                    "bedrock-agentcore:GetAgentRuntimeEndpoint",
+                    "bedrock-agentcore:UpdateAgentRuntimeEndpoint",
+                    "bedrock-agentcore:DeleteAgentRuntimeEndpoint",
+                    "bedrock-agentcore:ListAgentRuntimeEndpoints",
+                    # Workload identity used by harness for outbound auth
+                    "bedrock-agentcore:CreateWorkloadIdentity",
+                    "bedrock-agentcore:GetWorkloadIdentity",
+                    "bedrock-agentcore:DeleteWorkloadIdentity",
+                    "bedrock-agentcore:ListWorkloadIdentities",
+                ],
+                resources=["*"],
+            )
+        )
+        # Pass the execution role to the harness's underlying AgentRuntime
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["iam:PassRole"],
+                resources=[self.harness_execution_role.role_arn],
+                conditions={
+                    "StringEquals": {
+                        "iam:PassedToService": "bedrock-agentcore.amazonaws.com"
+                    }
+                },
+            )
+        )
+        # Pass the harness execution role to AgentCore when creating a harness
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["iam:PassRole"],
+                resources=[self.harness_execution_role.role_arn],
+                conditions={
+                    "StringEquals": {
+                        "iam:PassedToService": "bedrock-agentcore.amazonaws.com"
+                    }
+                },
+            )
+        )
         # Comprehend for PII detection
         role.add_to_policy(
             iam.PolicyStatement(
@@ -932,6 +1288,12 @@ class PlatformStack(cdk.Stack):
                 "RBAC_TABLE_NAME": self.rbac_table.table_name,
                 "AUDIT_TABLE_NAME": self.audit_table.table_name,
                 "DLP_POLICIES_TABLE_NAME": self.dlp_policies_table.table_name,
+                "HARNESS_TABLE_NAME": self.harness_table.table_name,
+                "HARNESS_EXECUTION_ROLE_ARN": self.harness_execution_role.role_arn,
+                "OPTIMIZATION_BUNDLES_TABLE_NAME": self.optimization_bundles_table.table_name,
+                "OPTIMIZATION_ONLINE_EVALS_TABLE_NAME": self.optimization_online_evals_table.table_name,
+                "ONLINE_EVAL_EXECUTION_ROLE_ARN": self.online_eval_execution_role.role_arn,
+                "REGISTRY_OWNERSHIP_TABLE_NAME": self.registry_ownership_table.table_name,
                 "RBAC_PLATFORM_ADMIN_IDS": self.node.try_get_context("platform_admin_ids") or "",
                 "RBAC_DEFAULT_ROLE": self.node.try_get_context("rbac_default_role") or "agent_creator",
                 "PROJECT_NAME": self._project,
@@ -1830,6 +2192,10 @@ class PlatformStack(cdk.Stack):
             "/api/admin/{proxy+}",
             "/api/rbac/{proxy+}",
             "/api/dlp/{proxy+}",
+            "/api/harness",
+            "/api/harness/{proxy+}",
+            "/api/optimization/{proxy+}",
+            "/api/registry/{proxy+}",
         ]
         mg_public_paths = [
             "/api/webhooks/{webhook_path}",

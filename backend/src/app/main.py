@@ -31,6 +31,9 @@ from app.routers.admin import (
     rbac_router as rbac_router,
     dlp_router as dlp_router,
 )
+from app.routers.harness import router as harness_router
+from app.routers.optimization import router as optimization_router
+from app.routers.registry import router as registry_router
 from app.services.config import load_config
 from app.services.dynamodb_storage import DynamoDBWorkflowStorage
 from app.services.flow_storage import DynamoDBFlowStorage, set_flow_storage
@@ -108,6 +111,9 @@ app.include_router(marketplace_router, prefix="/api", tags=["marketplace"])
 app.include_router(admin_router, prefix="/api", tags=["admin"])
 app.include_router(rbac_router, prefix="/api", tags=["rbac"])
 app.include_router(dlp_router, prefix="/api", tags=["dlp"])
+app.include_router(harness_router, prefix="/api", tags=["harness"])
+app.include_router(optimization_router, prefix="/api", tags=["optimization"])
+app.include_router(registry_router, prefix="/api", tags=["registry"])
 
 
 @app.get("/health")

@@ -16,6 +16,7 @@ import { KnowledgeBaseConfigModal } from './components/modals/KnowledgeBaseConfi
 import { GuardrailsConfigurationModal } from './components/modals/GuardrailsConfigurationModal';
 import { ApprovalInbox } from './components/approvals/ApprovalInbox';
 import { approvalStats } from './services/approvals';
+import { AnimatePresence, motion } from 'framer-motion';
 import { useWorkflowStore } from './store/workflowStore';
 import { useFlowStore } from './store/flowStore';
 import { useAutoSave } from './hooks/useAutoSave';
@@ -627,24 +628,35 @@ function App() {
       />
 
       {/* Approval Inbox drawer (Task 02) */}
-      {showApprovalInbox && (
-        <div
-          style={{
-            position: 'fixed',
-            top: 0,
-            right: 0,
-            width: 560,
-            maxWidth: '100vw',
-            height: '100vh',
-            background: '#fff',
-            boxShadow: '-2px 0 8px rgba(0,0,0,0.15)',
-            zIndex: 1000,
-            overflowY: 'auto',
-          }}
-        >
-          <ApprovalInbox onClose={() => setShowApprovalInbox(false)} />
-        </div>
-      )}
+      <AnimatePresence>
+        {showApprovalInbox && (
+          <>
+            <motion.div
+              key="approval-backdrop"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ duration: 0.18 }}
+              onClick={() => setShowApprovalInbox(false)}
+              className="fixed inset-0 bg-black/30 z-[999]"
+              aria-hidden="true"
+            />
+            <motion.aside
+              key="approval-drawer"
+              role="dialog"
+              aria-label="Approval inbox"
+              aria-modal="true"
+              initial={{ x: '100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '100%' }}
+              transition={{ type: 'tween', ease: [0.32, 0.72, 0, 1], duration: 0.28 }}
+              className="fixed top-0 right-0 h-screen w-full sm:w-[480px] max-w-full bg-white shadow-2xl border-l border-[#e9ebed] z-[1000] flex flex-col"
+            >
+              <ApprovalInbox onClose={() => setShowApprovalInbox(false)} />
+            </motion.aside>
+          </>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

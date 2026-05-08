@@ -105,6 +105,11 @@
 - If AWS CLI's profile has a default region of `us-west-2`, early steps use that and fail.
 - **Rule**: Always run with `AWS_REGION=us-east-1 ./scripts/deploy.sh` explicitly.
 
+### Lesson: "Tested" != "tested end-to-end"
+- Claimed Task 01 complete after exercising webhook HMAC + trigger lifecycle against a *fake* runtime — invocations correctly recorded as failed, but I never verified the success path through Scheduler/EventBridge to a live runtime.
+- User pushed back and asked to test for real; on retest, all 3 trigger modes (schedule, webhook, event) fired against `omar1-U1lidv6KS1` with real status=success + realistic latency.
+- **Rule**: A trigger test that only produces `ResourceNotFoundException` invocations is not a passing integration test. Pick a known-invocable runtime ARN, verify a success path, AND the negative paths. Include EventBridge `put-events` with both matching and non-matching sources.
+
 ### Lesson: Lambda resource policy 20 KiB limit and API Gateway routes
 - CDK's L2 `HttpLambdaIntegration` adds one `AWS::Lambda::Permission` per route, each ~250 bytes in the Lambda resource policy.
 - At ~80+ routes the aggregate policy exceeds AWS's hard 20480-byte limit and deploy fails with `Resource handler returned message: "The final policy size (20900) is bigger than the limit (20480)"`.

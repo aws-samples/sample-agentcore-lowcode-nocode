@@ -453,6 +453,66 @@ sweep_orphan_resources() {
     done
   done
 
+  # 10. Harnesses (Task 11) — must be deleted before the Lambdas/roles below
+  local harnesses
+  harnesses=$(aws bedrock-agentcore-control list-harnesses \
+    --region "${AWS_REGION}" \
+    --query "harnesses[].harnessId" \
+    --output text 2>/dev/null || echo "")
+  for h_id in ${harnesses}; do
+    log_info "  Deleting orphan harness: ${h_id}"
+    aws bedrock-agentcore-control delete-harness \
+      --harness-id "${h_id}" --region "${AWS_REGION}" 2>/dev/null || true
+  done
+
+  # 11. Optimization configuration bundles (Task 12)
+  local bundles
+  bundles=$(aws bedrock-agentcore-control list-configuration-bundles \
+    --region "${AWS_REGION}" \
+    --query "bundles[].bundleId" \
+    --output text 2>/dev/null || echo "")
+  for b_id in ${bundles}; do
+    log_info "  Deleting orphan configuration bundle: ${b_id}"
+    aws bedrock-agentcore-control delete-configuration-bundle \
+      --bundle-id "${b_id}" --region "${AWS_REGION}" 2>/dev/null || true
+  done
+
+  # 12. Online evaluation configs (Task 12)
+  local oe_configs
+  oe_configs=$(aws bedrock-agentcore-control list-online-evaluation-configs \
+    --region "${AWS_REGION}" \
+    --query "onlineEvaluationConfigs[].onlineEvaluationConfigId" \
+    --output text 2>/dev/null || echo "")
+  for oe_id in ${oe_configs}; do
+    log_info "  Deleting orphan online-evaluation config: ${oe_id}"
+    aws bedrock-agentcore-control delete-online-evaluation-config \
+      --online-evaluation-config-id "${oe_id}" --region "${AWS_REGION}" 2>/dev/null || true
+  done
+
+  # 13. Registry records we created (owned by this platform; skip records we
+  #     didn't make, e.g. workshop-registry content). We look at registries
+  #     whose name starts with our project prefix.
+  local our_registries
+  our_registries=$(aws bedrock-agentcore-control list-registries \
+    --region "${AWS_REGION}" \
+    --query "registries[?starts_with(name,'${PROJECT_NAME}')].registryId" \
+    --output text 2>/dev/null || echo "")
+  for reg_id in ${our_registries}; do
+    log_info "  Sweeping records in registry ${reg_id}"
+    local rec_ids
+    rec_ids=$(aws bedrock-agentcore-control list-registry-records \
+      --registry-id "${reg_id}" --region "${AWS_REGION}" \
+      --query "registryRecords[].recordId" --output text 2>/dev/null || echo "")
+    for r_id in ${rec_ids}; do
+      aws bedrock-agentcore-control delete-registry-record \
+        --registry-id "${reg_id}" --record-id "${r_id}" \
+        --region "${AWS_REGION}" 2>/dev/null || true
+    done
+    log_info "  Deleting registry: ${reg_id}"
+    aws bedrock-agentcore-control delete-registry \
+      --registry-id "${reg_id}" --region "${AWS_REGION}" 2>/dev/null || true
+  done
+
   log_success "Orphan resource sweep complete."
 }
 

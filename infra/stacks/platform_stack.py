@@ -517,6 +517,31 @@ class PlatformStack(cdk.Stack):
                 resources=["*"],
             )
         )
+        # Account-wide log actions (API doesn't support resource-level scoping).
+        # PutResourcePolicy is for log-group access policies; PutIndexPolicy
+        # is for CloudWatch Logs field-indexing policies (the
+        # online-eval service needs both to attach itself to the
+        # aws/spans log group — the error surfaces as "Access denied when
+        # accessing index policy for aws/spans").
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "logs:DescribeLogGroups",
+                    "logs:StartQuery",
+                    "logs:GetQueryResults",
+                    "logs:StopQuery",
+                    "logs:PutResourcePolicy",
+                    "logs:DescribeResourcePolicies",
+                    "logs:DeleteResourcePolicy",
+                    "logs:PutIndexPolicy",
+                    "logs:DescribeIndexPolicies",
+                    "logs:DeleteIndexPolicy",
+                    "logs:DescribeFieldIndexes",
+                ],
+                resources=["*"],
+            )
+        )
+        # Log-group-scoped actions
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
@@ -526,6 +551,7 @@ class PlatformStack(cdk.Stack):
                     "logs:DescribeLogStreams",
                     "logs:FilterLogEvents",
                     "logs:GetLogEvents",
+                    "logs:GetLogGroupFields",
                 ],
                 resources=[f"arn:aws:logs:{self.region}:{self.account}:log-group:*"],
             )
@@ -1047,6 +1073,24 @@ class PlatformStack(cdk.Stack):
                         "iam:PassedToService": "bedrock-agentcore.amazonaws.com"
                     }
                 },
+            )
+        )
+        # CreateOnlineEvaluationConfig validates caller has CW Logs index /
+        # resource policy permissions so it can attach its own policy during
+        # provisioning. Resource=* because these APIs don't support scoping.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "logs:PutIndexPolicy",
+                    "logs:DescribeIndexPolicies",
+                    "logs:DeleteIndexPolicy",
+                    "logs:PutResourcePolicy",
+                    "logs:DescribeResourcePolicies",
+                    "logs:DeleteResourcePolicy",
+                    "logs:DescribeLogGroups",
+                    "logs:DescribeFieldIndexes",
+                ],
+                resources=["*"],
             )
         )
         # AgentCore Harness management (Task 11).

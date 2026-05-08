@@ -110,3 +110,44 @@ def test_record_name_rules() -> None:
                 custom=CustomDescriptor(inline_content="{}")
             ),
         )
+
+
+def test_sync_from_url_rejects_http() -> None:
+    with pytest.raises(ValueError):
+        RecordCreateRequest(
+            registry_id="r1",
+            name="http_sync",
+            descriptor_type=RegistryRecordDescriptorType.MCP,
+            sync_from_url="http://example.com/mcp",
+        )
+
+
+def test_sync_from_url_rejects_imds() -> None:
+    with pytest.raises(ValueError):
+        RecordCreateRequest(
+            registry_id="r1",
+            name="imds_sync",
+            descriptor_type=RegistryRecordDescriptorType.MCP,
+            sync_from_url="https://169.254.169.254/latest/meta-data/",
+        )
+
+
+def test_sync_from_url_rejects_rfc1918() -> None:
+    for h in ("https://10.0.0.1/x", "https://192.168.1.1/x", "https://172.16.0.1/x"):
+        with pytest.raises(ValueError):
+            RecordCreateRequest(
+                registry_id="r1",
+                name="rfc1918_test",
+                descriptor_type=RegistryRecordDescriptorType.MCP,
+                sync_from_url=h,
+            )
+
+
+def test_sync_from_url_accepts_https_public() -> None:
+    req = RecordCreateRequest(
+        registry_id="r1",
+        name="good_sync",
+        descriptor_type=RegistryRecordDescriptorType.MCP,
+        sync_from_url="https://api.example.com/mcp",
+    )
+    assert req.sync_from_url == "https://api.example.com/mcp"

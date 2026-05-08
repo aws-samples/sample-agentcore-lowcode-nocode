@@ -175,3 +175,41 @@ def test_extract_runtime_ids_returns_nones_when_absent() -> None:
     assert HarnessDeployer._extract_runtime_ids(
         {"environment": {"agentCoreRuntimeEnvironment": {"agentRuntimeArn": "arn:...", "agentRuntimeId": "r-1"}}}
     ) == ("arn:...", "r-1")
+
+
+def test_drain_stream_surfaces_errors() -> None:
+    """The invoker must not claim success when the stream raises."""
+    from app.services.harness_invoker import _drain_stream
+
+    class BadStream:
+        def __iter__(self):
+            raise RuntimeError("runtimeClientError: legacy model")
+
+    text, err = _drain_stream(BadStream())
+    assert text == ""
+    assert err is not None
+    assert "legacy model" in err
+
+
+def test_drain_stream_extracts_converse_deltas() -> None:
+    """Delta events should accumulate into clean text."""
+    from app.services.harness_invoker import _drain_stream
+
+    events = [
+        {"role": "assistant"},
+        {"contentBlockIndex": 0, "delta": {"text": "Hi"}},
+        {"contentBlockIndex": 0, "delta": {"text": " world"}},
+        {"stopReason": "end_turn"},
+        {"usage": {"inputTokens": 10}},
+    ]
+    text, err = _drain_stream(events)
+    assert err is None
+    assert text == "Hi world"
+
+
+def test_drain_stream_empty_none() -> None:
+    from app.services.harness_invoker import _drain_stream
+
+    text, err = _drain_stream(None)
+    assert text == ""
+    assert err is None

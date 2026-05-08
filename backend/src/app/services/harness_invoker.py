@@ -64,7 +64,15 @@ class HarnessInvoker:
                 duration_ms=int((time.time() - started) * 1000),
             )
 
-        text = _drain_stream(resp.get("stream"))
+        text, stream_err = _drain_stream(resp.get("stream"))
+        if stream_err:
+            return HarnessInvokeResponse(
+                success=False,
+                response=text or None,
+                session_id=sid,
+                error=stream_err,
+                duration_ms=int((time.time() - started) * 1000),
+            )
         return HarnessInvokeResponse(
             success=True,
             response=text,
@@ -73,7 +81,7 @@ class HarnessInvoker:
         )
 
 
-def _drain_stream(stream: Any) -> str:
+def _drain_stream(stream: Any) -> tuple[str, Optional[str]]:
     """Accumulate all events from the EventStream into plain assistant text.
 
     InvokeHarness returns Bedrock Converse-style streaming events wrapped in
@@ -87,11 +95,13 @@ def _drain_stream(stream: Any) -> str:
       {"stopReason": "end_turn"}                    — message stop
       {"usage": {...}, "metrics": {...}}            — tokens + latency
 
-    We concatenate ``delta.text`` fragments, in order, and return the joined
-    assistant text. Non-text events are ignored.
+    Returns (accumulated_text, error_message). If the stream raises
+    (``runtimeClientError`` / ``EventStreamError``) — e.g. Bedrock refuses
+    a legacy model — the caller sees a truthful error, not an empty string
+    passed off as success.
     """
     if stream is None:
-        return ""
+        return "", None
     parts: list[str] = []
     try:
         for event in stream:
@@ -105,7 +115,8 @@ def _drain_stream(stream: Any) -> str:
                     parts.append(text)
     except Exception as e:  # noqa: BLE001
         logger.warning("stream drain error: %s", e)
-    return "".join(parts)
+        return "".join(parts), str(e)
+    return "".join(parts), None
 
 
 def _extract_payload(event: Any) -> Any:

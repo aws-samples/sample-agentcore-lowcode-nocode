@@ -6,6 +6,8 @@
  *   - "add trigger" form (schedule | webhook | event)
  *   - quick enable/disable + delete + test
  *   - execution history (last 100)
+ *
+ * Styled to match the AWS-console Tailwind look of the DeployPanel.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -33,6 +35,22 @@ interface Props {
 }
 
 const DEFAULT_INPUT_TEMPLATE = 'Scheduled run: {event}';
+
+const inputCls =
+  'w-full rounded-md border border-[#e9ebed] bg-white px-2.5 py-1.5 text-sm text-[#16191f] ' +
+  'focus:outline-none focus:border-[#0972d3] focus:ring-2 focus:ring-[#0972d3]/30 placeholder-[#8d99a8]';
+const selectCls =
+  'rounded-md border border-[#e9ebed] bg-white px-2 py-1.5 text-sm text-[#16191f] ' +
+  'focus:outline-none focus:border-[#0972d3] focus:ring-2 focus:ring-[#0972d3]/30';
+const btnSecondaryCls =
+  'px-2.5 py-1 text-xs font-medium rounded-md border border-[#e9ebed] bg-white text-[#16191f] ' +
+  'hover:bg-[#f2f3f3] transition-colors';
+const btnDangerCls =
+  'px-2.5 py-1 text-xs font-medium rounded-md border border-red-200 bg-white text-red-600 ' +
+  'hover:bg-red-50 transition-colors';
+const btnPrimaryCls =
+  'inline-flex items-center gap-1.5 rounded-md bg-[#ff9900] px-3 py-1.5 text-sm font-semibold text-[#232f3e] ' +
+  'hover:bg-[#ec7211] disabled:bg-[#e9ebed] disabled:text-[#8d99a8] disabled:cursor-not-allowed transition-colors';
 
 export function TriggersPanel({ deploymentId, runtimeId, apiBaseUrl, onClose }: Props) {
   const [triggers, setTriggers] = useState<TriggerConfig[]>([]);
@@ -79,14 +97,24 @@ export function TriggersPanel({ deploymentId, runtimeId, apiBaseUrl, onClose }: 
   );
 
   return (
-    <div className="triggers-panel" style={{ padding: 16 }}>
-      <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h2 style={{ margin: 0 }}>Triggers</h2>
-        <button onClick={onClose} aria-label="close">✕</button>
+    <div className="p-4 space-y-4">
+      <header className="flex items-center justify-between">
+        <div>
+          <h2 className="text-base font-semibold text-[#16191f]">Triggers</h2>
+          <p className="text-xs text-[#5f6b7a] mt-0.5">
+            Schedule runs, expose a webhook URL, or fire this agent from AWS events.
+          </p>
+        </div>
+        <button
+          onClick={onClose}
+          aria-label="Close triggers"
+          className="p-1.5 rounded-md text-[#5f6b7a] hover:bg-[#f2f3f3] transition-colors"
+        >
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
       </header>
-      <p style={{ color: '#555', fontSize: 13 }}>
-        Schedule runs, expose a webhook URL, or fire this agent from AWS events.
-      </p>
 
       <NewTriggerForm
         deploymentId={deploymentId}
@@ -95,38 +123,69 @@ export function TriggersPanel({ deploymentId, runtimeId, apiBaseUrl, onClose }: 
       />
 
       {error && (
-        <div role="alert" style={{ color: '#b00', marginTop: 12 }}>{error}</div>
+        <div
+          role="alert"
+          className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700"
+        >
+          {error}
+        </div>
       )}
 
-      {loading && <div>Loading…</div>}
+      {loading && (
+        <div className="flex items-center gap-2 text-xs text-[#5f6b7a]">
+          <div className="w-3 h-3 border-2 border-[#0972d3] border-t-transparent rounded-full animate-spin" />
+          Loading triggers…
+        </div>
+      )}
 
       {!loading && triggers.length === 0 && (
-        <div style={{ marginTop: 16, color: '#666' }}>No triggers yet.</div>
+        <div className="rounded-xl border border-dashed border-[#e9ebed] bg-[#fafafa] p-6 text-center">
+          <div className="text-sm text-[#16191f] font-medium mb-1">No triggers yet</div>
+          <div className="text-xs text-[#5f6b7a]">
+            Create one above to schedule runs or expose a webhook.
+          </div>
+        </div>
       )}
 
-      <ul style={{ listStyle: 'none', padding: 0, marginTop: 16 }}>
+      <ul className="space-y-2">
         {triggers.map((t) => (
-          <li key={t.trigger_id} style={{ border: '1px solid #ddd', borderRadius: 4, marginBottom: 8, padding: 12 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-              <div>
-                <strong>{t.name}</strong>{' '}
-                <span style={{ color: '#888', fontSize: 12 }}>
-                  [{t.trigger_type}] {t.enabled ? 'enabled' : 'disabled'} · fired {t.trigger_count}×
-                </span>
+          <li
+            key={t.trigger_id}
+            className="rounded-xl border border-[#e9ebed] bg-white p-3 shadow-sm"
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-sm font-semibold text-[#16191f] truncate">{t.name}</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-[#0972d3]/10 text-[#0972d3] font-medium uppercase tracking-wide">
+                    {t.trigger_type}
+                  </span>
+                  <span
+                    className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${
+                      t.enabled
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                        : 'bg-[#f2f3f3] text-[#5f6b7a] border border-[#e9ebed]'
+                    }`}
+                  >
+                    {t.enabled ? 'Enabled' : 'Disabled'}
+                  </span>
+                  <span className="text-[11px] text-[#5f6b7a]">fired {t.trigger_count}×</span>
+                </div>
                 {t.trigger_type === 'schedule' && t.schedule_expression && (
-                  <div style={{ fontSize: 12, color: '#555' }}>{t.schedule_expression}</div>
+                  <div className="mt-1 text-xs text-[#5f6b7a] font-mono">{t.schedule_expression}</div>
                 )}
                 {t.trigger_type === 'webhook' && t.webhook_path && (
-                  <div style={{ fontSize: 12, color: '#555' }}>
-                    <code>{webhookUrl(apiBaseUrl, t.webhook_path)}</code>
-                  </div>
+                  <code className="mt-1 block text-[11px] text-[#0972d3] break-all">
+                    {webhookUrl(apiBaseUrl, t.webhook_path)}
+                  </code>
                 )}
                 {t.last_error && (
-                  <div style={{ fontSize: 12, color: '#b00' }}>Last error: {t.last_error}</div>
+                  <div className="mt-1 text-[11px] text-red-600">Last error: {t.last_error}</div>
                 )}
               </div>
-              <div style={{ display: 'flex', gap: 6 }}>
+              <div className="flex flex-wrap gap-1.5 flex-shrink-0 justify-end">
                 <button
+                  className={btnSecondaryCls}
                   onClick={async () => {
                     try {
                       await updateTrigger(t.trigger_id, { enabled: !t.enabled });
@@ -139,6 +198,7 @@ export function TriggersPanel({ deploymentId, runtimeId, apiBaseUrl, onClose }: 
                   {t.enabled ? 'Disable' : 'Enable'}
                 </button>
                 <button
+                  className={btnSecondaryCls}
                   onClick={async () => {
                     try {
                       const r = await testTrigger(t.trigger_id);
@@ -154,6 +214,7 @@ export function TriggersPanel({ deploymentId, runtimeId, apiBaseUrl, onClose }: 
                   Test
                 </button>
                 <button
+                  className={btnSecondaryCls}
                   onClick={() => handleExpand(t.trigger_id)}
                   aria-expanded={expandedId === t.trigger_id}
                 >
@@ -161,6 +222,7 @@ export function TriggersPanel({ deploymentId, runtimeId, apiBaseUrl, onClose }: 
                 </button>
                 {t.trigger_type === 'webhook' && (
                   <button
+                    className={btnSecondaryCls}
                     onClick={async () => {
                       try {
                         const s = await getWebhookSecret(t.trigger_id);
@@ -174,6 +236,7 @@ export function TriggersPanel({ deploymentId, runtimeId, apiBaseUrl, onClose }: 
                   </button>
                 )}
                 <button
+                  className={btnDangerCls}
                   onClick={async () => {
                     if (!confirm(`Delete trigger "${t.name}"?`)) return;
                     try {
@@ -189,10 +252,15 @@ export function TriggersPanel({ deploymentId, runtimeId, apiBaseUrl, onClose }: 
               </div>
             </div>
             {revealedSecret[t.trigger_id] && (
-              <div style={{ fontSize: 12, marginTop: 8 }}>
-                <code style={{ wordBreak: 'break-all' }}>{revealedSecret[t.trigger_id]}</code>
-                <div style={{ color: '#888' }}>
-                  Send as: <code>X-AgentCore-Signature: sha256=&lt;HMAC-SHA256(body, secret)&gt;</code>
+              <div className="mt-3 rounded-md bg-[#f2f3f3] border border-[#e9ebed] p-2">
+                <div className="text-[10px] uppercase tracking-wide text-[#5f6b7a] mb-0.5">
+                  Webhook secret
+                </div>
+                <code className="text-[11px] font-mono text-[#16191f] break-all block">
+                  {revealedSecret[t.trigger_id]}
+                </code>
+                <div className="text-[10px] text-[#5f6b7a] mt-1">
+                  Send as: <code className="text-[#d45b07]">X-AgentCore-Signature: sha256=&lt;HMAC-SHA256(body, secret)&gt;</code>
                 </div>
               </div>
             )}
@@ -208,31 +276,45 @@ export function TriggersPanel({ deploymentId, runtimeId, apiBaseUrl, onClose }: 
 
 function HistoryList({ invocations }: { invocations: TriggerInvocationRecord[] }) {
   if (invocations.length === 0) {
-    return <div style={{ marginTop: 8, color: '#666', fontSize: 13 }}>No invocations yet.</div>;
+    return (
+      <div className="mt-3 rounded-md bg-[#fafafa] border border-[#e9ebed] p-3 text-xs text-[#5f6b7a]">
+        No invocations yet.
+      </div>
+    );
   }
   return (
-    <table style={{ marginTop: 8, width: '100%', fontSize: 12, borderCollapse: 'collapse' }}>
-      <thead>
-        <tr style={{ textAlign: 'left', color: '#555' }}>
-          <th>When</th>
-          <th>Source</th>
-          <th>Status</th>
-          <th>Duration</th>
-          <th>Detail</th>
-        </tr>
-      </thead>
-      <tbody>
-        {invocations.map((i) => (
-          <tr key={i.invocation_id}>
-            <td>{new Date(i.invoked_at).toLocaleString()}</td>
-            <td>{i.source}</td>
-            <td style={{ color: i.status === 'success' ? '#080' : '#b00' }}>{i.status}</td>
-            <td>{i.duration_ms ?? '-'}ms</td>
-            <td>{i.error || i.input_payload_preview || ''}</td>
+    <div className="mt-3 rounded-md border border-[#e9ebed] overflow-hidden">
+      <table className="w-full text-xs">
+        <thead>
+          <tr className="bg-[#f2f3f3] text-[#5f6b7a] text-left">
+            <th className="px-2 py-1.5 font-medium">When</th>
+            <th className="px-2 py-1.5 font-medium">Source</th>
+            <th className="px-2 py-1.5 font-medium">Status</th>
+            <th className="px-2 py-1.5 font-medium">Duration</th>
+            <th className="px-2 py-1.5 font-medium">Detail</th>
           </tr>
-        ))}
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          {invocations.map((i) => (
+            <tr key={i.invocation_id} className="border-t border-[#e9ebed] text-[#16191f]">
+              <td className="px-2 py-1.5">{new Date(i.invoked_at).toLocaleString()}</td>
+              <td className="px-2 py-1.5">{i.source}</td>
+              <td
+                className={`px-2 py-1.5 font-medium ${
+                  i.status === 'success' ? 'text-emerald-700' : 'text-red-600'
+                }`}
+              >
+                {i.status}
+              </td>
+              <td className="px-2 py-1.5">{i.duration_ms ?? '-'}ms</td>
+              <td className="px-2 py-1.5 text-[#5f6b7a] truncate max-w-[120px]" title={i.error || i.input_payload_preview || ''}>
+                {i.error || i.input_payload_preview || ''}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
@@ -295,10 +377,14 @@ function NewTriggerForm({
   };
 
   return (
-    <section style={{ border: '1px solid #eee', padding: 12, marginTop: 12, borderRadius: 4 }}>
-      <h3 style={{ margin: '0 0 8px 0', fontSize: 14 }}>New trigger</h3>
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <select value={type} onChange={(e) => setType(e.target.value as TriggerType)}>
+    <section className="rounded-xl border border-[#e9ebed] bg-white p-4 shadow-sm space-y-2.5">
+      <h3 className="text-sm font-semibold text-[#16191f]">New trigger</h3>
+      <div className="flex gap-2">
+        <select
+          value={type}
+          onChange={(e) => setType(e.target.value as TriggerType)}
+          className={selectCls}
+        >
           <option value="schedule">Schedule</option>
           <option value="webhook">Webhook</option>
           <option value="event">Event</option>
@@ -307,16 +393,16 @@ function NewTriggerForm({
           placeholder="Trigger name"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          style={{ flex: 1, minWidth: 120 }}
+          className={inputCls + ' flex-1'}
         />
       </div>
 
       {type === 'schedule' && (
-        <div style={{ marginTop: 8 }}>
-          <label style={{ display: 'block', fontSize: 12 }}>
-            Preset
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <label className="text-[11px] uppercase tracking-wide text-[#5f6b7a]">Preset</label>
             <select
-              style={{ marginLeft: 8 }}
+              className={selectCls + ' flex-1'}
               value=""
               onChange={(e) => {
                 if (e.target.value) setScheduleExpression(e.target.value);
@@ -329,9 +415,9 @@ function NewTriggerForm({
                 </option>
               ))}
             </select>
-          </label>
+          </div>
           <input
-            style={{ marginTop: 4, width: '100%' }}
+            className={inputCls + ' font-mono text-xs'}
             placeholder="cron(0 9 * * ? *) or rate(1 hour)"
             value={scheduleExpression}
             onChange={(e) => setScheduleExpression(e.target.value)}
@@ -340,45 +426,53 @@ function NewTriggerForm({
       )}
 
       {type === 'webhook' && (
-        <div style={{ marginTop: 8 }}>
-          <input
-            style={{ width: '100%' }}
-            placeholder="webhook-path (alphanumeric, _ -)"
-            value={webhookPath}
-            onChange={(e) => setWebhookPath(e.target.value)}
-          />
-        </div>
+        <input
+          className={inputCls}
+          placeholder="webhook-path (alphanumeric, _ -)"
+          value={webhookPath}
+          onChange={(e) => setWebhookPath(e.target.value)}
+        />
       )}
 
       {type === 'event' && (
-        <div style={{ marginTop: 8 }}>
-          <textarea
-            rows={4}
-            style={{ width: '100%', fontFamily: 'monospace', fontSize: 12 }}
-            placeholder='{"source": ["aws.s3"]}'
-            value={eventPattern}
-            onChange={(e) => setEventPattern(e.target.value)}
-          />
-        </div>
+        <textarea
+          rows={4}
+          className={inputCls + ' font-mono text-xs resize-y'}
+          placeholder='{"source": ["aws.s3"]}'
+          value={eventPattern}
+          onChange={(e) => setEventPattern(e.target.value)}
+        />
       )}
 
-      <div style={{ marginTop: 8 }}>
-        <label style={{ fontSize: 12 }}>Input template (available var: {`{event}`})</label>
+      <div>
+        <label className="text-[11px] uppercase tracking-wide text-[#5f6b7a]">
+          Input template (available var: {`{event}`})
+        </label>
         <input
-          style={{ width: '100%' }}
+          className={inputCls + ' mt-1'}
           value={inputTemplate}
           onChange={(e) => setInputTemplate(e.target.value)}
         />
       </div>
 
-      {err && <div style={{ color: '#b00', marginTop: 8 }}>{err}</div>}
+      {err && (
+        <div
+          role="alert"
+          className="rounded-md border border-red-200 bg-red-50 px-2.5 py-1.5 text-xs text-red-700"
+        >
+          {err}
+        </div>
+      )}
 
-      <button
-        disabled={!canSubmit || busy}
-        onClick={submit}
-        style={{ marginTop: 8 }}
-      >
-        {busy ? 'Creating…' : 'Create trigger'}
+      <button disabled={!canSubmit || busy} onClick={submit} className={btnPrimaryCls}>
+        {busy ? (
+          <>
+            <div className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
+            Creating…
+          </>
+        ) : (
+          'Create trigger'
+        )}
       </button>
     </section>
   );

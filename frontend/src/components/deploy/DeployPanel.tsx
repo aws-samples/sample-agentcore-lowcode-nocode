@@ -13,6 +13,8 @@ import { recordInvocation } from '../../services/analytics';
 import { WORKFLOW_TEMPLATES } from '../../data/templates';
 import { useWorkflowStore } from '../../store/workflowStore';
 import type { AgentCoreComponentType } from '../../types/workflow';
+import ChatMarkdown from './ChatMarkdown';
+import DeployTabs, { type DeployTabId } from './DeployTabs';
 
 interface DeploymentStatus {
   state: 'idle' | 'deploying' | 'deployed' | 'error';
@@ -98,7 +100,12 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
   const [, setTestResult] = useState<TestResult | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [activeTab, setActiveTab] = useState<'deploy' | 'chat' | 'triggers' | 'versions' | 'analytics'>('deploy');
+  const [activeTab, setActiveTab] = useState<DeployTabId>('deploy');
+  const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
+  const [isColdStart, setIsColdStart] = useState(false);
+  const [coldStartAttempt, setColdStartAttempt] = useState<{ attempt: number; max: number } | null>(null);
+  const [isScrolledUp, setIsScrolledUp] = useState(false);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
   // Surfaces the backing deployment id (used by Triggers tab) — set once the SFN job returns.
   const [deploymentIdState, setDeploymentIdState] = useState<string | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -119,10 +126,35 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
     return WORKFLOW_TEMPLATES.find((t) => t.id === templateId) || null;
   }, [templateId]);
 
-  // Auto-scroll chat to bottom when messages change
+  // Auto-scroll chat to bottom when messages change — but only if user is already near the bottom.
+  // If the user has scrolled up to re-read, we show a "jump to latest" FAB instead.
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    const el = chatScrollRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+    if (nearBottom) {
+      chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [chatMessages, isTesting]);
+
+  // Track whether the user has scrolled up — drives the "jump to latest" FAB.
+  const handleChatScroll = useCallback(() => {
+    const el = chatScrollRef.current;
+    if (!el) return;
+    const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+    setIsScrolledUp(distance > 120);
+  }, []);
+
+  const jumpToLatest = useCallback(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, []);
+
+  const copyMessage = useCallback((id: string, content: string) => {
+    navigator.clipboard.writeText(content).then(() => {
+      setCopiedMsgId(id);
+      setTimeout(() => setCopiedMsgId((curr) => (curr === id ? null : curr)), 1500);
+    });
+  }, []);
 
   // Auto-focus chat input when switching to chat tab
   useEffect(() => {
@@ -564,15 +596,8 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
       for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
           if (attempt > 1) {
-            setChatMessages(prev => {
-              const filtered = prev.filter(m => m.id !== 'warming-up');
-              return [...filtered, {
-                id: 'warming-up',
-                role: 'system' as const,
-                content: `Runtime warming up... Retry ${attempt}/${MAX_RETRIES} (cold start is normal)`,
-                timestamp: new Date(),
-              }];
-            });
+            setIsColdStart(true);
+            setColdStartAttempt({ attempt, max: MAX_RETRIES });
             await new Promise(r => setTimeout(r, 5000 + (attempt - 2) * 5000));
           }
 
@@ -708,8 +733,10 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
       setChatMessages(prev => [...prev.filter(m => m.id !== 'warming-up'), { id: `error-${Date.now()}`, role: 'system' as const, content: exhaustErr, timestamp: new Date() }]);
     } finally {
       setIsTesting(false);
+      setIsColdStart(false);
+      setColdStartAttempt(null);
     }
-  }, [deploymentStatus.endpoint, deploymentStatus.simulated, deploymentStatus.runtimeId, testInput, sessionId, conversationHistory]);
+  }, [deploymentStatus.endpoint, deploymentStatus.simulated, deploymentStatus.runtimeId, testInput, sessionId, conversationHistory, deploymentIdState, config]);
 
   const handleNewSession = useCallback(() => {
     setSessionId(null);
@@ -753,7 +780,11 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
       <div className="fixed inset-0 bg-black/20 z-40" onClick={onClose} />
 
       {/* Panel */}
-      <div className="fixed right-0 top-0 bottom-0 w-[420px] bg-white shadow-2xl z-50 flex flex-col overflow-hidden border-l border-[#e9ebed]">
+      <div
+        role="dialog"
+        aria-label="Deploy and test panel"
+        className="fixed right-0 top-0 bottom-0 w-full sm:w-[460px] bg-white shadow-2xl z-50 flex flex-col overflow-hidden border-l border-[#e9ebed]"
+      >
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-3.5 border-b border-[#e9ebed] bg-[#232f3e]">
           <div className="flex items-center gap-3">
@@ -769,6 +800,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
           </div>
           <button
             onClick={onClose}
+            aria-label="Close deploy panel"
             className="p-1.5 rounded-md hover:bg-white/10 transition-colors"
           >
             <svg className="w-4 h-4 text-white/50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -778,88 +810,12 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
         </div>
 
         {/* Tabs */}
-        <div className="flex border-b border-[#e9ebed]">
-          <button
-            onClick={() => setActiveTab('deploy')}
-            className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${
-              activeTab === 'deploy'
-                ? 'text-[#0972d3]'
-                : 'text-[#5f6b7a] hover:text-[#16191f]'
-            }`}
-          >
-            Deploy
-            {activeTab === 'deploy' && (
-              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
-            )}
-          </button>
-          <button
-            onClick={() => setActiveTab('chat')}
-            disabled={deploymentStatus.state !== 'deployed'}
-            className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${
-              activeTab === 'chat'
-                ? 'text-[#0972d3]'
-                : deploymentStatus.state === 'deployed'
-                  ? 'text-[#5f6b7a] hover:text-[#16191f]'
-                  : 'text-[#d1d5db] cursor-not-allowed'
-            }`}
-          >
-            Chat
-            {deploymentStatus.state === 'deployed' && (
-              <span className="ml-1.5 w-1.5 h-1.5 bg-emerald-500 rounded-full inline-block" />
-            )}
-            {activeTab === 'chat' && (
-              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
-            )}
-          </button>
-          <button
-            onClick={() => setActiveTab('triggers')}
-            disabled={deploymentStatus.state !== 'deployed'}
-            className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${
-              activeTab === 'triggers'
-                ? 'text-[#0972d3]'
-                : deploymentStatus.state === 'deployed'
-                  ? 'text-[#5f6b7a] hover:text-[#16191f]'
-                  : 'text-[#d1d5db] cursor-not-allowed'
-            }`}
-          >
-            Triggers
-            {activeTab === 'triggers' && (
-              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
-            )}
-          </button>
-          <button
-            onClick={() => setActiveTab('versions')}
-            disabled={deploymentStatus.state !== 'deployed'}
-            className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${
-              activeTab === 'versions'
-                ? 'text-[#0972d3]'
-                : deploymentStatus.state === 'deployed'
-                  ? 'text-[#5f6b7a] hover:text-[#16191f]'
-                  : 'text-[#d1d5db] cursor-not-allowed'
-            }`}
-          >
-            Versions
-            {activeTab === 'versions' && (
-              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
-            )}
-          </button>
-          <button
-            onClick={() => setActiveTab('analytics')}
-            disabled={deploymentStatus.state !== 'deployed'}
-            className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${
-              activeTab === 'analytics'
-                ? 'text-[#0972d3]'
-                : deploymentStatus.state === 'deployed'
-                  ? 'text-[#5f6b7a] hover:text-[#16191f]'
-                  : 'text-[#d1d5db] cursor-not-allowed'
-            }`}
-          >
-            Analytics
-            {activeTab === 'analytics' && (
-              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
-            )}
-          </button>
-        </div>
+        <DeployTabs
+          activeTab={activeTab}
+          isDeployed={deploymentStatus.state === 'deployed'}
+          chatReady={deploymentStatus.state === 'deployed'}
+          onChange={setActiveTab}
+        />
 
         {/* Content */}
         <div className={`flex-1 min-h-0 ${activeTab === 'chat' ? 'flex flex-col' : 'overflow-y-auto'}`}>
@@ -1145,17 +1101,23 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
           {activeTab === 'chat' && deploymentStatus.state === 'deployed' && (
             <div className="flex flex-col flex-1 min-h-0">
               {/* Session Header Bar */}
-              <div className="flex items-center justify-between px-4 py-2.5 border-b border-[#e9ebed] bg-[#fafafa] flex-shrink-0">
-                <div className="flex items-center gap-2">
-                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-                  <span className="text-xs text-[#5f6b7a]">
-                    {sessionId ? `Session: ${sessionId.slice(0, 8)}...` : 'New Session'}
-                  </span>
+              <div className="flex items-center justify-between px-4 py-2 border-b border-[#e9ebed] bg-[#fafafa] flex-shrink-0">
+                <div className="flex items-center gap-2 min-w-0">
+                  <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse flex-shrink-0" />
+                  <div className="min-w-0">
+                    <div className="text-[11px] font-medium text-[#16191f] truncate">
+                      {sessionId ? `Session ${sessionId.slice(0, 8)}` : 'New session'}
+                    </div>
+                    <div className="text-[10px] text-[#8d99a8]">
+                      {chatMessages.filter((m) => m.role !== 'system').length} message{chatMessages.filter((m) => m.role !== 'system').length === 1 ? '' : 's'}
+                    </div>
+                  </div>
                 </div>
-                <div className="flex items-center gap-3">
+                <div className="flex items-center gap-3 flex-shrink-0">
                   <button
                     onClick={handleNewSession}
                     className="text-xs text-[#0972d3] hover:text-[#0961b9] font-medium"
+                    title="Start a new session"
                   >
                     + New
                   </button>
@@ -1170,7 +1132,11 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
               </div>
 
               {/* Chat Messages Area */}
-              <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
+              <div
+                ref={chatScrollRef}
+                onScroll={handleChatScroll}
+                className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0 relative"
+              >
                 {/* Empty state */}
                 {chatMessages.length === 0 && !isTesting && (
                   <div className="text-center py-12">
@@ -1200,34 +1166,52 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
                         </div>
                       </div>
                     ) : (
-                      <div className="flex justify-start gap-2">
+                      <div className="group flex justify-start gap-2">
                         <div className="w-6 h-6 rounded-full bg-[#232f3e] flex items-center justify-center flex-shrink-0 mt-1">
                           <span className="text-[10px] text-white font-bold">A</span>
                         </div>
-                        <div className="max-w-[85%]">
-                          <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-[#f2f3f3] text-[#16191f] border border-[#e9ebed]">
-                            <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                        <div className="max-w-[85%] min-w-0">
+                          <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-white text-[#16191f] border border-[#e9ebed] shadow-sm">
+                            {msg.content ? (
+                              <ChatMarkdown content={msg.content} />
+                            ) : (
+                              <span className="inline-block w-2 h-4 align-middle bg-[#0972d3]/60 animate-pulse rounded-sm" />
+                            )}
                           </div>
-                          {msg.latencyMs && (
-                            <span className="text-[10px] text-[#8d99a8] mt-1 ml-2 inline-block">{msg.latencyMs}ms</span>
-                          )}
+                          <div className="flex items-center gap-2 mt-1 ml-2 text-[10px] text-[#8d99a8]">
+                            {msg.latencyMs !== undefined && <span>{msg.latencyMs}ms</span>}
+                            <button
+                              onClick={() => copyMessage(msg.id, msg.content)}
+                              className="text-[#0972d3] hover:underline opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity"
+                              aria-label="Copy message"
+                            >
+                              {copiedMsgId === msg.id ? 'Copied' : 'Copy'}
+                            </button>
+                          </div>
                         </div>
                       </div>
                     )}
                   </div>
                 ))}
 
-                {/* Typing Indicator */}
+                {/* Typing Indicator with optional cold-start context */}
                 {isTesting && (
                   <div className="flex justify-start gap-2">
                     <div className="w-6 h-6 rounded-full bg-[#232f3e] flex items-center justify-center flex-shrink-0 mt-1">
                       <span className="text-[10px] text-white font-bold">A</span>
                     </div>
-                    <div className="px-4 py-3 rounded-2xl rounded-bl-md bg-[#f2f3f3] border border-[#e9ebed]">
-                      <div className="flex items-center gap-1.5">
-                        <div className="w-2 h-2 bg-[#0972d3] rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                        <div className="w-2 h-2 bg-[#0972d3] rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                        <div className="w-2 h-2 bg-[#0972d3] rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                    <div className="px-4 py-3 rounded-2xl rounded-bl-md bg-white border border-[#e9ebed] shadow-sm">
+                      <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <div className="w-2 h-2 bg-[#0972d3] rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                          <div className="w-2 h-2 bg-[#0972d3] rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                          <div className="w-2 h-2 bg-[#0972d3] rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                        </div>
+                        {isColdStart && coldStartAttempt && (
+                          <span className="text-[11px] text-[#d45b07] font-medium">
+                            Cold start in progress — retry {coldStartAttempt.attempt}/{coldStartAttempt.max}
+                          </span>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1236,23 +1220,43 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
                 <div ref={chatEndRef} />
               </div>
 
+              {/* Jump to latest FAB — positioned above the input area when user has scrolled up */}
+              {isScrolledUp && (
+                <div className="relative">
+                  <button
+                    onClick={jumpToLatest}
+                    aria-label="Jump to latest message"
+                    className="absolute -top-11 right-3 flex items-center gap-1.5 px-3 py-1.5 bg-[#232f3e] text-white text-[11px] font-medium rounded-full shadow-lg hover:bg-[#0f172a] transition-colors z-10"
+                  >
+                    <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                    Jump to latest
+                  </button>
+                </div>
+              )}
+
               {/* Input Area */}
               <div className="border-t border-[#e9ebed] bg-[#fafafa] p-3 flex-shrink-0">
-                <div className="flex gap-2">
-                  <textarea
-                    ref={chatInputRef}
-                    value={testInput}
-                    onChange={(e) => setTestInput(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder="Type a message..."
-                    className="flex-1 resize-none rounded-xl border border-[#e9ebed] px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0972d3] focus:border-transparent bg-white"
-                    rows={1}
-                    disabled={isTesting}
-                  />
+                <div className="flex gap-2 items-end">
+                  <div className="flex-1 rounded-xl bg-white border border-[#e9ebed] shadow-sm focus-within:border-[#0972d3] focus-within:ring-2 focus-within:ring-[#0972d3]/30 transition-all">
+                    <textarea
+                      ref={chatInputRef}
+                      value={testInput}
+                      onChange={(e) => setTestInput(e.target.value)}
+                      onKeyDown={handleKeyDown}
+                      placeholder="Type a message…  (Shift+Enter for newline)"
+                      className="w-full resize-none rounded-xl px-3 py-2.5 text-sm focus:outline-none bg-transparent placeholder-[#8d99a8]"
+                      rows={1}
+                      disabled={isTesting}
+                      aria-label="Chat input"
+                    />
+                  </div>
                   <button
                     onClick={handleTest}
                     disabled={!testInput.trim() || isTesting}
-                    className={`self-end p-2.5 rounded-xl transition-all ${
+                    aria-label="Send message"
+                    className={`self-end p-2.5 rounded-xl transition-all shadow-sm ${
                       testInput.trim() && !isTesting
                         ? 'bg-[#0972d3] text-white hover:bg-[#0961b9]'
                         : 'bg-[#e9ebed] text-[#8d99a8] cursor-not-allowed'

@@ -16,6 +16,8 @@ import { KnowledgeBaseConfigModal } from './components/modals/KnowledgeBaseConfi
 import { GuardrailsConfigurationModal } from './components/modals/GuardrailsConfigurationModal';
 import { ApprovalInbox } from './components/approvals/ApprovalInbox';
 import { approvalStats } from './services/approvals';
+import HarnessManager from './components/harness/HarnessManager';
+import AgentCoreManager from './components/agentcore/AgentCoreManager';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useWorkflowStore } from './store/workflowStore';
 import { useFlowStore } from './store/flowStore';
@@ -40,6 +42,8 @@ function App() {
   const [showToolGenerator, setShowToolGenerator] = useState(false);
   const [showApprovalInbox, setShowApprovalInbox] = useState(false);
   const [pendingApprovalCount, setPendingApprovalCount] = useState<number>(0);
+  const [showHarnessManager, setShowHarnessManager] = useState(false);
+  const [showAgentCoreManager, setShowAgentCoreManager] = useState(false);
   const [restoredDeployment, setRestoredDeployment] = useState<{
     runtimeId: string;
     endpoint: string;
@@ -424,6 +428,20 @@ function App() {
               Deploy
             </button>
             <button
+              onClick={() => setShowHarnessManager(true)}
+              className="px-3 py-1.5 rounded-md text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+              title="AgentCore Harness — managed agent"
+            >
+              Harness
+            </button>
+            <button
+              onClick={() => setShowAgentCoreManager(true)}
+              className="px-3 py-1.5 rounded-md text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+              title="AgentCore Optimization + Registry"
+            >
+              Services
+            </button>
+            <button
               onClick={() => setShowApprovalInbox(true)}
               className="relative px-3 py-1.5 rounded-md text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors"
               title="Approval Inbox"
@@ -657,6 +675,12 @@ function App() {
           </>
         )}
       </AnimatePresence>
+
+      {/* Harness Manager drawer (Task 11) */}
+      <HarnessManager open={showHarnessManager} onClose={() => setShowHarnessManager(false)} />
+
+      {/* AgentCore Services (Tasks 12 + 13) — Optimization + Registry */}
+      <AgentCoreManager open={showAgentCoreManager} onClose={() => setShowAgentCoreManager(false)} />
     </div>
   );
 }

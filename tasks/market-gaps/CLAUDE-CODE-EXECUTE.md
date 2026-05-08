@@ -19,11 +19,17 @@ tasks/market-gaps/
 ├── 03-agent-versioning-rollback.md
 ├── 04-observability-dashboard.md
 ├── 05-a2a-protocol-support.md
+├── 03-agent-versioning-rollback.md
+├── 04-observability-dashboard.md
+├── 05-a2a-protocol-support.md
 ├── 06-bedrock-guardrails-integration.md
 ├── 07-environment-promotion.md
 ├── 08-cli-sdk.md
 ├── 09-agent-marketplace.md
 └── 10-advanced-security-hardening.md
+├── 11-agentcore-harness-integration.md   ← NEW: Full Harness canvas node
+├── 12-agentcore-optimization.md          ← NEW: Quality loop (bundles, recommendations, A/B)
+└── 13-aws-agent-registry.md              ← NEW: Managed registry (replaces custom)
 ```
 
 ## Existing Context (READ FIRST)
@@ -120,6 +126,9 @@ Execute in this order. After EACH task, deploy and test.
 | 8 | `08-cli-sdk.md` | CLI & SDK | Wraps AgentCore + Registry APIs | P2 |
 | 9 | `09-agent-marketplace.md` | Marketplace | **AWS Agent Registry** (managed) | P2 |
 | 10 | `10-advanced-security-hardening.md` | RBAC/Audit/DLP | Registry IAM + Policy engine | P2 |
+| 11 | `11-agentcore-harness-integration.md` | **Managed Agent Harness** | Full Harness canvas node + deploy + invoke | **P0** |
+| 12 | `12-agentcore-optimization.md` | **Quality Loop** | Config bundles + recommendations + A/B testing | **P0** |
+| 13 | `13-aws-agent-registry.md` | **Managed Registry** | Replace custom DDB with AWS Agent Registry | **P1** |
 
 ---
 

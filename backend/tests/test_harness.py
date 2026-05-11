@@ -213,3 +213,17 @@ def test_drain_stream_empty_none() -> None:
     text, err = _drain_stream(None)
     assert text == ""
     assert err is None
+
+
+def test_coerce_session_id_pads_short_ids() -> None:
+    """AWS InvokeHarness requires runtimeSessionId >= 33 chars."""
+    from app.services.harness_invoker import _coerce_session_id
+
+    assert len(_coerce_session_id(None)) >= 33
+    assert len(_coerce_session_id("")) >= 33
+    assert len(_coerce_session_id("sess-A")) >= 33
+    # Already long enough — leave untouched
+    big = "a" * 33
+    assert _coerce_session_id(big) == big
+    # Deterministic padding so short IDs map to a stable session
+    assert _coerce_session_id("sess-A") == _coerce_session_id("sess-A")

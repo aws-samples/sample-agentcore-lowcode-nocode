@@ -44,7 +44,48 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 - **Deployment Persistence** -- Active deployments are stored per-user. Switching browsers or refreshing shows a banner to restore the last deployment with its test panel.
 - **In-Canvas Testing** -- Test deployed agents directly from the UI with conversation history support.
 - **Knowledge Base (RAG)** -- Create Bedrock Knowledge Bases with 5 data source types (S3, Web Crawler, Confluence, Salesforce, SharePoint), 3 vector store types (S3 Vectors, OpenSearch Serverless, RDS Aurora PostgreSQL), 3 parsing strategies (Default, Bedrock Data Automation, Foundation Model), custom transformation Lambda, and configurable chunking, deletion policy, and KMS encryption. Deployed as a Gateway tool target with a per-deployment Lambda for RetrieveAndGenerate.
-- **Full Resource Cleanup** -- Delete from AWS removes Runtime, Gateway, Gateway Targets, Cognito User Pool, custom tool Lambdas, Knowledge Base, Memory, Policy Engine, and Lambda functions.
+- **Full Resource Cleanup** -- Delete from AWS removes Runtime, Gateway, Gateway Targets, Cognito User Pool, custom tool Lambdas, Knowledge Base, Memory, Policy Engine, Harnesses, Configuration Bundles, Online Evaluation configs, and project-owned Registry records.
+
+## Production Capabilities (Market-Gap Tasks 01-13)
+
+The platform now ships with the operational capabilities teams expect from a managed agent platform. Each capability is implemented as a first-class API + frontend surface and is exercised against live AWS APIs (no mocks).
+
+| # | Capability | Primary API | Description |
+|---|------------|-------------|-------------|
+| 01 | **Event Triggers & Scheduling** | `/api/triggers` | Schedule (cron/rate) and webhook triggers that invoke a deployed agent. Scheduler-managed EventBridge rules + secret-backed webhook URLs. |
+| 02 | **Human-in-the-Loop Approvals** | `/api/approvals` | Pause agent execution for human sign-off. Supports `binary`, `options`, `form` approval types with TTL expiry and audit trail. |
+| 03 | **Agent Versioning & Rollback** | `/api/deployments/{id}/versions` | Snapshots of a deployment's config; one-click rollback to any prior version. |
+| 04 | **Observability Dashboard** | `/api/analytics/{deployment_id}` | CloudWatch-sourced invocation counts, error rates, latency percentiles, token usage, and cost estimates. |
+| 05 | **A2A Protocol Support** | `/.well-known/agents/{deployment_id}`, `/a2a/...` | Agent Card publishing + JSON-RPC data-plane at `/a2a/...` so other A2A clients can discover and invoke deployed agents. |
+| 06 | **Bedrock Guardrails** | `/api/guardrails` | Create/update/test Bedrock Guardrails (content, topic, PII, word filters) and attach them to Harnesses or Runtimes. |
+| 07 | **Environment Promotion** | `/api/environments/{id}` | Bind a deployment across `dev → staging → prod` aliases; promote tested configurations between environments. |
+| 08 | **CLI & SDK** | Python: `pip install agentcore-sdk` + `agentcore` CLI | Python SDK + `agentcore` CLI wrapping workflows, deploy, triggers, approvals, harnesses, bundles, registry. |
+| 09 | **Agent Marketplace** | `/api/marketplace/items` | Internal catalog: publish templates / tools / MCP servers / workflows, with ratings, install counts, and admin approval. |
+| 10 | **Security Hardening** | `/api/rbac/*`, `/api/admin/*`, `/api/dlp/*` | RBAC with 5 roles + 21 permissions, immutable audit log, regex-based DLP scanner with org-wide policy. |
+| 11 | **AgentCore Harness** | `/api/harness` | Managed `Harness` resource (Runtime + Gateway + Memory + Identity + Code Interpreter + Browser in one API call), poll-to-READY, `InvokeHarness` with Converse streaming. |
+| 12 | **Optimization (Config Bundles + Evaluators)** | `/api/optimization/bundles`, `/evaluators`, `/online-evals` | Immutable versioned config snapshots (parent-chain lineage, fork support), 16 built-in evaluators + custom evaluator CRUD, online-eval configs that sample traces from CloudWatch Logs and evaluate them continuously. |
+| 13 | **AWS Agent Registry** | `/api/registry/*` | Managed registry + records for MCP / A2A / CUSTOM / AGENT_SKILLS descriptors; draft → pending → approved workflow; SSRF-hardened `sync_from_url` ingestion; hybrid search over approved records. |
+
+### Security model
+
+- **Platform admins** are bootstrap-ed via the `RBAC_PLATFORM_ADMIN_IDS` Lambda env var (comma-separated Cognito `sub`s). All other users default to `agent_creator`.
+- RBAC entries are stored in the `agentcore-workflow-{env}-rbac` DynamoDB table and can be updated via `/api/admin/users` (admin-only).
+- Registry `sync_from_url` (task 13) rejects `http://`, IMDS (`169.254.169.254`), loopback, and RFC1918 hosts at the Pydantic layer (422 before any outbound request is made).
+- All task 11-13 IAM roles include the `logs:PutIndexPolicy` / `PutResourcePolicy` companions — AWS validates the caller's identity for these during `CreateOnlineEvaluationConfig`, which is the reason early deploys returned `AccessDeniedException`.
+- `scripts/cleanup.sh` sweeps Harnesses, Configuration Bundles, Online Evaluation configs, and project-owned Registry records in addition to the original CDK-managed resources.
+
+### Getting started with the new capabilities
+
+1. Deploy as usual: `COGNITO_USERS="you@example.com" ./scripts/deploy.sh`.
+2. Promote yourself to platform admin so you can call admin-only endpoints (registry setup, admin audit, DLP policy):
+   ```bash
+   aws lambda update-function-configuration \
+     --function-name agentcore-workflow-dev-workflow \
+     --environment 'Variables={RBAC_PLATFORM_ADMIN_IDS=<your-cognito-sub>}' \
+     --region us-east-1
+   ```
+   (Your Cognito `sub` is returned by `GET /api/rbac/me`.)
+3. Open the **AgentCore Services** drawer in the UI for the Optimization + Registry tabs, or the **Harness** drawer for managed-agent deployments.
 
 ## Security
 

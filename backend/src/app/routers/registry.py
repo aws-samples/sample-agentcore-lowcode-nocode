@@ -12,6 +12,8 @@ from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from app.models.registry_models import (
+    AutoPublishRequest,
+    AutoPublishSourceType,
     RecordApprovalRequest,
     RecordCreateRequest,
     RecordListResponse,
@@ -255,3 +257,95 @@ async def search_records(
     except ClientError as e:
         raise _aws_error(e)
     return RecordListResponse(records=items)
+
+
+@router.post("/auto-publish", response_model=RecordResponse)
+async def auto_publish(
+    req: AutoPublishRequest,
+    user_id: str = Depends(require_user),
+    user_email: str = Depends(get_user_email),
+) -> RecordResponse:
+    """One-click publish: turn a deployment / tool / harness the user just
+    created into a registry record without hand-typing descriptor JSON.
+    """
+    svc = _svc()
+    try:
+        if req.source_type == AutoPublishSourceType.HARNESS:
+            from app.services.harness_deployer import HarnessStore
+
+            store = HarnessStore(
+                table_name=os.environ["HARNESS_TABLE_NAME"], region=_region()
+            )
+            rec = store.get(req.source_id)
+            if not rec or rec.user_id != user_id:
+                raise HTTPException(status_code=404, detail="harness not found")
+            if rec.status.value != "READY":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"harness not READY (status: {rec.status.value})",
+                )
+            result = svc.auto_publish_for_harness(
+                user_id,
+                user_email,
+                req.registry_id,
+                rec.model_dump(mode="json"),
+                name=req.name,
+                description=req.description,
+                submit_for_approval=req.submit_for_approval,
+            )
+        elif req.source_type == AutoPublishSourceType.TOOL:
+            if not req.tool_payload:
+                raise HTTPException(
+                    status_code=400,
+                    detail="tool_payload required for source_type=tool",
+                )
+            result = svc.auto_publish_for_tool(
+                user_id,
+                user_email,
+                req.registry_id,
+                req.tool_payload,
+                name=req.name,
+                description=req.description,
+                submit_for_approval=req.submit_for_approval,
+            )
+        else:  # DEPLOYMENT
+            # Load deployment metadata from the deployments table.
+            from app.services.dynamodb_storage import (
+                _get_dynamodb_resource,
+                _get_item,
+                _get_table,
+            )
+
+            table = _get_table(
+                _get_dynamodb_resource(_region()),
+                os.environ.get("DEPLOYMENT_TABLE_NAME", ""),
+            )
+            dep = _get_item(table, {"deployment_id": req.source_id}) if table else None
+            if not dep:
+                raise HTTPException(status_code=404, detail="deployment not found")
+            if str(dep.get("user_id", "")) != user_id:
+                raise HTTPException(status_code=404, detail="deployment not found")
+            endpoint = dep.get("endpoint") or dep.get("invoke_url") or None
+            metadata = {
+                k: v
+                for k, v in dep.items()
+                if k not in ("deployment_id", "user_id")
+            }
+            result = svc.auto_publish_for_deployment(
+                user_id,
+                user_email,
+                req.registry_id,
+                req.source_id,
+                str(dep.get("deployment_type", "runtime")),
+                str(endpoint) if endpoint else None,
+                _scrub(metadata),
+                name=req.name,
+                description=req.description,
+                submit_for_approval=req.submit_for_approval,
+            )
+    except ClientError as e:
+        raise _aws_error(e)
+
+    if not result:
+        raise HTTPException(status_code=500, detail="auto-publish failed")
+    return RecordResponse(record=result)

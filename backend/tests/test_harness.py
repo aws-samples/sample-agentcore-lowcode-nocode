@@ -227,3 +227,103 @@ def test_coerce_session_id_pads_short_ids() -> None:
     assert _coerce_session_id(big) == big
     # Deterministic padding so short IDs map to a stable session
     assert _coerce_session_id("sess-A") == _coerce_session_id("sess-A")
+
+
+def test_bedrock_model_top_k_and_stop_sequences() -> None:
+    cfg = BedrockModelConfig(
+        model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        top_k=40,
+        stop_sequences=["\n\nHuman:", "END"],
+    )
+    api = cfg.to_api()
+    assert api["topK"] == 40
+    assert api["stopSequences"] == ["\n\nHuman:", "END"]
+
+
+def test_guardrail_config_to_api_default_version() -> None:
+    from app.models.harness_models import HarnessGuardrailConfig
+
+    cfg = HarnessGuardrailConfig(guardrail_identifier="gr-123", trace=True)
+    out = cfg.to_api()
+    assert out == {
+        "guardrailIdentifier": "gr-123",
+        "guardrailVersion": "DRAFT",
+        "trace": "ENABLED",
+    }
+
+
+def test_kb_config_omits_field_when_empty() -> None:
+    from app.models.harness_models import HarnessKnowledgeBaseConfig
+
+    assert HarnessKnowledgeBaseConfig().to_api() is None
+    assert HarnessKnowledgeBaseConfig(knowledge_base_ids=["KB1", "KB2"]).to_api() == {
+        "knowledgeBases": [{"knowledgeBaseId": "KB1"}, {"knowledgeBaseId": "KB2"}]
+    }
+
+
+def test_observability_config_defaults_on() -> None:
+    from app.models.harness_models import HarnessObservabilityConfig
+
+    out = HarnessObservabilityConfig().to_api()
+    assert out == {"tracesEnabled": True, "metricsEnabled": True}
+
+
+def test_lifecycle_config_defaults_match_aws() -> None:
+    from app.models.harness_models import HarnessLifecycleConfig
+
+    out = HarnessLifecycleConfig().to_api()
+    assert out == {"idleRuntimeSessionTimeout": 900, "maxLifetime": 28_800}
+
+
+def test_build_create_params_wires_new_fields() -> None:
+    """Guardrail, KB, observability, lifecycle, description, skills all plumbed."""
+    from unittest.mock import MagicMock, patch
+
+    from app.models.harness_models import (
+        HarnessGuardrailConfig,
+        HarnessKnowledgeBaseConfig,
+        HarnessLifecycleConfig,
+        HarnessObservabilityConfig,
+    )
+    from app.services.harness_deployer import HarnessDeployer
+
+    req = _req(
+        description="a small harness",
+        guardrail=HarnessGuardrailConfig(guardrail_identifier="gr-abc"),
+        knowledge_base=HarnessKnowledgeBaseConfig(knowledge_base_ids=["KB123"]),
+        observability=HarnessObservabilityConfig(
+            traces_enabled=False, metrics_enabled=True
+        ),
+        lifecycle=HarnessLifecycleConfig(
+            idle_runtime_session_timeout=600, max_lifetime=3_600
+        ),
+        skills=["arn:aws:bedrock-agentcore:us-east-1:1:skill/abc"],
+    )
+    with patch(
+        "app.services.harness_deployer._control_client",
+        return_value=MagicMock(),
+    ):
+        deployer = HarnessDeployer.__new__(HarnessDeployer)
+        deployer._store = MagicMock()  # type: ignore
+        deployer._client = MagicMock()
+        p = deployer._build_create_params(
+            req,
+            execution_role_arn="arn:aws:iam::1:role/x",
+            user_id="u1",
+        )
+    assert p["description"] == "a small harness"
+    assert p["guardrailConfiguration"]["guardrailIdentifier"] == "gr-abc"
+    assert p["knowledgeBaseConfiguration"]["knowledgeBases"] == [
+        {"knowledgeBaseId": "KB123"}
+    ]
+    assert p["observabilityConfiguration"] == {
+        "tracesEnabled": False,
+        "metricsEnabled": True,
+    }
+    assert p["environment"]["agentCoreRuntimeEnvironment"]["lifecycleConfiguration"] == {
+        "idleRuntimeSessionTimeout": 600,
+        "maxLifetime": 3_600,
+    }
+    assert p["skills"] == [
+        {"skillArn": "arn:aws:bedrock-agentcore:us-east-1:1:skill/abc"}
+    ]

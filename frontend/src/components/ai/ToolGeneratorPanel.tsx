@@ -9,6 +9,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { generateToolApi, testToolApi } from '../../services/api';
 import type { GeneratedTool, TestCase, TestResult } from '../../services/api';
+import { PublishToRegistryModal } from '../registry/PublishToRegistryModal';
 
 // ============================================================================
 // Types
@@ -46,6 +47,7 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
   const [currentTool, setCurrentTool] = useState<GeneratedTool | null>(null);
   const [showCode, setShowCode] = useState(false);
   const [autoFixCount, setAutoFixCount] = useState(0);
+  const [publishTool, setPublishTool] = useState<GeneratedTool | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
@@ -549,6 +551,17 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
                       {msg.testPhase === 'passed' ? 'Add to Canvas' : msg.testPhase === 'testing' ? 'Testing...' : msg.testPhase === 'failed' ? 'Tests Must Pass' : 'Waiting for Tests'}
                     </button>
 
+                    {/* Publish to Registry — only enabled after tests pass */}
+                    {msg.testPhase === 'passed' && msg.tool && (
+                      <button
+                        onClick={() => msg.tool && setPublishTool(msg.tool)}
+                        className="w-full mt-1 py-2 px-3 rounded-md text-sm font-medium border border-[#0972d3]/40 bg-white text-[#0972d3] hover:bg-[#0972d3]/5 transition-colors"
+                        title="Publish this tool as an MCP record in AWS Agent Registry"
+                      >
+                        Publish to Registry
+                      </button>
+                    )}
+
                     {/* Escape hatch for power users */}
                     {msg.testPhase === 'failed' && autoFixCount >= MAX_AUTO_FIX_RETRIES && (
                       <button
@@ -615,6 +628,20 @@ export function ToolGeneratorPanel({ isVisible, onClose, onAddToolToCanvas }: To
           </div>
         </div>
       </div>
+      {publishTool && (
+        <PublishToRegistryModal
+          source_type="tool"
+          source_id={publishTool.toolName || publishTool.displayName}
+          defaultName={publishTool.displayName}
+          defaultDescription={publishTool.description}
+          toolPayload={{
+            display_name: publishTool.displayName,
+            description: publishTool.description,
+            input_schema: publishTool.inputSchema,
+          }}
+          onClose={() => setPublishTool(null)}
+        />
+      )}
     </>
   );
 }

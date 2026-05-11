@@ -15,6 +15,7 @@ import { useWorkflowStore } from '../../store/workflowStore';
 import type { AgentCoreComponentType } from '../../types/workflow';
 import ChatMarkdown from './ChatMarkdown';
 import DeployTabs, { type DeployTabId } from './DeployTabs';
+import { PublishToRegistryModal } from '../registry/PublishToRegistryModal';
 
 interface DeploymentStatus {
   state: 'idle' | 'deploying' | 'deployed' | 'error';
@@ -100,6 +101,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
   const [, setTestResult] = useState<TestResult | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [showPublishModal, setShowPublishModal] = useState(false);
   const [activeTab, setActiveTab] = useState<DeployTabId>('deploy');
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [isColdStart, setIsColdStart] = useState(false);
@@ -1061,6 +1063,13 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
                     Redeploy
                   </button>
                   <button
+                    onClick={() => setShowPublishModal(true)}
+                    className="w-full py-2.5 px-4 border border-[#0972d3] rounded-xl text-[#0972d3] hover:bg-[#0972d3]/5 transition-colors text-sm flex items-center justify-center gap-2"
+                    title="Publish this deployment to AWS Agent Registry"
+                  >
+                    Publish to Registry
+                  </button>
+                  <button
                     onClick={handleDelete}
                     disabled={isDeleting}
                     className="w-full py-2.5 px-4 border border-red-300 rounded-xl text-red-600 hover:bg-red-50 transition-colors text-sm flex items-center justify-center gap-2"
@@ -1326,6 +1335,15 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
         </div>
         )}
       </div>
+      {showPublishModal && deploymentStatus.state === 'deployed' && deploymentStatus.runtimeId && (
+        <PublishToRegistryModal
+          source_type="deployment"
+          source_id={deploymentStatus.runtimeId}
+          defaultName={`deployment_${deploymentStatus.runtimeId}`}
+          defaultDescription={`AgentCore deployment ${deploymentStatus.runtimeId}`}
+          onClose={() => setShowPublishModal(false)}
+        />
+      )}
     </>
   );
 }

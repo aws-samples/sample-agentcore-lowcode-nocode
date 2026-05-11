@@ -142,3 +142,29 @@ export async function deleteRecord(registry_id: string, record_id: string): Prom
     { method: 'DELETE' },
   );
 }
+
+export type AutoPublishSourceType = 'deployment' | 'tool' | 'harness';
+
+export interface AutoPublishRequest {
+  source_type: AutoPublishSourceType;
+  source_id: string;
+  registry_id: string;
+  name?: string;
+  description?: string;
+  submit_for_approval?: boolean;
+  tool_payload?: {
+    display_name?: string;
+    description?: string;
+    input_schema?: Record<string, unknown>;
+  };
+}
+
+export async function autoPublishToRegistry(
+  body: AutoPublishRequest,
+): Promise<RecordSummary> {
+  const r = await req<{ record: RecordSummary }>(`/api/registry/auto-publish`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+  return r.record;
+}

@@ -67,6 +67,8 @@ class BedrockModelConfig(BaseModel):
     max_tokens: Optional[int] = Field(default=None, ge=1, le=200_000)
     temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    top_k: Optional[int] = Field(default=None, ge=0, le=500)
+    stop_sequences: list[str] = Field(default_factory=list)
 
     def to_api(self) -> dict[str, Any]:
         out: dict[str, Any] = {"modelId": self.model_id}
@@ -76,6 +78,10 @@ class BedrockModelConfig(BaseModel):
             out["temperature"] = self.temperature
         if self.top_p is not None:
             out["topP"] = self.top_p
+        if self.top_k is not None:
+            out["topK"] = self.top_k
+        if self.stop_sequences:
+            out["stopSequences"] = list(self.stop_sequences)
         return out
 
 
@@ -248,16 +254,95 @@ class HarnessMemoryConfig(BaseModel):
         return {"agentCoreMemoryConfiguration": inner}
 
 
+class HarnessGuardrailConfig(BaseModel):
+    """Attach a Bedrock Guardrail to the harness at create time.
+
+    AWS accepts either a guardrail ID or ARN. ``version`` defaults to
+    ``DRAFT`` to match the Bedrock console's default selection.
+    """
+
+    guardrail_identifier: str = Field(..., min_length=1, max_length=2048)
+    version: str = Field(default="DRAFT", min_length=1, max_length=16)
+    trace: Optional[bool] = None
+
+    def to_api(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "guardrailIdentifier": self.guardrail_identifier,
+            "guardrailVersion": self.version,
+        }
+        if self.trace is not None:
+            out["trace"] = "ENABLED" if self.trace else "DISABLED"
+        return out
+
+
+class HarnessKnowledgeBaseConfig(BaseModel):
+    """Attach one or more Bedrock Knowledge Bases to the harness.
+
+    AWS lets the harness read these for RAG. We pass IDs as-is; the
+    caller is expected to supply valid KB identifiers (not ARNs).
+    """
+
+    knowledge_base_ids: list[str] = Field(default_factory=list, max_length=10)
+
+    def to_api(self) -> Optional[dict[str, Any]]:
+        if not self.knowledge_base_ids:
+            return None
+        return {
+            "knowledgeBases": [
+                {"knowledgeBaseId": kb} for kb in self.knowledge_base_ids
+            ]
+        }
+
+
+class HarnessObservabilityConfig(BaseModel):
+    """Traces + metrics switches for a harness.
+
+    Both default to True for a production-friendly posture.
+    """
+
+    traces_enabled: bool = True
+    metrics_enabled: bool = True
+
+    def to_api(self) -> dict[str, Any]:
+        return {
+            "tracesEnabled": self.traces_enabled,
+            "metricsEnabled": self.metrics_enabled,
+        }
+
+
+class HarnessLifecycleConfig(BaseModel):
+    """Runtime-session lifecycle knobs for cost control.
+
+    Defaults mirror AWS's: 900s idle, 28800s max lifetime (matching
+    the output observed on live ``get_harness`` responses).
+    """
+
+    idle_runtime_session_timeout: int = Field(default=900, ge=60, le=3_600)
+    max_lifetime: int = Field(default=28_800, ge=300, le=86_400)
+
+    def to_api(self) -> dict[str, Any]:
+        return {
+            "idleRuntimeSessionTimeout": self.idle_runtime_session_timeout,
+            "maxLifetime": self.max_lifetime,
+        }
+
+
 class HarnessCreateRequest(BaseModel):
     """API surface for POST /api/harness."""
 
     harness_name: str = Field(..., min_length=1, max_length=64)
+    description: Optional[str] = Field(default=None, max_length=512)
     model: HarnessModelConfig
     system_prompt: Optional[str] = Field(default=None, max_length=16_384)
     tools: list[HarnessTool] = Field(default_factory=list)
     allowed_tools: list[str] = Field(default_factory=lambda: ["*"])
     memory: Optional[HarnessMemoryConfig] = None
     truncation: Optional[HarnessTruncationConfig] = None
+    guardrail: Optional[HarnessGuardrailConfig] = None
+    knowledge_base: Optional[HarnessKnowledgeBaseConfig] = None
+    observability: Optional[HarnessObservabilityConfig] = None
+    lifecycle: Optional[HarnessLifecycleConfig] = None
+    skills: list[str] = Field(default_factory=list)
     max_iterations: Optional[int] = Field(default=None, ge=1, le=500)
     max_tokens: Optional[int] = Field(default=None, ge=1, le=1_000_000)
     timeout_seconds: Optional[int] = Field(default=None, ge=10, le=3_600)
@@ -288,6 +373,7 @@ class HarnessRecord(BaseModel):
     harness_id: str
     user_id: str
     name: str
+    description: Optional[str] = None
     arn: str = ""
     status: HarnessStatus = HarnessStatus.CREATING
     model_provider: ModelProvider

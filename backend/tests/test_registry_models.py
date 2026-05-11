@@ -151,3 +151,76 @@ def test_sync_from_url_accepts_https_public() -> None:
         sync_from_url="https://api.example.com/mcp",
     )
     assert req.sync_from_url == "https://api.example.com/mcp"
+
+
+def test_normalise_record_name() -> None:
+    from app.services.registry_service import _normalise_record_name
+
+    # Invalid chars are replaced with underscore
+    assert _normalise_record_name("My Cool Tool!") == "My_Cool_Tool"
+    # Digit-start gets a prefix so it matches the AWS rule
+    assert _normalise_record_name("123abc") == "r_123abc"
+    # Empty becomes a safe default
+    assert _normalise_record_name("") == "record"
+    # Already valid passes through
+    assert _normalise_record_name("ToolX") == "ToolX"
+
+
+def test_auto_publish_request_source_type_enum() -> None:
+    from app.models.registry_models import AutoPublishRequest, AutoPublishSourceType
+
+    req = AutoPublishRequest(
+        source_type=AutoPublishSourceType.HARNESS,
+        source_id="harness-abc",
+        registry_id="reg-1",
+    )
+    assert req.source_type is AutoPublishSourceType.HARNESS
+    assert req.submit_for_approval is False
+
+
+def test_auto_publish_tool_builds_mcp_tools_list() -> None:
+    """Tool auto-publish emits a JSON-RPC tools/list payload."""
+    import json
+    from unittest.mock import MagicMock
+
+    from app.models.registry_models import RecordSummary
+    from app.services.registry_service import RegistryService
+
+    svc = RegistryService.__new__(RegistryService)
+    svc._client = MagicMock()  # type: ignore
+    svc._ownership = MagicMock()  # type: ignore
+    captured: dict = {}
+
+    def _fake_create(user_id: str, email: str, req) -> RecordSummary:
+        captured["req"] = req
+        return RecordSummary(
+            registry_id="reg-1",
+            registry_arn="arn:reg",
+            record_id="rec-1",
+            record_arn="arn:rec",
+            name=req.name,
+            description=req.description,
+            descriptor_type=req.descriptor_type.value,
+            status="DRAFT",
+        )
+
+    svc.create_record = _fake_create  # type: ignore
+
+    rec = svc.auto_publish_for_tool(
+        "u1",
+        "u1@example.com",
+        "reg-1",
+        {
+            "display_name": "Weather Lookup!",
+            "description": "Get current weather",
+            "input_schema": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+            },
+        },
+    )
+    assert rec is not None
+    assert captured["req"].name == "Weather_Lookup"  # normalised
+    inline = json.loads(captured["req"].descriptors.mcp.tools.inline_content)
+    assert inline["result"]["tools"][0]["name"] == "Weather_Lookup"
+    assert inline["result"]["tools"][0]["inputSchema"]["properties"]["city"]["type"] == "string"

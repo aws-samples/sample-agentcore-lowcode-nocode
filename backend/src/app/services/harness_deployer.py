@@ -105,16 +105,28 @@ class HarnessDeployer:
             "executionRoleArn": execution_role_arn,
             "model": req.model.to_api(),
         }
+        if req.description:
+            params["description"] = req.description
         if req.system_prompt:
             params["systemPrompt"] = [{"text": req.system_prompt}]
         if req.tools:
             params["tools"] = [t.to_api() for t in req.tools]
         if req.allowed_tools:
             params["allowedTools"] = req.allowed_tools
+        if req.skills:
+            params["skills"] = [{"skillArn": s} for s in req.skills]
         if req.memory:
             params["memory"] = req.memory.to_api()
         if req.truncation:
             params["truncation"] = req.truncation.to_api()
+        if req.guardrail:
+            params["guardrailConfiguration"] = req.guardrail.to_api()
+        if req.knowledge_base:
+            kb_cfg = req.knowledge_base.to_api()
+            if kb_cfg:
+                params["knowledgeBaseConfiguration"] = kb_cfg
+        if req.observability:
+            params["observabilityConfiguration"] = req.observability.to_api()
         if req.max_iterations is not None:
             params["maxIterations"] = req.max_iterations
         if req.max_tokens is not None:
@@ -130,6 +142,8 @@ class HarnessDeployer:
                 "securityGroups": req.security_group_ids,
                 "subnets": req.subnet_ids,
             }
+        if req.lifecycle:
+            env["lifecycleConfiguration"] = req.lifecycle.to_api()
         params["environment"] = {"agentCoreRuntimeEnvironment": env}
         # Tags (owner tag for cross-check)
         tags = {"owner": user_id, **{k: v for k, v in req.tags.items() if k != "owner"}}
@@ -184,6 +198,7 @@ class HarnessDeployer:
             harness_id=harness_id,
             user_id=user_id,
             name=req.harness_name,
+            description=req.description,
             arn=harness.get("arn") or harness.get("harnessArn") or "",
             status=HarnessStatus(harness.get("status", HarnessStatus.CREATING.value)),
             model_provider=provider,

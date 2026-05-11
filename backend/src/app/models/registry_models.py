@@ -270,3 +270,29 @@ class RecordApprovalRequest(BaseModel):
 
 class RecordRejectRequest(BaseModel):
     status_reason: str = Field(..., min_length=1, max_length=512)
+
+
+class AutoPublishSourceType(str, Enum):
+    DEPLOYMENT = "deployment"
+    TOOL = "tool"
+    HARNESS = "harness"
+
+
+class AutoPublishRequest(BaseModel):
+    """Publish an entity the user just created as a registry record.
+
+    ``source_id`` identifies the source entity (deployment ID, tool ID,
+    harness ID). The server fetches the entity's own record (from our
+    DynamoDB tables) to build the descriptor — so the user never hand-
+    types any of this.
+    """
+
+    source_type: AutoPublishSourceType
+    source_id: str = Field(..., min_length=1, max_length=256)
+    registry_id: str = Field(..., min_length=1, max_length=128)
+    name: Optional[str] = Field(default=None, max_length=128)
+    description: Optional[str] = Field(default=None, max_length=512)
+    submit_for_approval: bool = False
+    # Tool-specific: callers can provide the generated tool's metadata
+    # directly if we can't load it from a store (e.g. test-only tools).
+    tool_payload: Optional[dict[str, Any]] = None

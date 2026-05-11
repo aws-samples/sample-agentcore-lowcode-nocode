@@ -20,6 +20,7 @@ export interface HarnessRecord {
   harness_id: string;
   user_id: string;
   name: string;
+  description?: string | null;
   arn: string;
   status: HarnessStatus;
   model_provider: HarnessModelProvider;
@@ -36,6 +37,34 @@ export interface BedrockModelConfig {
   max_tokens?: number;
   temperature?: number;
   top_p?: number;
+  top_k?: number;
+  stop_sequences?: string[];
+}
+
+export interface HarnessGuardrailConfig {
+  guardrail_identifier: string;
+  version?: string;
+  trace?: boolean;
+}
+
+export interface HarnessKnowledgeBaseConfig {
+  knowledge_base_ids: string[];
+}
+
+export interface HarnessObservabilityConfig {
+  traces_enabled: boolean;
+  metrics_enabled: boolean;
+}
+
+export interface HarnessLifecycleConfig {
+  idle_runtime_session_timeout: number;
+  max_lifetime: number;
+}
+
+export interface HarnessMemoryConfig {
+  memory_arn: string;
+  actor_id?: string;
+  messages_count?: number;
 }
 
 export interface HarnessToolInput {
@@ -57,6 +86,7 @@ export interface HarnessToolInput {
 
 export interface HarnessCreateRequest {
   harness_name: string;
+  description?: string;
   model: {
     bedrock?: BedrockModelConfig;
     openai?: { model_id: string; api_key_arn: string; max_tokens?: number; temperature?: number };
@@ -65,6 +95,12 @@ export interface HarnessCreateRequest {
   system_prompt?: string;
   tools?: HarnessToolInput[];
   allowed_tools?: string[];
+  memory?: HarnessMemoryConfig;
+  guardrail?: HarnessGuardrailConfig;
+  knowledge_base?: HarnessKnowledgeBaseConfig;
+  observability?: HarnessObservabilityConfig;
+  lifecycle?: HarnessLifecycleConfig;
+  skills?: string[];
   max_iterations?: number;
   max_tokens?: number;
   timeout_seconds?: number;

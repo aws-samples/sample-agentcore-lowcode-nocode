@@ -355,6 +355,10 @@ class RegistryService:
         deployment_type: str,  # "harness" | "runtime" | "tool"
         endpoint: Optional[str],
         metadata: dict[str, Any],
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        submit_for_approval: bool = False,
     ) -> Optional[RecordSummary]:
         """Creates a DRAFT record describing a successful deployment.
 
@@ -362,7 +366,11 @@ class RegistryService:
         is picked based on deployment_type. Always creates DRAFT — the user
         explicitly submits for approval later.
         """
-        descriptor_type = RegistryRecordDescriptorType.CUSTOM
+        from app.models.registry_models import (
+            CustomDescriptor,
+            RegistryRecordDescriptors,
+        )
+
         inline = {
             "deployment_id": deployment_id,
             "deployment_type": deployment_type,
@@ -372,23 +380,168 @@ class RegistryService:
             "metadata": metadata,
             "published_at": datetime.now(timezone.utc).isoformat(),
         }
+        record_name = name or _normalise_record_name(
+            f"deployment_{deployment_id[:48]}"
+        )
+        record_desc = description or (
+            f"{deployment_type} deployment {deployment_id}"
+        )
+        req = RecordCreateRequest(
+            registry_id=registry_id,
+            name=record_name,
+            description=record_desc,
+            descriptor_type=RegistryRecordDescriptorType.CUSTOM,
+            descriptors=RegistryRecordDescriptors(
+                custom=CustomDescriptor(inline_content=json.dumps(inline))
+            ),
+        )
+        try:
+            rec = self.create_record(user_id, user_email, req)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("auto-publish failed for %s: %s", deployment_id, e)
+            return None
+        if submit_for_approval and rec:
+            try:
+                self.submit_for_approval(user_id, registry_id, rec.record_id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("submit-for-approval failed: %s", e)
+        return rec
+
+    def auto_publish_for_tool(
+        self,
+        user_id: str,
+        user_email: str,
+        registry_id: str,
+        tool: "dict[str, Any]",
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        submit_for_approval: bool = False,
+    ) -> Optional[RecordSummary]:
+        """Publish a generated tool as an MCP record.
+
+        Expected ``tool`` keys: display_name, description, input_schema
+        (JSON schema). Emits an MCP ``tools/list`` inline content so any
+        MCP client can discover it.
+        """
+        from app.models.registry_models import (
+            McpDescriptor,
+            McpToolsDescriptor,
+            RegistryRecordDescriptors,
+        )
+
+        tool_name = _normalise_record_name(
+            tool.get("display_name") or tool.get("name") or "unnamed_tool"
+        )
+        tools_list = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "tools": [
+                    {
+                        "name": tool_name,
+                        "description": tool.get("description", ""),
+                        "inputSchema": tool.get(
+                            "input_schema"
+                        ) or tool.get("inputSchema") or {"type": "object"},
+                    }
+                ]
+            },
+        }
+        req = RecordCreateRequest(
+            registry_id=registry_id,
+            name=name or tool_name,
+            description=description or tool.get("description", ""),
+            descriptor_type=RegistryRecordDescriptorType.MCP,
+            descriptors=RegistryRecordDescriptors(
+                mcp=McpDescriptor(
+                    tools=McpToolsDescriptor(
+                        inline_content=json.dumps(tools_list)
+                    )
+                )
+            ),
+        )
+        try:
+            rec = self.create_record(user_id, user_email, req)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("auto-publish tool failed for %s: %s", tool_name, e)
+            return None
+        if submit_for_approval and rec:
+            try:
+                self.submit_for_approval(user_id, registry_id, rec.record_id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("submit-for-approval failed: %s", e)
+        return rec
+
+    def auto_publish_for_harness(
+        self,
+        user_id: str,
+        user_email: str,
+        registry_id: str,
+        harness: "dict[str, Any]",
+        *,
+        name: Optional[str] = None,
+        description: Optional[str] = None,
+        submit_for_approval: bool = False,
+    ) -> Optional[RecordSummary]:
+        """Publish a READY harness as a CUSTOM record.
+
+        Captures what a consumer would need to call the harness: ARN,
+        model, runtime ID, summary of tools. Uses CUSTOM descriptor
+        since there's no AWS-standard schema for a harness card (yet).
+        """
         from app.models.registry_models import (
             CustomDescriptor,
             RegistryRecordDescriptors,
         )
 
-        descriptors = RegistryRecordDescriptors(
-            custom=CustomDescriptor(inline_content=json.dumps(inline))
-        )
+        harness_name = harness.get("name") or harness.get("harness_id", "")
+        inline = {
+            "resource_type": "agentcore_harness",
+            "harness_id": harness.get("harness_id"),
+            "harness_arn": harness.get("arn"),
+            "agent_runtime_arn": harness.get("agent_runtime_arn"),
+            "agent_runtime_id": harness.get("agent_runtime_id"),
+            "model_provider": harness.get("model_provider"),
+            "model_id": harness.get("model_id"),
+            "owner_user_id": user_id,
+            "owner_email": user_email,
+            "published_at": datetime.now(timezone.utc).isoformat(),
+        }
+        record_name = name or _normalise_record_name(f"harness_{harness_name}")
         req = RecordCreateRequest(
             registry_id=registry_id,
-            name=f"deployment_{deployment_id[:32]}",
-            description=f"{deployment_type} deployment {deployment_id}",
-            descriptor_type=descriptor_type,
-            descriptors=descriptors,
+            name=record_name,
+            description=description or (
+                harness.get("description") or f"AgentCore Harness {harness_name}"
+            ),
+            descriptor_type=RegistryRecordDescriptorType.CUSTOM,
+            descriptors=RegistryRecordDescriptors(
+                custom=CustomDescriptor(inline_content=json.dumps(inline))
+            ),
         )
         try:
-            return self.create_record(user_id, user_email, req)
+            rec = self.create_record(user_id, user_email, req)
         except Exception as e:  # noqa: BLE001
-            logger.warning("auto-publish failed for %s: %s", deployment_id, e)
+            logger.warning("auto-publish harness failed for %s: %s", harness_name, e)
             return None
+        if submit_for_approval and rec:
+            try:
+                self.submit_for_approval(user_id, registry_id, rec.record_id)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("submit-for-approval failed: %s", e)
+        return rec
+
+
+def _normalise_record_name(raw: str) -> str:
+    """Registry names: letters/digits/_/- only, start with a letter.
+
+    Deterministic so repeated auto-publish of the same source doesn't
+    produce a dup with a different name.
+    """
+    import re
+
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]", "_", raw).strip("_") or "record"
+    if not cleaned[0].isalpha():
+        cleaned = f"r_{cleaned}"
+    return cleaned[:128]

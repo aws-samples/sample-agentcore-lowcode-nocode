@@ -1,9 +1,9 @@
 /**
- * AgentCore Services drawer (Tasks 12 & 13 frontend).
+ * AgentCore Services drawer (Tasks 11, 12 & 13 frontend).
  *
- * Two tabs: Optimization (bundles + evaluators) and Registry (AWS Agent Registry).
- * Harness has its own button/drawer — this one focuses on the quality loop +
- * discovery story.
+ * Three tabs: Harness (managed agent), Optimization (bundles + evaluators),
+ * Registry (AWS Agent Registry). Single right-hand entry-point for all
+ * AgentCore-managed services.
  */
 
 import { useCallback, useEffect, useState } from 'react';
@@ -29,16 +29,21 @@ import {
   searchRecords,
   submitForApproval,
 } from '../../services/registry';
+import { HarnessPanel } from '../harness/HarnessPanel';
 
 interface Props {
   open: boolean;
   onClose: () => void;
+  defaultTab?: Tab;
 }
 
-type Tab = 'optimization' | 'registry';
+type Tab = 'harness' | 'optimization' | 'registry';
 
-export function AgentCoreManager({ open, onClose }: Props) {
-  const [tab, setTab] = useState<Tab>('optimization');
+export function AgentCoreManager({ open, onClose, defaultTab }: Props) {
+  const [tab, setTab] = useState<Tab>(defaultTab || 'harness');
+  useEffect(() => {
+    if (defaultTab && open) setTab(defaultTab);
+  }, [defaultTab, open]);
   return (
     <AnimatePresence>
       {open && (
@@ -56,7 +61,7 @@ export function AgentCoreManager({ open, onClose }: Props) {
             role="dialog"
             aria-modal="true"
             aria-label="AgentCore Services"
-            className="fixed top-0 right-0 h-screen w-full sm:max-w-[640px] bg-white shadow-xl z-[100] flex flex-col"
+            className="fixed top-0 right-0 h-screen w-full sm:max-w-[720px] bg-white shadow-xl z-[100] flex flex-col"
             initial={{ x: '100%' }}
             animate={{ x: 0 }}
             exit={{ x: '100%' }}
@@ -71,7 +76,7 @@ export function AgentCoreManager({ open, onClose }: Props) {
                 </div>
                 <div>
                   <h2 className="text-sm font-semibold text-white">AgentCore Services</h2>
-                  <p className="text-[11px] text-white/50">Optimization · Registry</p>
+                  <p className="text-[11px] text-white/50">Harness · Optimization · Registry</p>
                 </div>
               </div>
               <button onClick={onClose} aria-label="close" className="p-1.5 rounded-md hover:bg-white/10">
@@ -81,7 +86,7 @@ export function AgentCoreManager({ open, onClose }: Props) {
               </button>
             </header>
             <nav className="flex border-b border-[#e9ebed] bg-[#f7f8f9] px-2 pt-2 gap-1.5" role="tablist" aria-label="Services tabs">
-              {(['optimization', 'registry'] as Tab[]).map((t) => (
+              {(['harness', 'optimization', 'registry'] as Tab[]).map((t) => (
                 <button
                   key={t}
                   role="tab"
@@ -99,6 +104,7 @@ export function AgentCoreManager({ open, onClose }: Props) {
               ))}
             </nav>
             <div className="flex-1 overflow-y-auto">
+              {tab === 'harness' && <HarnessPanel />}
               {tab === 'optimization' && <OptimizationPanel />}
               {tab === 'registry' && <RegistryPanel />}
             </div>

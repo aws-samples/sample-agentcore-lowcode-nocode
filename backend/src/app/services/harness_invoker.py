@@ -47,7 +47,7 @@ class HarnessInvoker:
                 error="harness has no ARN yet — wait for READY",
             )
         started = time.time()
-        sid = session_id or f"sess-{uuid.uuid4().hex}"
+        sid = _coerce_session_id(session_id)
         params: dict[str, Any] = {
             "harnessArn": harness.arn,
             "runtimeSessionId": sid,
@@ -79,6 +79,21 @@ class HarnessInvoker:
             session_id=sid,
             duration_ms=int((time.time() - started) * 1000),
         )
+
+
+def _coerce_session_id(session_id: Optional[str]) -> str:
+    # AWS requires runtimeSessionId to be >= 33 chars. Pad with a deterministic
+    # suffix so caller-supplied short IDs (e.g. "sess-A") still map to a stable
+    # session on AWS's side, and minted IDs always exceed the minimum.
+    base = (session_id or "").strip()
+    if not base:
+        return f"agentcore-{uuid.uuid4().hex}"
+    if len(base) >= 33:
+        return base
+    # Stable pad from the caller-supplied prefix so subsequent invokes with the
+    # same short ID hit the same runtime session.
+    suffix = uuid.uuid5(uuid.NAMESPACE_DNS, base).hex
+    return f"{base}-{suffix}"[:128]
 
 
 def _drain_stream(stream: Any) -> tuple[str, Optional[str]]:

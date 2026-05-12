@@ -67,6 +67,10 @@ class BedrockModelConfig(BaseModel):
     max_tokens: Optional[int] = Field(default=None, ge=1, le=200_000)
     temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
     top_p: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    # Accepted at the API surface but not supported by the current boto3
+    # bedrock-agentcore-control CreateHarness shape for Bedrock models.
+    # We still accept them so callers don't have to special-case; the
+    # deployer logs a warning and drops them from the AWS call.
     top_k: Optional[int] = Field(default=None, ge=0, le=500)
     stop_sequences: list[str] = Field(default_factory=list)
 
@@ -78,10 +82,7 @@ class BedrockModelConfig(BaseModel):
             out["temperature"] = self.temperature
         if self.top_p is not None:
             out["topP"] = self.top_p
-        if self.top_k is not None:
-            out["topK"] = self.top_k
-        if self.stop_sequences:
-            out["stopSequences"] = list(self.stop_sequences)
+        # topK + stopSequences intentionally NOT forwarded — see class docstring.
         return out
 
 

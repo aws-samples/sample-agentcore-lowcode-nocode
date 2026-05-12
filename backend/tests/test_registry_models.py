@@ -221,6 +221,17 @@ def test_auto_publish_tool_builds_mcp_tools_list() -> None:
     )
     assert rec is not None
     assert captured["req"].name == "Weather_Lookup"  # normalised
-    inline = json.loads(captured["req"].descriptors.mcp.tools.inline_content)
-    assert inline["result"]["tools"][0]["name"] == "Weather_Lookup"
-    assert inline["result"]["tools"][0]["inputSchema"]["properties"]["city"]["type"] == "string"
+    # Live-tested: AWS's 2025-12-11 MCP schema is private, so auto-publish
+    # emits a CUSTOM record whose inline_content IS a JSON-RPC tools/list.
+    assert captured["req"].descriptor_type.value == "CUSTOM"
+    inline = json.loads(captured["req"].descriptors.custom.inline_content)
+    assert inline["resource_type"] == "mcp_tool"
+    assert (
+        inline["tools_list"]["result"]["tools"][0]["name"] == "Weather_Lookup"
+    )
+    assert (
+        inline["tools_list"]["result"]["tools"][0]["inputSchema"]["properties"][
+            "city"
+        ]["type"]
+        == "string"
+    )

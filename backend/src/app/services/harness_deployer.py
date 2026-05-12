@@ -100,13 +100,27 @@ class HarnessDeployer:
     def _build_create_params(
         self, req: HarnessCreateRequest, *, execution_role_arn: str, user_id: str
     ) -> dict[str, Any]:
+        """Build the CreateHarness params.
+
+        Shape verified live against boto3 1.43.6 ``CreateHarness`` input
+        model in us-east-1. Top-level fields AWS accepts today:
+          harnessName, clientToken, executionRoleArn, environment,
+          environmentVariables, authorizerConfiguration, model, systemPrompt,
+          tools, skills, allowedTools, memory, truncation, maxIterations,
+          maxTokens, timeoutSeconds, tags.
+
+        Fields we accept at the API surface but cannot forward to AWS yet
+        (they appear in AWS documentation but are not in the current SDK
+        model): ``description``, ``guardrail``, ``knowledge_base``,
+        ``observability``, Bedrock ``top_k``, Bedrock ``stop_sequences``.
+        We still capture ``description`` locally in HarnessRecord for UI
+        purposes; the rest are accepted-but-ignored with a warning.
+        """
         params: dict[str, Any] = {
             "harnessName": req.harness_name,
             "executionRoleArn": execution_role_arn,
             "model": req.model.to_api(),
         }
-        if req.description:
-            params["description"] = req.description
         if req.system_prompt:
             params["systemPrompt"] = [{"text": req.system_prompt}]
         if req.tools:
@@ -119,20 +133,26 @@ class HarnessDeployer:
             params["memory"] = req.memory.to_api()
         if req.truncation:
             params["truncation"] = req.truncation.to_api()
-        if req.guardrail:
-            params["guardrailConfiguration"] = req.guardrail.to_api()
-        if req.knowledge_base:
-            kb_cfg = req.knowledge_base.to_api()
-            if kb_cfg:
-                params["knowledgeBaseConfiguration"] = kb_cfg
-        if req.observability:
-            params["observabilityConfiguration"] = req.observability.to_api()
         if req.max_iterations is not None:
             params["maxIterations"] = req.max_iterations
         if req.max_tokens is not None:
             params["maxTokens"] = req.max_tokens
         if req.timeout_seconds is not None:
             params["timeoutSeconds"] = req.timeout_seconds
+        # Warn the caller when they requested a feature the SDK doesn't support
+        # yet so the UI surfaces why it wasn't applied.
+        for unsupported, present in (
+            ("guardrail", bool(req.guardrail)),
+            ("knowledge_base", bool(req.knowledge_base)),
+            ("observability", bool(req.observability)),
+        ):
+            if present:
+                logger.warning(
+                    "Harness field %r is accepted at the API but not yet "
+                    "supported by boto3 bedrock-agentcore-control CreateHarness; "
+                    "dropping from the call.",
+                    unsupported,
+                )
         # Environment (network mode is required within agentCoreRuntimeEnvironment)
         env: dict[str, Any] = {"networkConfiguration": {"networkMode": req.network_mode}}
         if req.network_mode == "VPC":

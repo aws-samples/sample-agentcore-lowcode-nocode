@@ -24,12 +24,13 @@ from app.models.registry_models import (
     RegistryResponse,
     RegistrySetupRequest,
 )
+from app.models.rbac_models import Permission
+from app.services.rbac_service import require_permission, _singleton_service as _rbac_service
 from app.services.registry_service import (
     RegistryOwnershipStore,
     RegistryService,
-    _platform_admin_ids,
 )
-from app.shared.auth import get_user_email, require_user
+from app.shared.auth import get_user_email, get_user_groups, require_user
 
 logger = logging.getLogger(__name__)
 
@@ -84,19 +85,20 @@ def _scrub(obj):
     "/setup", response_model=RegistryResponse, status_code=status.HTTP_201_CREATED
 )
 async def create_registry(
-    req: RegistrySetupRequest, user_id: str = Depends(require_user)
+    req: RegistrySetupRequest,
+    user_id: str = Depends(require_permission(Permission.REGISTRY_MANAGE)),
 ) -> RegistryResponse:
     try:
         r = _svc().create_registry(user_id, req)
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="admin only")
     except ClientError as e:
         raise _aws_error(e)
     return RegistryResponse(registry=r)
 
 
 @router.get("/list", response_model=RegistryListResponse)
-async def list_registries(user_id: str = Depends(require_user)) -> RegistryListResponse:
+async def list_registries(
+    user_id: str = Depends(require_permission(Permission.REGISTRY_VIEW)),
+) -> RegistryListResponse:
     try:
         items = _svc().list_registries()
     except ClientError as e:
@@ -117,7 +119,7 @@ async def list_registries(user_id: str = Depends(require_user)) -> RegistryListR
 async def create_record(
     req: RecordCreateRequest,
     request: Request,
-    user_id: str = Depends(require_user),
+    user_id: str = Depends(require_permission(Permission.REGISTRY_PUBLISH)),
 ) -> RecordResponse:
     email = get_user_email(request) or ""
     try:
@@ -135,7 +137,7 @@ async def list_records(
     status_filter: Optional[str] = Query(default=None, max_length=32),
     descriptor_type: Optional[str] = Query(default=None, max_length=32),
     name: Optional[str] = Query(default=None, max_length=128),
-    user_id: str = Depends(require_user),
+    user_id: str = Depends(require_permission(Permission.REGISTRY_VIEW)),
 ) -> RecordListResponse:
     try:
         items = _svc().list_records(
@@ -150,7 +152,7 @@ async def list_records(
 async def get_record(
     record_id: str,
     registry_id: str = Query(..., min_length=1, max_length=128),
-    user_id: str = Depends(require_user),
+    user_id: str = Depends(require_permission(Permission.REGISTRY_VIEW)),
 ) -> RecordResponse:
     record_id = _validate_id(record_id)
     try:
@@ -175,15 +177,28 @@ async def get_record(
     return RecordResponse(record=rec, detail=clean)
 
 
+def _is_admin(request: Request, user_id: str) -> bool:
+    """Cheap check used by endpoints that let admins bypass owner-scoping."""
+    return _rbac_service().has(
+        user_id, Permission.REGISTRY_MANAGE, groups=get_user_groups(request)
+    )
+
+
 @router.delete("/records/{record_id}")
 async def delete_record(
     record_id: str,
+    request: Request,
     registry_id: str = Query(..., min_length=1, max_length=128),
-    user_id: str = Depends(require_user),
+    user_id: str = Depends(require_permission(Permission.REGISTRY_PUBLISH)),
 ) -> dict:
     record_id = _validate_id(record_id)
     try:
-        _svc().delete_record(user_id, registry_id, record_id)
+        _svc().delete_record(
+            user_id,
+            registry_id,
+            record_id,
+            is_admin=_is_admin(request, user_id),
+        )
     except PermissionError:
         raise HTTPException(status_code=404, detail="record not found")
     except ClientError as e:
@@ -194,12 +209,18 @@ async def delete_record(
 @router.post("/records/{record_id}/submit")
 async def submit_record(
     record_id: str,
+    request: Request,
     registry_id: str = Query(..., min_length=1, max_length=128),
-    user_id: str = Depends(require_user),
+    user_id: str = Depends(require_permission(Permission.REGISTRY_SUBMIT)),
 ) -> dict:
     record_id = _validate_id(record_id)
     try:
-        r = _svc().submit_for_approval(user_id, registry_id, record_id)
+        r = _svc().submit_for_approval(
+            user_id,
+            registry_id,
+            record_id,
+            is_admin=_is_admin(request, user_id),
+        )
     except PermissionError:
         raise HTTPException(status_code=404, detail="record not found")
     except ClientError as e:
@@ -212,15 +233,13 @@ async def approve_record(
     record_id: str,
     req: RecordApprovalRequest,
     registry_id: str = Query(..., min_length=1, max_length=128),
-    user_id: str = Depends(require_user),
+    user_id: str = Depends(require_permission(Permission.REGISTRY_APPROVE)),
 ) -> dict:
     record_id = _validate_id(record_id)
     try:
         r = _svc().update_status(
             user_id, registry_id, record_id, "APPROVED", req.status_reason
         )
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="admin only")
     except ClientError as e:
         raise _aws_error(e)
     return _scrub(r)
@@ -231,15 +250,13 @@ async def reject_record(
     record_id: str,
     req: RecordRejectRequest,
     registry_id: str = Query(..., min_length=1, max_length=128),
-    user_id: str = Depends(require_user),
+    user_id: str = Depends(require_permission(Permission.REGISTRY_APPROVE)),
 ) -> dict:
     record_id = _validate_id(record_id)
     try:
         r = _svc().update_status(
             user_id, registry_id, record_id, "REJECTED", req.status_reason
         )
-    except PermissionError:
-        raise HTTPException(status_code=403, detail="admin only")
     except ClientError as e:
         raise _aws_error(e)
     return _scrub(r)
@@ -250,7 +267,7 @@ async def search_records(
     registry_id: str = Query(..., min_length=1, max_length=128),
     q: str = Query(default="", max_length=256),
     descriptor_type: Optional[str] = Query(default=None, max_length=32),
-    user_id: str = Depends(require_user),
+    user_id: str = Depends(require_permission(Permission.REGISTRY_SEARCH)),
 ) -> RecordListResponse:
     try:
         items = _svc().search(registry_id, q, descriptor_type=descriptor_type)
@@ -262,7 +279,7 @@ async def search_records(
 @router.post("/auto-publish", response_model=RecordResponse)
 async def auto_publish(
     req: AutoPublishRequest,
-    user_id: str = Depends(require_user),
+    user_id: str = Depends(require_permission(Permission.REGISTRY_PUBLISH)),
     user_email: str = Depends(get_user_email),
 ) -> RecordResponse:
     """One-click publish: turn a deployment / tool / harness the user just

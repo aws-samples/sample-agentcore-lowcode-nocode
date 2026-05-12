@@ -18,6 +18,7 @@ import { ApprovalInbox } from './components/approvals/ApprovalInbox';
 import { approvalStats } from './services/approvals';
 import HarnessManager from './components/harness/HarnessManager';
 import AgentCoreManager from './components/agentcore/AgentCoreManager';
+import { useRole } from './context/RoleContext';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useWorkflowStore } from './store/workflowStore';
 import { useFlowStore } from './store/flowStore';
@@ -30,6 +31,10 @@ import type { GeneratedTool } from './services/api';
 import './App.css';
 
 function App() {
+  const { role } = useRole();
+  const isConsumer = role === 'registry_consumer';
+  const isAdmin = role === 'platform_admin';
+
   const { activeFlowId, activeFlowName } = useFlowStore();
 
   // Auto-save active flow workflow (only saves when activeFlowId is set)
@@ -375,8 +380,11 @@ function App() {
         onToggleCollapse={handleToggleCollapse}
         searchQuery={searchQuery}
         onSearchChange={handleSearchChange}
-        onOpenTemplates={() => setShowTemplateGallery(true)}
-        onOpenToolGenerator={() => setShowToolGenerator(true)}
+        // Consumer can't build new flows, so skip the creation affordances.
+        onOpenTemplates={isConsumer ? undefined : () => setShowTemplateGallery(true)}
+        onOpenToolGenerator={
+          isConsumer ? undefined : () => setShowToolGenerator(true)
+        }
       />
 
       <div className="flex-1 relative flex flex-col">
@@ -410,30 +418,43 @@ function App() {
               </div>
             )}
 
-            {/* Deploy Button */}
-            <button
-              onClick={() => setShowDeployPanel(true)}
-              disabled={!canDeploy}
-              className={`
-                px-4 py-1.5 rounded-md font-medium transition-all flex items-center gap-2 text-sm
-                ${canDeploy
-                  ? 'bg-[#ff9900] text-[#232f3e] hover:bg-[#ec7211] shadow-sm'
-                  : 'bg-white/10 text-white/30 cursor-not-allowed'}
-              `}
-              title={!canDeploy ? 'Configure a Runtime node first' : 'Deploy to AgentCore'}
-            >
-              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M22 2L11 13" /><path d="M22 2l-7 20-4-9-9-4 20-7z" />
-              </svg>
-              Deploy
-            </button>
-            <button
-              onClick={() => setShowHarnessManager(true)}
-              className="px-3 py-1.5 rounded-md text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors"
-              title="AgentCore Harness — managed agent"
-            >
-              Harness
-            </button>
+            {/* Role badge (small, immediate visual cue for who you are) */}
+            {role && (
+              <span className="text-[10px] px-2 py-0.5 rounded bg-white/10 text-white/70 uppercase tracking-wide" title={`Your role: ${role}`}>
+                {role.replace('_', ' ')}
+              </span>
+            )}
+
+            {/* Deploy — hidden for read-only consumer persona */}
+            {!isConsumer && (
+              <button
+                onClick={() => setShowDeployPanel(true)}
+                disabled={!canDeploy}
+                className={`
+                  px-4 py-1.5 rounded-md font-medium transition-all flex items-center gap-2 text-sm
+                  ${canDeploy
+                    ? 'bg-[#ff9900] text-[#232f3e] hover:bg-[#ec7211] shadow-sm'
+                    : 'bg-white/10 text-white/30 cursor-not-allowed'}
+                `}
+                title={!canDeploy ? 'Configure a Runtime node first' : 'Deploy to AgentCore'}
+              >
+                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M22 2L11 13" /><path d="M22 2l-7 20-4-9-9-4 20-7z" />
+                </svg>
+                Deploy
+              </button>
+            )}
+            {/* Harness drawer — hidden for consumer */}
+            {!isConsumer && (
+              <button
+                onClick={() => setShowHarnessManager(true)}
+                className="px-3 py-1.5 rounded-md text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+                title="AgentCore Harness — managed agent"
+              >
+                Harness
+              </button>
+            )}
+            {/* Services drawer is always visible — it's the consumer's primary lane */}
             <button
               onClick={() => setShowAgentCoreManager(true)}
               className="px-3 py-1.5 rounded-md text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors"
@@ -441,30 +462,33 @@ function App() {
             >
               Services
             </button>
-            <button
-              onClick={() => setShowApprovalInbox(true)}
-              className="relative px-3 py-1.5 rounded-md text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors"
-              title="Approval Inbox"
-            >
-              Inbox
-              {pendingApprovalCount > 0 && (
-                <span
-                  style={{
-                    position: 'absolute',
-                    top: -4,
-                    right: -4,
-                    background: '#ff9900',
-                    color: '#232f3e',
-                    fontSize: 10,
-                    fontWeight: 700,
-                    padding: '2px 6px',
-                    borderRadius: 10,
-                  }}
-                >
-                  {pendingApprovalCount}
-                </span>
-              )}
-            </button>
+            {/* Approval inbox is admin-only (pending-registry-approval + HITL) */}
+            {isAdmin && (
+              <button
+                onClick={() => setShowApprovalInbox(true)}
+                className="relative px-3 py-1.5 rounded-md text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+                title="Approval Inbox"
+              >
+                Inbox
+                {pendingApprovalCount > 0 && (
+                  <span
+                    style={{
+                      position: 'absolute',
+                      top: -4,
+                      right: -4,
+                      background: '#ff9900',
+                      color: '#232f3e',
+                      fontSize: 10,
+                      fontWeight: 700,
+                      padding: '2px 6px',
+                      borderRadius: 10,
+                    }}
+                  >
+                    {pendingApprovalCount}
+                  </span>
+                )}
+              </button>
+            )}
             <button
               onClick={() => signOut()}
               className="px-3 py-1.5 rounded-md text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors"

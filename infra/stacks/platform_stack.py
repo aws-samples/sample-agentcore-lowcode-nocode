@@ -1996,11 +1996,56 @@ class PlatformStack(cdk.Stack):
             refresh_token_validity=Duration.days(7),
         )
 
-        # Pre-create users from context (comma-separated string via env var)
-        cognito_users_raw = self.node.try_get_context("cognito_users") or ""
-        cognito_users = [e.strip() for e in cognito_users_raw.split(",") if e.strip()] if isinstance(cognito_users_raw, str) else cognito_users_raw
-        for email in cognito_users:
-            cognito.CfnUserPoolUser(
+        # --- Registry persona groups (admin / publisher / consumer) --------
+        # Cognito groups are the authoritative signal for our RBAC. The JWT
+        # carries them as ``cognito:groups`` claims which the backend maps to
+        # internal Roles (see COGNITO_GROUP_TO_ROLE in rbac_models.py).
+        admin_group = cognito.CfnUserPoolGroup(
+            self,
+            "CognitoGroupPlatformAdmin",
+            user_pool_id=pool.user_pool_id,
+            group_name="platform-admin",
+            description="Full access to the platform + AWS Agent Registry admin persona",
+            precedence=1,
+        )
+        publisher_group = cognito.CfnUserPoolGroup(
+            self,
+            "CognitoGroupRegistryPublisher",
+            user_pool_id=pool.user_pool_id,
+            group_name="registry-publisher",
+            description="AWS Agent Registry publisher persona — create/submit records",
+            precedence=2,
+        )
+        consumer_group = cognito.CfnUserPoolGroup(
+            self,
+            "CognitoGroupRegistryConsumer",
+            user_pool_id=pool.user_pool_id,
+            group_name="registry-consumer",
+            description="AWS Agent Registry consumer persona — search + read approved records",
+            precedence=3,
+        )
+
+        # --- Pre-create users from context --------------------------------
+        # Accept legacy ``cognito_users`` (goes straight into platform-admin
+        # for backward compatibility) plus three new context keys:
+        #   cognito_admins / cognito_publishers / cognito_consumers
+        def _ctx_list(key: str) -> list[str]:
+            raw = self.node.try_get_context(key) or ""
+            if isinstance(raw, str):
+                return [e.strip() for e in raw.split(",") if e.strip()]
+            return list(raw)
+
+        legacy_users = _ctx_list("cognito_users")
+        admins = _ctx_list("cognito_admins") or legacy_users
+        publishers = _ctx_list("cognito_publishers")
+        consumers = _ctx_list("cognito_consumers")
+
+        # A user may appear in multiple categories; de-dup by email.
+        created: dict[str, cognito.CfnUserPoolUser] = {}
+        for email in admins + publishers + consumers:
+            if email in created:
+                continue
+            created[email] = cognito.CfnUserPoolUser(
                 self,
                 f"User-{email.replace('@', '-at-').replace('.', '-')}",
                 user_pool_id=pool.user_pool_id,
@@ -2015,6 +2060,26 @@ class PlatformStack(cdk.Stack):
                     ),
                 ],
             )
+
+        # Wire group memberships. CfnUserPoolUserToGroupAttachment needs the
+        # user to exist first — add_dependency keeps CFN ordering safe.
+        def _attach(group, emails: list[str], label: str) -> None:
+            for email in emails:
+                safe = email.replace("@", "-at-").replace(".", "-")
+                attach = cognito.CfnUserPoolUserToGroupAttachment(
+                    self,
+                    f"GroupAttach-{label}-{safe}",
+                    user_pool_id=pool.user_pool_id,
+                    group_name=group.group_name,
+                    username=email,
+                )
+                attach.add_dependency(group)
+                if email in created:
+                    attach.add_dependency(created[email])
+
+        _attach(admin_group, admins, "admin")
+        _attach(publisher_group, publishers, "publisher")
+        _attach(consumer_group, consumers, "consumer")
 
         return pool, client
 

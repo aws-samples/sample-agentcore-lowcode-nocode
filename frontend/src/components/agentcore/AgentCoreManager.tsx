@@ -6,7 +6,7 @@
  * AgentCore-managed services.
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   type ConfigurationBundleRecord,
@@ -30,6 +30,7 @@ import {
   submitForApproval,
 } from '../../services/registry';
 import { HarnessPanel } from '../harness/HarnessPanel';
+import { useRole } from '../../context/RoleContext';
 
 interface Props {
   open: boolean;
@@ -40,10 +41,24 @@ interface Props {
 type Tab = 'harness' | 'optimization' | 'registry';
 
 export function AgentCoreManager({ open, onClose, defaultTab }: Props) {
-  const [tab, setTab] = useState<Tab>(defaultTab || 'harness');
+  const { role } = useRole();
+  // Consumers see only Registry; publishers see Harness + Registry;
+  // admins see everything. We keep Registry last so the consumer lands
+  // on it by default when no other tab is enabled.
+  const visibleTabs = useMemo<Tab[]>(() => {
+    if (role === 'registry_consumer') return ['registry'];
+    if (role === 'registry_publisher') return ['harness', 'registry'];
+    return ['harness', 'optimization', 'registry'];
+  }, [role]);
+
+  const [tab, setTab] = useState<Tab>(defaultTab || visibleTabs[0] || 'registry');
   useEffect(() => {
     if (defaultTab && open) setTab(defaultTab);
   }, [defaultTab, open]);
+  // If role changes mid-session, snap to a tab that's still allowed.
+  useEffect(() => {
+    if (!visibleTabs.includes(tab)) setTab(visibleTabs[0] || 'registry');
+  }, [visibleTabs, tab]);
   return (
     <AnimatePresence>
       {open && (
@@ -76,7 +91,9 @@ export function AgentCoreManager({ open, onClose, defaultTab }: Props) {
                 </div>
                 <div>
                   <h2 className="text-sm font-semibold text-white">AgentCore Services</h2>
-                  <p className="text-[11px] text-white/50">Harness · Optimization · Registry</p>
+                  <p className="text-[11px] text-white/50">
+                    {visibleTabs.map((t) => t.charAt(0).toUpperCase() + t.slice(1)).join(' · ')}
+                  </p>
                 </div>
               </div>
               <button onClick={onClose} aria-label="close" className="p-1.5 rounded-md hover:bg-white/10">
@@ -86,7 +103,7 @@ export function AgentCoreManager({ open, onClose, defaultTab }: Props) {
               </button>
             </header>
             <nav className="flex border-b border-[#e9ebed] bg-[#f7f8f9] px-2 pt-2 gap-1.5" role="tablist" aria-label="Services tabs">
-              {(['harness', 'optimization', 'registry'] as Tab[]).map((t) => (
+              {visibleTabs.map((t) => (
                 <button
                   key={t}
                   role="tab"
@@ -271,13 +288,20 @@ function OptimizationPanel() {
 
 
 function RegistryPanel() {
+  const { has } = useRole();
+  const canPublish = has('registry:publish');
+  const canSubmit = has('registry:submit');
+  const canApprove = has('registry:approve');
+
   const [registries, setRegistries] = useState<RegistrySummary[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [records, setRecords] = useState<RecordSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Consumers default to searching approved records only — no noise from
+  // drafts and pending work they can't act on anyway.
   const [query, setQuery] = useState('');
-  const [filter, setFilter] = useState('');
+  const [filter, setFilter] = useState<string>(canPublish ? '' : 'APPROVED');
   const [newName, setNewName] = useState('');
   const [newDescription, setNewDescription] = useState('');
   const [newContent, setNewContent] = useState('{}');
@@ -347,13 +371,15 @@ function RegistryPanel() {
 
       {selected && (
         <>
-          <div className="rounded-xl border border-[#e9ebed] bg-white p-3.5 shadow-sm space-y-2">
-            <h3 className="text-sm font-semibold text-[#16191f]">Publish CUSTOM record</h3>
-            <input className="w-full rounded-md border border-[#e9ebed] px-2.5 py-1.5 text-sm" placeholder="name" value={newName} onChange={(e) => setNewName(e.target.value)} />
-            <input className="w-full rounded-md border border-[#e9ebed] px-2.5 py-1.5 text-sm" placeholder="description" value={newDescription} onChange={(e) => setNewDescription(e.target.value)} />
-            <textarea className="w-full rounded-md border border-[#e9ebed] px-2.5 py-1.5 text-sm font-mono" rows={3} value={newContent} onChange={(e) => setNewContent(e.target.value)} />
-            <button className="px-3 py-1.5 text-sm font-semibold rounded-md bg-[#0972d3] text-white hover:bg-[#0961b9] disabled:opacity-50" onClick={publish} disabled={!newName.trim()}>Publish</button>
-          </div>
+          {canPublish && (
+            <div className="rounded-xl border border-[#e9ebed] bg-white p-3.5 shadow-sm space-y-2">
+              <h3 className="text-sm font-semibold text-[#16191f]">Publish CUSTOM record</h3>
+              <input className="w-full rounded-md border border-[#e9ebed] px-2.5 py-1.5 text-sm" placeholder="name" value={newName} onChange={(e) => setNewName(e.target.value)} />
+              <input className="w-full rounded-md border border-[#e9ebed] px-2.5 py-1.5 text-sm" placeholder="description" value={newDescription} onChange={(e) => setNewDescription(e.target.value)} />
+              <textarea className="w-full rounded-md border border-[#e9ebed] px-2.5 py-1.5 text-sm font-mono" rows={3} value={newContent} onChange={(e) => setNewContent(e.target.value)} />
+              <button className="px-3 py-1.5 text-sm font-semibold rounded-md bg-[#0972d3] text-white hover:bg-[#0961b9] disabled:opacity-50" onClick={publish} disabled={!newName.trim()}>Publish</button>
+            </div>
+          )}
 
           <div className="flex gap-2">
             <input className="flex-1 rounded-md border border-[#e9ebed] px-2.5 py-1.5 text-sm" placeholder="search approved records" value={query} onChange={(e) => setQuery(e.target.value)} />
@@ -386,13 +412,15 @@ function RegistryPanel() {
                     {r.description && <div className="text-xs text-[#5f6b7a] mt-1">{r.description}</div>}
                   </div>
                   <div className="flex gap-1.5 flex-shrink-0">
-                    {r.status === 'DRAFT' && (
+                    {canSubmit && r.status === 'DRAFT' && (
                       <button className="px-2 py-1 text-xs rounded-md border border-[#e9ebed] bg-white hover:bg-[#f2f3f3]" onClick={async () => { try { await submitForApproval(r.registry_id, r.record_id); await refreshRecords(); } catch (e) { setError(e instanceof Error ? e.message : 'failed'); } }}>Submit</button>
                     )}
-                    {r.status === 'PENDING_APPROVAL' && (
+                    {canApprove && r.status === 'PENDING_APPROVAL' && (
                       <button className="px-2 py-1 text-xs rounded-md border border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700" onClick={async () => { try { await approveRecord(r.registry_id, r.record_id, 'ui approval'); await refreshRecords(); } catch (e) { setError(e instanceof Error ? e.message : 'failed'); } }}>Approve</button>
                     )}
-                    <button className="px-2 py-1 text-xs rounded-md border border-red-200 bg-white text-red-700 hover:bg-red-50" onClick={async () => { if (!confirm(`Delete record "${r.name}"?`)) return; try { await deleteRecord(r.registry_id, r.record_id); await refreshRecords(); } catch (e) { setError(e instanceof Error ? e.message : 'failed'); } }}>Delete</button>
+                    {canPublish && (
+                      <button className="px-2 py-1 text-xs rounded-md border border-red-200 bg-white text-red-700 hover:bg-red-50" onClick={async () => { if (!confirm(`Delete record "${r.name}"?`)) return; try { await deleteRecord(r.registry_id, r.record_id); await refreshRecords(); } catch (e) { setError(e instanceof Error ? e.message : 'failed'); } }}>Delete</button>
+                    )}
                   </div>
                 </div>
               </li>

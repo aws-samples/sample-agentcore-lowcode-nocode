@@ -25,6 +25,7 @@ import {
   listHarnesses,
 } from '../../services/harness';
 import { PublishToRegistryModal } from '../registry/PublishToRegistryModal';
+import { useRole } from '../../context/RoleContext';
 
 const DEFAULT_MODEL = 'us.anthropic.claude-sonnet-4-5-20250929-v1:0';
 
@@ -63,6 +64,8 @@ export function HarnessPanel({ className }: Props) {
   const [mode, setMode] = useState<'list' | 'create' | 'invoke'>('list');
   const [selected, setSelected] = useState<HarnessRecord | null>(null);
   const [publishFor, setPublishFor] = useState<HarnessRecord | null>(null);
+  const { has: hasPermission } = useRole();
+  const canPublishToRegistry = hasPermission('registry:publish');
 
   // Invoke state
   const [prompt, setPrompt] = useState('');
@@ -356,14 +359,16 @@ export function HarnessPanel({ className }: Props) {
                     >
                       Invoke
                     </button>
-                    <button
-                      className="px-2 py-1 text-xs rounded-md border border-[#0972d3]/40 bg-white text-[#0972d3] hover:bg-[#0972d3]/5 disabled:opacity-50"
-                      disabled={h.status !== 'READY'}
-                      onClick={() => setPublishFor(h)}
-                      title="Publish this harness to AWS Agent Registry"
-                    >
-                      Publish
-                    </button>
+                    {canPublishToRegistry && (
+                      <button
+                        className="px-2 py-1 text-xs rounded-md border border-[#0972d3]/40 bg-white text-[#0972d3] hover:bg-[#0972d3]/5 disabled:opacity-50"
+                        disabled={h.status !== 'READY'}
+                        onClick={() => setPublishFor(h)}
+                        title="Publish this harness to AWS Agent Registry"
+                      >
+                        Publish
+                      </button>
+                    )}
                     <button
                       className="px-2 py-1 text-xs rounded-md border border-red-200 bg-white text-red-700 hover:bg-red-50"
                       onClick={() => handleDelete(h)}

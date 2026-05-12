@@ -115,8 +115,12 @@ class RegistryService:
     def create_registry(
         self, admin_user_id: str, req: RegistrySetupRequest
     ) -> RegistrySummary:
-        if admin_user_id not in _platform_admin_ids():
-            raise PermissionError("admin only")
+        """Create a new registry.
+
+        Authorization is enforced at the router layer via
+        ``Depends(require_permission(Permission.REGISTRY_MANAGE))``; this
+        method trusts its caller has already been gated.
+        """
         params: dict[str, Any] = {
             "name": req.name,
             "clientToken": _client_token(f"registry/{req.name}"),
@@ -275,12 +279,23 @@ class RegistryService:
         return out
 
     def submit_for_approval(
-        self, user_id: str, registry_id: str, record_id: str
+        self,
+        user_id: str,
+        registry_id: str,
+        record_id: str,
+        *,
+        is_admin: bool = False,
     ) -> dict[str, Any]:
+        """Submit a draft record for approval.
+
+        Admin callers can submit any record; non-admins can only submit
+        records they own. Router-layer ``REGISTRY_SUBMIT`` permission has
+        already been checked.
+        """
         owner = self._ownership.owner_of(record_id)
         if owner is None:
             raise PermissionError("record not found")
-        if owner != user_id and user_id not in _platform_admin_ids():
+        if owner != user_id and not is_admin:
             raise PermissionError("record not found")
         return self._client.submit_registry_record_for_approval(
             registryId=registry_id, recordId=record_id
@@ -294,8 +309,7 @@ class RegistryService:
         status: str,
         reason: str,
     ) -> dict[str, Any]:
-        if admin_user_id not in _platform_admin_ids():
-            raise PermissionError("admin only")
+        """Approve or reject a record — router gates on REGISTRY_APPROVE."""
         return self._client.update_registry_record_status(
             registryId=registry_id,
             recordId=record_id,
@@ -304,12 +318,20 @@ class RegistryService:
         )
 
     def delete_record(
-        self, user_id: str, registry_id: str, record_id: str
+        self,
+        user_id: str,
+        registry_id: str,
+        record_id: str,
+        *,
+        is_admin: bool = False,
     ) -> None:
+        """Delete a record. Owners can always delete their own records;
+        admin can delete any. Router-layer ``REGISTRY_PUBLISH`` permission
+        has already been checked for non-admins."""
         owner = self._ownership.owner_of(record_id)
         if owner is None:
             raise PermissionError("record not found")
-        if owner != user_id and user_id not in _platform_admin_ids():
+        if owner != user_id and not is_admin:
             raise PermissionError("record not found")
         try:
             self._client.delete_registry_record(

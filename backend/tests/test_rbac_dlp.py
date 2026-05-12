@@ -41,6 +41,79 @@ def test_agent_operator_cannot_create_workflow() -> None:
     assert role_has_permission(Role.AGENT_OPERATOR, Permission.DEPLOYMENT_CREATE)
 
 
+# ---------------------------------------------------------------------------
+# AWS Agent Registry personas (admin / publisher / consumer)
+# Mirror of the separation of duties defined in the AWS tutorial
+# 10-Agent-Registry/00-getting-started/step-by-step/01-create-user-personas.
+# ---------------------------------------------------------------------------
+
+
+def test_registry_publisher_can_publish_and_submit_but_not_approve() -> None:
+    r = Role.REGISTRY_PUBLISHER
+    assert role_has_permission(r, Permission.REGISTRY_VIEW)
+    assert role_has_permission(r, Permission.REGISTRY_PUBLISH)
+    assert role_has_permission(r, Permission.REGISTRY_SUBMIT)
+    assert role_has_permission(r, Permission.REGISTRY_SEARCH)
+    # Separation of duties: publisher CANNOT approve their own work
+    assert not role_has_permission(r, Permission.REGISTRY_APPROVE)
+    # ...and cannot create/delete the registry itself
+    assert not role_has_permission(r, Permission.REGISTRY_MANAGE)
+    # Publisher is registry-scoped; no workflow/deployment mutation
+    assert not role_has_permission(r, Permission.WORKFLOW_CREATE)
+    assert not role_has_permission(r, Permission.DEPLOYMENT_CREATE)
+    assert not role_has_permission(r, Permission.ADMIN_MANAGE_USERS)
+
+
+def test_registry_consumer_is_read_only() -> None:
+    r = Role.REGISTRY_CONSUMER
+    assert role_has_permission(r, Permission.REGISTRY_VIEW)
+    assert role_has_permission(r, Permission.REGISTRY_SEARCH)
+    # No mutation of any kind
+    for p in (
+        Permission.REGISTRY_PUBLISH,
+        Permission.REGISTRY_SUBMIT,
+        Permission.REGISTRY_APPROVE,
+        Permission.REGISTRY_MANAGE,
+        Permission.WORKFLOW_CREATE,
+        Permission.DEPLOYMENT_CREATE,
+        Permission.MARKETPLACE_PUBLISH,
+        Permission.ADMIN_MANAGE_USERS,
+    ):
+        assert not role_has_permission(r, p), f"consumer should not have {p}"
+
+
+def test_cognito_group_map_round_trip() -> None:
+    from app.models.rbac_models import COGNITO_GROUP_TO_ROLE
+
+    assert COGNITO_GROUP_TO_ROLE["platform-admin"] is Role.PLATFORM_ADMIN
+    assert COGNITO_GROUP_TO_ROLE["registry-publisher"] is Role.REGISTRY_PUBLISHER
+    assert COGNITO_GROUP_TO_ROLE["registry-consumer"] is Role.REGISTRY_CONSUMER
+
+
+def test_rbac_service_resolves_cognito_group() -> None:
+    """Cognito groups must win over the DDB + env-var fallbacks."""
+    from app.services.rbac_service import RbacService
+
+    svc = RbacService.__new__(RbacService)
+    svc._store = MagicMock()
+    svc._store.get = MagicMock(return_value=None)
+
+    assert (
+        svc.resolve_role("u1", groups=["registry-publisher"])
+        == Role.REGISTRY_PUBLISHER
+    )
+    assert (
+        svc.resolve_role("u1", groups=["registry-consumer"])
+        == Role.REGISTRY_CONSUMER
+    )
+    assert svc.resolve_role("u1", groups=["platform-admin"]) == Role.PLATFORM_ADMIN
+    # Multiple groups -> highest privilege wins
+    assert (
+        svc.resolve_role("u1", groups=["registry-consumer", "platform-admin"])
+        == Role.PLATFORM_ADMIN
+    )
+
+
 def test_role_permission_map_defined_for_all_roles() -> None:
     # Every non-admin role should have at least WORKFLOW_READ
     for role in [Role.AGENT_CREATOR, Role.AGENT_OPERATOR, Role.AGENT_TESTER, Role.VIEWER]:

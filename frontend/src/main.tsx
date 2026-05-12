@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import './auth/configure';
 import './index.css';
 import App from './App.tsx';
+import { RoleProvider } from './context/RoleContext';
 
 const needsAuth = !!import.meta.env.VITE_COGNITO_USER_POOL_ID;
 
@@ -14,14 +15,20 @@ async function render() {
     createRoot(document.getElementById('root')!).render(
       <StrictMode>
         <Authenticator hideSignUp={true}>
-          {() => <App />}
+          {() => (
+            <RoleProvider>
+              <App />
+            </RoleProvider>
+          )}
         </Authenticator>
       </StrictMode>,
     );
   } else {
     createRoot(document.getElementById('root')!).render(
       <StrictMode>
-        <App />
+        <RoleProvider>
+          <App />
+        </RoleProvider>
       </StrictMode>,
     );
   }

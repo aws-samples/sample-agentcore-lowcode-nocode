@@ -6,6 +6,7 @@
 import { useState, useCallback, useMemo } from 'react';
 import type { AgentCoreComponentType } from '../../types/workflow';
 import { FlowSidebar } from '../flow-sidebar';
+import { useRole } from '../../context/RoleContext';
 
 // ============================================================================
 // Palette Item Definition
@@ -266,17 +267,47 @@ export function ComponentPalette({
     new Set(['compute', 'integration', 'security', 'tools'])
   );
 
-  // Filter items based on search query
-  const filteredItems = useMemo(() => {
-    if (!searchQuery.trim()) return PALETTE_ITEMS;
+  const { role } = useRole();
 
+  // Persona-scoped palette. Mirrors the AWS Agent Registry separation
+  // of duties: consumers discover (2 building blocks), publishers
+  // assemble agents + tools (5 blocks), admins see everything.
+  const roleAllowed = useMemo(() => {
+    if (role === 'registry_consumer') {
+      // Consumer just browses — they only need Runtime + A2A to drop a
+      // node on the canvas and wire it to a discovered agent.
+      return new Set<AgentCoreComponentType>(['runtime', 'a2a']);
+    }
+    if (role === 'registry_publisher') {
+      // Publisher produces. 5 building blocks let them assemble an
+      // agent (Runtime), connect it to tools (Gateway), run Python
+      // (Code Interpreter), drive a browser, and publish over A2A.
+      return new Set<AgentCoreComponentType>([
+        'runtime',
+        'gateway',
+        'code_interpreter',
+        'browser',
+        'a2a',
+      ]);
+    }
+    // Admin + all other roles see the full palette.
+    return null;
+  }, [role]);
+
+  // Filter items: first by role, then by search query.
+  const filteredItems = useMemo(() => {
+    let base = PALETTE_ITEMS;
+    if (roleAllowed) {
+      base = base.filter((item) => roleAllowed.has(item.type));
+    }
+    if (!searchQuery.trim()) return base;
     const query = searchQuery.toLowerCase();
-    return PALETTE_ITEMS.filter(
+    return base.filter(
       (item) =>
         item.label.toLowerCase().includes(query) ||
         item.description.toLowerCase().includes(query)
     );
-  }, [searchQuery]);
+  }, [searchQuery, roleAllowed]);
 
   // Group items by category
   const itemsByCategory = useMemo(() => {

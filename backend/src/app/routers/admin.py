@@ -23,7 +23,7 @@ from app.models.rbac_models import (
 from app.services.audit_service import singleton_audit_service
 from app.services.dlp_service import DlpPolicyStore, DlpService
 from app.services.rbac_service import RbacService, RbacStore, _singleton_service
-from app.shared.auth import get_user_email, require_user
+from app.shared.auth import get_user_email, get_user_groups, require_user
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ async def me(
     request: Request, user_id: str = Depends(require_user)
 ) -> MeResponse:
     svc = _singleton_service()
-    role = svc.resolve_role(user_id)
+    role = svc.resolve_role(user_id, groups=get_user_groups(request))
     return MeResponse(
         user_id=user_id,
         email=get_user_email(request),
@@ -65,10 +65,12 @@ async def me(
 
 
 @router.get("/users", response_model=UserRoleListResponse)
-async def list_users(user_id: str = Depends(require_user)) -> UserRoleListResponse:
+async def list_users(
+    request: Request, user_id: str = Depends(require_user)
+) -> UserRoleListResponse:
     svc = _singleton_service()
     try:
-        users = svc.list_users(user_id)
+        users = svc.list_users(user_id, groups=get_user_groups(request))
     except PermissionError:
         raise HTTPException(status_code=403, detail="admin only")
     return UserRoleListResponse(users=users)
@@ -82,7 +84,9 @@ async def assign_role(
 ) -> UserRoleResponse:
     svc = _singleton_service()
     try:
-        rec = svc.assign(user_id, req.user_id, req.role)
+        rec = svc.assign(
+            user_id, req.user_id, req.role, groups=get_user_groups(request)
+        )
     except PermissionError:
         raise HTTPException(status_code=403, detail="admin only")
     audit = singleton_audit_service()
@@ -104,12 +108,13 @@ async def assign_role(
 
 @router.get("/audit", response_model=AuditListResponse)
 async def list_audit(
+    request: Request,
     date: Optional[str] = Query(default=None, max_length=10),
     limit: int = Query(default=100, ge=1, le=500),
     user_id: str = Depends(require_user),
 ) -> AuditListResponse:
     svc = _singleton_service()
-    if not svc.has(user_id, Permission.ADMIN_VIEW_AUDIT):
+    if not svc.has(user_id, Permission.ADMIN_VIEW_AUDIT, groups=get_user_groups(request)):
         raise HTTPException(status_code=403, detail="admin only")
     if date is not None and not _DATE_RE.match(date):
         raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
@@ -164,7 +169,7 @@ async def upsert_policy(
     user_id: str = Depends(require_user),
 ) -> DlpPolicyRequest:
     svc = _singleton_service()
-    if not svc.has(user_id, Permission.ADMIN_MANAGE_DLP):
+    if not svc.has(user_id, Permission.ADMIN_MANAGE_DLP, groups=get_user_groups(request)):
         raise HTTPException(status_code=403, detail="admin only")
     try:
         _dlp().save_policy(
@@ -185,10 +190,10 @@ async def upsert_policy(
 
 @dlp_router.get("/policies/{deployment_id}")
 async def get_policy(
-    deployment_id: str, user_id: str = Depends(require_user)
+    deployment_id: str, request: Request, user_id: str = Depends(require_user)
 ) -> dict:
     svc = _singleton_service()
-    if not svc.has(user_id, Permission.ADMIN_MANAGE_DLP):
+    if not svc.has(user_id, Permission.ADMIN_MANAGE_DLP, groups=get_user_groups(request)):
         raise HTTPException(status_code=403, detail="admin only")
     policy = _dlp().get_policy(deployment_id)
     if policy is None:

@@ -38,6 +38,24 @@ def get_user_email(request: Request) -> Optional[str]:
     return email if isinstance(email, str) and email else None
 
 
+def get_user_groups(request: Request) -> list[str]:
+    """Return the Cognito groups list from the JWT claims.
+
+    ID tokens carry ``cognito:groups`` as a JSON array (Cognito serialises
+    it as a bracketed string in some transports — handle both).
+    """
+    claims = get_claims(request)
+    raw = claims.get("cognito:groups")
+    if isinstance(raw, list):
+        return [str(g) for g in raw if g]
+    if isinstance(raw, str):
+        # API Gateway sometimes forwards it as "[groupA groupB]" or
+        # "groupA,groupB". Strip brackets + split on space/comma.
+        cleaned = raw.strip("[]").replace(",", " ")
+        return [g for g in cleaned.split() if g]
+    return []
+
+
 def require_user(request: Request) -> str:
     """FastAPI dependency: require an authenticated user, return their sub."""
     sub = get_user_id(request)

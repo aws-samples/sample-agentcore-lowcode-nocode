@@ -25,6 +25,14 @@ ENVIRONMENT_NAME="${ENVIRONMENT_NAME:-dev}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 PROJECT_NAME="${PROJECT_NAME:-agentcore-workflow}"
 COGNITO_USERS="${COGNITO_USERS:-}"
+# Registry persona seeding (comma-separated emails). Users listed in
+# COGNITO_ADMINS go into the platform-admin group; COGNITO_PUBLISHERS
+# into registry-publisher; COGNITO_CONSUMERS into registry-consumer.
+# Anyone in COGNITO_USERS without a more specific placement falls back
+# to platform-admin (legacy behaviour).
+COGNITO_ADMINS="${COGNITO_ADMINS:-${COGNITO_USERS}}"
+COGNITO_PUBLISHERS="${COGNITO_PUBLISHERS:-}"
+COGNITO_CONSUMERS="${COGNITO_CONSUMERS:-}"
 STACK_NAME="${PROJECT_NAME}-${ENVIRONMENT_NAME}"
 
 # Resolve project root relative to this script
@@ -214,6 +222,9 @@ run_cdk_deploy() {
     -c aws_region="${AWS_REGION}" \
     -c project_name="${PROJECT_NAME}" \
     -c cognito_users="${COGNITO_USERS}" \
+    -c cognito_admins="${COGNITO_ADMINS}" \
+    -c cognito_publishers="${COGNITO_PUBLISHERS}" \
+    -c cognito_consumers="${COGNITO_CONSUMERS}" \
     -c marketplace_admin_ids="${MARKETPLACE_ADMIN_IDS:-}" \
     -c platform_admin_ids="${PLATFORM_ADMIN_IDS:-}" \
     -c rbac_default_role="${RBAC_DEFAULT_ROLE:-agent_creator}"

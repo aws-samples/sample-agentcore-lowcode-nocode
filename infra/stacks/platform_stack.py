@@ -32,6 +32,7 @@ from aws_cdk import aws_ssm as ssm
 from aws_cdk import aws_stepfunctions as sfn
 from aws_cdk import aws_stepfunctions_tasks as sfn_tasks
 from aws_cdk import aws_wafv2 as wafv2
+from aws_cdk import custom_resources as cr
 from constructs import Construct
 
 
@@ -1000,6 +1001,16 @@ class PlatformStack(cdk.Stack):
             mfa=cognito.Mfa.OPTIONAL,
             mfa_second_factor=cognito.MfaSecondFactor(sms=False, otp=True),
             standard_threat_protection_mode=cognito.StandardThreatProtectionMode.FULL_FUNCTION,
+            user_invitation=cognito.UserInvitationConfig(
+                email_subject="Your AgentCore Workflow credentials",
+                email_body=(
+                    "<p>Your AgentCore Workflow account is ready.</p>"
+                    "<p>Username:<br><code>{username}</code></p>"
+                    "<p>Temporary password (copy exactly, no surrounding whitespace):<br>"
+                    "<code>{####}</code></p>"
+                    "<p>You will be prompted to set a new password on first sign-in.</p>"
+                ),
+            ),
             removal_policy=RemovalPolicy.DESTROY,
         )
 
@@ -1016,25 +1027,65 @@ class PlatformStack(cdk.Stack):
             refresh_token_validity=Duration.days(7),
         )
 
-        # Pre-create users from context (comma-separated string via env var)
+        # Pre-create users from context (comma-separated string via env var).
+        #
+        # A Lambda-backed Custom Resource generates a temporary password from
+        # an HTML-safe charset (no <, >, &, ', ", ., ,) and passes it to
+        # AdminCreateUser. Cognito emails the invitation containing that
+        # exact password, so what the user sees in their inbox matches what
+        # Cognito stored. The user still lands in FORCE_CHANGE_PASSWORD and
+        # sets a real password on first sign-in.
+        #
+        # This replaces AWS::Cognito::UserPoolUser, which does not expose
+        # TemporaryPassword and so leaves Cognito to auto-generate one —
+        # those generated passwords can contain HTML-special chars that get
+        # silently stripped by email renderers, producing a displayed
+        # password that does not match the stored verifier.
         cognito_users_raw = self.node.try_get_context("cognito_users") or ""
         cognito_users = [e.strip() for e in cognito_users_raw.split(",") if e.strip()] if isinstance(cognito_users_raw, str) else cognito_users_raw
-        for email in cognito_users:
-            cognito.CfnUserPoolUser(
+
+        if cognito_users:
+            provisioner_fn = _lambda.Function(
                 self,
-                f"User-{email.replace('@', '-at-').replace('.', '-')}",
-                user_pool_id=pool.user_pool_id,
-                username=email,
-                desired_delivery_mediums=["EMAIL"],
-                user_attributes=[
-                    cognito.CfnUserPoolUser.AttributeTypeProperty(
-                        name="email", value=email,
-                    ),
-                    cognito.CfnUserPoolUser.AttributeTypeProperty(
-                        name="email_verified", value="true",
-                    ),
-                ],
+                "CognitoUserProvisionerFn",
+                runtime=_lambda.Runtime.PYTHON_3_12,
+                handler="handler.handler",
+                code=_lambda.Code.from_asset("stacks/cognito_user_provisioner"),
+                timeout=Duration.seconds(60),
+                memory_size=256,
+                log_retention=logs.RetentionDays.ONE_MONTH,
+                description="Provisions Cognito users with an HTML-safe generated temporary password",
             )
+            provisioner_fn.add_to_role_policy(
+                iam.PolicyStatement(
+                    actions=[
+                        "cognito-idp:AdminCreateUser",
+                        "cognito-idp:AdminSetUserPassword",
+                        "cognito-idp:AdminDeleteUser",
+                    ],
+                    resources=[pool.user_pool_arn],
+                )
+            )
+
+            provider = cr.Provider(
+                self,
+                "CognitoUserProvisionerProvider",
+                on_event_handler=provisioner_fn,
+                log_retention=logs.RetentionDays.ONE_MONTH,
+            )
+
+            for email in cognito_users:
+                sanitized = email.replace("@", "-at-").replace(".", "-")
+                user_cr = cdk.CustomResource(
+                    self,
+                    f"User-{sanitized}",
+                    service_token=provider.service_token,
+                    properties={
+                        "UserPoolId": pool.user_pool_id,
+                        "Email": email,
+                    },
+                )
+                user_cr.node.add_dependency(pool)
 
         return pool, client
 

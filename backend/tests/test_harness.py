@@ -229,15 +229,20 @@ def test_coerce_session_id_pads_short_ids() -> None:
     assert _coerce_session_id("sess-A") == _coerce_session_id("sess-A")
 
 
-def test_bedrock_model_top_k_and_stop_sequences() -> None:
+def test_bedrock_model_top_k_and_stop_sequences_accepted_but_dropped() -> None:
+    """AWS's CreateHarness Bedrock shape doesn't support topK/stopSequences
+    yet. We accept them at the Pydantic layer but deliberately omit them
+    from to_api() so AWS doesn't ParamValidation-error the call.
+    """
     cfg = BedrockModelConfig(
         model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
         top_k=40,
         stop_sequences=["\n\nHuman:", "END"],
     )
     api = cfg.to_api()
-    assert api["topK"] == 40
-    assert api["stopSequences"] == ["\n\nHuman:", "END"]
+    assert api == {"modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0"}
+    assert "topK" not in api
+    assert "stopSequences" not in api
 
 
 def test_guardrail_config_to_api_default_version() -> None:
@@ -275,8 +280,11 @@ def test_lifecycle_config_defaults_match_aws() -> None:
     assert out == {"idleRuntimeSessionTimeout": 900, "maxLifetime": 28_800}
 
 
-def test_build_create_params_wires_new_fields() -> None:
-    """Guardrail, KB, observability, lifecycle, description, skills all plumbed."""
+def test_build_create_params_wires_sdk_supported_fields() -> None:
+    """Lifecycle and skills are in the SDK today; guardrail / KB /
+    observability are accepted at the API layer but NOT forwarded
+    (they aren't in boto3's CreateHarness input shape yet).
+    """
     from unittest.mock import MagicMock, patch
 
     from app.models.harness_models import (
@@ -311,15 +319,7 @@ def test_build_create_params_wires_new_fields() -> None:
             execution_role_arn="arn:aws:iam::1:role/x",
             user_id="u1",
         )
-    assert p["description"] == "a small harness"
-    assert p["guardrailConfiguration"]["guardrailIdentifier"] == "gr-abc"
-    assert p["knowledgeBaseConfiguration"]["knowledgeBases"] == [
-        {"knowledgeBaseId": "KB123"}
-    ]
-    assert p["observabilityConfiguration"] == {
-        "tracesEnabled": False,
-        "metricsEnabled": True,
-    }
+    # Fields that ARE supported today
     assert p["environment"]["agentCoreRuntimeEnvironment"]["lifecycleConfiguration"] == {
         "idleRuntimeSessionTimeout": 600,
         "maxLifetime": 3_600,
@@ -327,3 +327,8 @@ def test_build_create_params_wires_new_fields() -> None:
     assert p["skills"] == [
         {"skillArn": "arn:aws:bedrock-agentcore:us-east-1:1:skill/abc"}
     ]
+    # Fields that AWS doesn't accept yet — must NOT appear in the call
+    assert "description" not in p
+    assert "guardrailConfiguration" not in p
+    assert "knowledgeBaseConfiguration" not in p
+    assert "observabilityConfiguration" not in p

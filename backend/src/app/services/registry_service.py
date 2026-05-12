@@ -418,47 +418,57 @@ class RegistryService:
         description: Optional[str] = None,
         submit_for_approval: bool = False,
     ) -> Optional[RecordSummary]:
-        """Publish a generated tool as an MCP record.
+        """Publish a generated tool as a CUSTOM record.
 
-        Expected ``tool`` keys: display_name, description, input_schema
-        (JSON schema). Emits an MCP ``tools/list`` inline content so any
-        MCP client can discover it.
+        Ideally this would emit an ``MCP`` descriptor so MCP clients could
+        discover the tool automatically, but AWS's ``2025-12-11`` MCP
+        server schema is not publicly documented (live-tested: AWS returns
+        ``Schema validation failed`` for several reasonable shapes and
+        ``mcp.server is required`` for tools-only records). Until AWS
+        ships the schema, we publish a ``CUSTOM`` record whose
+        ``inline_content`` IS a standard JSON-RPC ``tools/list`` response
+        — so a consumer that knows the contract can still parse it.
+
+        Expected ``tool`` keys: ``display_name``, ``description``,
+        ``input_schema`` (JSON schema for the tool inputs).
         """
         from app.models.registry_models import (
-            McpDescriptor,
-            McpToolsDescriptor,
+            CustomDescriptor,
             RegistryRecordDescriptors,
         )
 
         tool_name = _normalise_record_name(
             tool.get("display_name") or tool.get("name") or "unnamed_tool"
         )
-        tools_list = {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "result": {
-                "tools": [
-                    {
-                        "name": tool_name,
-                        "description": tool.get("description", ""),
-                        "inputSchema": tool.get(
-                            "input_schema"
-                        ) or tool.get("inputSchema") or {"type": "object"},
-                    }
-                ]
+        inline = {
+            "resource_type": "mcp_tool",
+            "protocol_version": "2024-11-05",
+            "owner_user_id": user_id,
+            "owner_email": user_email,
+            "tools_list": {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "tools": [
+                        {
+                            "name": tool_name,
+                            "description": tool.get("description", ""),
+                            "inputSchema": tool.get("input_schema")
+                            or tool.get("inputSchema")
+                            or {"type": "object"},
+                        }
+                    ]
+                },
             },
+            "published_at": datetime.now(timezone.utc).isoformat(),
         }
         req = RecordCreateRequest(
             registry_id=registry_id,
             name=name or tool_name,
             description=description or tool.get("description", ""),
-            descriptor_type=RegistryRecordDescriptorType.MCP,
+            descriptor_type=RegistryRecordDescriptorType.CUSTOM,
             descriptors=RegistryRecordDescriptors(
-                mcp=McpDescriptor(
-                    tools=McpToolsDescriptor(
-                        inline_content=json.dumps(tools_list)
-                    )
-                )
+                custom=CustomDescriptor(inline_content=json.dumps(inline))
             ),
         )
         try:

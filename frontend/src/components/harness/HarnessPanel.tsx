@@ -502,6 +502,13 @@ export function HarnessPanel({ className }: Props) {
 
           {showAdvanced && (
             <div className="space-y-3 rounded-xl border border-[#e9ebed] bg-[#fafafa] p-3">
+              <div className="rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-[11px] text-amber-900">
+                <strong>Preview:</strong> guardrail, knowledge base, and
+                observability fields below are accepted by the API but not yet
+                forwarded to <code>CreateHarness</code> — AWS's current SDK model
+                does not include them. Lifecycle, memory, and the Bedrock inference
+                knobs <em>are</em> applied.
+              </div>
               <label className="block">
                 <span className="text-[11px] uppercase tracking-wide text-[#5f6b7a]">
                   Memory ARN (AgentCore Memory)

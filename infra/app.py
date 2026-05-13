@@ -80,8 +80,18 @@ cdk_nag.NagSuppressions.add_stack_suppressions(
             reason="JWT authorizer on all /api/* routes; /health is intentionally unauthenticated",
         ),
         cdk_nag.NagPackSuppression(
+            id="AwsSolutions-COG2",
+            reason="MFA enforced at the IdP for FederateOIDC SSO logins; Cognito-native MFA "
+            "would be redundant for this internal development tool",
+        ),
+        cdk_nag.NagPackSuppression(
             id="AwsSolutions-COG4",
             reason="Cognito JWT authorizer on all /api/* routes; /health is intentionally unauthenticated",
+        ),
+        cdk_nag.NagPackSuppression(
+            id="AwsSolutions-COG8",
+            reason="Cognito Plus tier (advanced security) not required for this internal "
+            "development tool; upstream IdP provides threat protection",
         ),
         cdk_nag.NagPackSuppression(
             id="AwsSolutions-L1",

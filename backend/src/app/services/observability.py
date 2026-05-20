@@ -65,6 +65,13 @@ def _redact_arn(arn: Optional[str]) -> str:
     return "<redacted-secrets-manager-arn>"
 
 
+def _redact_endpoint(endpoint: Optional[str]) -> str:
+    """Redact OTLP endpoint values for logging."""
+    if not endpoint:
+        return "<none>"
+    return "<redacted-otlp-endpoint>"
+
+
 # Provider -> default OTLP endpoint when caller leaves it blank.
 # Most providers require account-specific URLs, so only the truly fixed ones
 # are defaulted here. Custom and most clouds force the user to supply one.
@@ -188,10 +195,17 @@ def build_otel_env_vars(
         if (canvas_endpoint and canvas_endpoint != plat.get("otlp_endpoint")) \
                 or (canvas_secret and canvas_secret != plat.get("auth_header_secret_arn")) \
                 or (canvas_sample is not None and canvas_sample != plat.get("sample_rate", 1.0)):
+            # Both endpoint and ARN are redacted before logging — the endpoint
+            # is operator-controlled but can carry tenant/project hints, and
+            # the ARN carries account ID + secret name. Operators only need
+            # to know that an override attempt was rejected, not the values.
             logger.warning(
                 "Per-canvas Observability override ignored — platform defaults are locked. "
-                "Canvas wanted endpoint=%r secret=%s sample=%r; using platform endpoint=%r.",
-                canvas_endpoint, _redact_arn(canvas_secret), canvas_sample, plat.get("otlp_endpoint"),
+                "Canvas wanted endpoint=%s secret=%s sample=%r; using platform endpoint=%s.",
+                _redact_endpoint(canvas_endpoint),
+                _redact_arn(canvas_secret),
+                canvas_sample,
+                _redact_endpoint(plat.get("otlp_endpoint")),
             )
         # Merge: platform supplies endpoint/secret/sample/service-prefix; canvas
         # supplies any extra resource attributes (and only those).

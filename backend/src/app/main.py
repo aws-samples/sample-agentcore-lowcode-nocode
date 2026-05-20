@@ -4,15 +4,19 @@ Requirements: 3.3, 4.2, 6.1
 """
 
 import logging
+import os
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import workflows_router
-from app.routers.deployment import router as deployment_router
 from app.routers.flows import router as flows_router
-from app.routers.tools import router as tools_router
+from app.routers.observability import router as observability_router
+# routers/deployment.py and routers/tools.py used to mount /api/deploy + tool
+# routes here, but API Gateway routes those endpoints directly to the
+# Deployment Lambda (deployment_handler.py). The router files were dead code
+# (see tasks/lessons.md Bug 31) and have been deleted.
 from app.services.config import load_config
 from app.services.dynamodb_storage import DynamoDBWorkflowStorage
 from app.services.flow_storage import DynamoDBFlowStorage, set_flow_storage
@@ -26,6 +30,13 @@ load_dotenv()
 # Load application config from SSM or environment variables
 config = load_config()
 
+# Audit issue #6: silent in-memory fallback in Lambda would silently lose
+# writes between cold-start invocations. When running inside Lambda
+# (AWS_LAMBDA_FUNCTION_NAME is set by the runtime), require DynamoDB env
+# vars and fail fast if they are missing. Local dev (no AWS_LAMBDA_FUNCTION_NAME)
+# keeps the in-memory fallback so the FastAPI app still works without AWS.
+_IS_LAMBDA = bool(os.environ.get("AWS_LAMBDA_FUNCTION_NAME"))
+
 # Select storage backend based on config
 if config.dynamodb_table_name:
     logger.info(
@@ -37,8 +48,12 @@ if config.dynamodb_table_name:
         table_name=config.dynamodb_table_name,
         region=config.aws_region,
     ))
+elif _IS_LAMBDA:
+    raise RuntimeError(
+        "Storage misconfigured: DYNAMODB_TABLE_NAME unset in Lambda environment"
+    )
 else:
-    logger.info("Using in-memory storage (no DYNAMODB_TABLE_NAME set)")
+    logger.info("Local mode: using in-memory workflow storage (no DYNAMODB_TABLE_NAME set)")
 
 # Select flow storage backend based on config
 if config.dynamodb_flows_table_name:
@@ -51,8 +66,12 @@ if config.dynamodb_flows_table_name:
         table_name=config.dynamodb_flows_table_name,
         region=config.aws_region,
     ))
+elif _IS_LAMBDA:
+    raise RuntimeError(
+        "Storage misconfigured: DYNAMODB_FLOWS_TABLE_NAME unset in Lambda environment"
+    )
 else:
-    logger.info("Using in-memory flow storage (no DYNAMODB_FLOWS_TABLE_NAME set)")
+    logger.info("Local mode: using in-memory flow storage (no DYNAMODB_FLOWS_TABLE_NAME set)")
 
 app = FastAPI(
     title="AgentCore Workflow Platform API",
@@ -74,8 +93,9 @@ app.add_middleware(
 # Include routers
 app.include_router(workflows_router)
 app.include_router(flows_router, prefix="/api", tags=["flows"])
-app.include_router(deployment_router, prefix="/api", tags=["deployment"])
-app.include_router(tools_router, prefix="/api", tags=["tools"])
+## deployment_router and tools_router were mounted here previously — see comment
+## near imports above. The Deployment Lambda owns those endpoints now.
+app.include_router(observability_router, prefix="/api", tags=["observability"])
 
 
 @app.get("/health")

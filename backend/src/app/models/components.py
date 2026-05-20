@@ -181,12 +181,29 @@ class GatewayConfiguration(BaseModel):
 
     @model_validator(mode="after")
     def validate_target_config_type(self) -> "GatewayConfiguration":
-        """Ensure target_config type matches target_type."""
+        """Ensure target_config type matches target_type. Reject target types
+        whose plumbing isn't implemented yet so callers get a clean 422
+        instead of a silently-fallback deploy. See tasks/lessons.md Bug 106.
+        """
         type_mapping = {
             GatewayTargetType.OPENAPI: "openapi",
             GatewayTargetType.LAMBDA: "lambda",
             GatewayTargetType.SMITHY: "smithy",
         }
+        # Unsupported types — reject loudly at the API boundary.
+        unsupported = {
+            GatewayTargetType.API_GATEWAY: (
+                "api_gateway target type is not yet implemented. "
+                "Use 'lambda' or 'openapi' for now, or wire your API GW REST stage "
+                "through an OpenAPI export."
+            ),
+            GatewayTargetType.PREBUILT: (
+                "prebuilt target type is not yet implemented. "
+                "Wire the underlying OpenAPI/Lambda manually until this lands."
+            ),
+        }
+        if self.target_type in unsupported:
+            raise ValueError(unsupported[self.target_type])
         expected_type = type_mapping.get(self.target_type)
         if expected_type and self.target_config.type != expected_type:
             raise ValueError(
@@ -264,12 +281,30 @@ class GuardrailsConfiguration(BaseModel):
 
 
 class ObservabilityConfiguration(BaseModel):
-    """Configuration for AgentCore Observability component."""
+    """Configuration for AgentCore Observability component.
+
+    Supports the AgentCore-native CloudWatch sidecar, Langfuse, and any
+    OTLP-compatible backend via the ``custom`` provider.
+    """
 
     component_type: Literal["observability"] = "observability"
     name: str = Field(min_length=1, max_length=100)
     enable_otel: bool = False
-    # Observability is configured at runtime level
+
+    # OTLP backend selection
+    provider: Literal[
+        "langfuse",
+        "custom",
+    ] = "langfuse"
+    otlp_endpoint: Optional[str] = Field(default=None, max_length=2048)
+    otlp_protocol: Literal["http/protobuf", "grpc"] = "http/protobuf"
+    service_name: Optional[str] = Field(default=None, max_length=200)
+    sample_rate: float = Field(ge=0.0, le=1.0, default=1.0)
+    resource_attributes: dict[str, str] = Field(default_factory=dict)
+
+    # Auth: Secrets Manager ARN holding the OTEL_EXPORTER_OTLP_HEADERS string
+    auth_header_secret_arn: Optional[str] = Field(default=None, max_length=2048)
+    extra_headers: dict[str, str] = Field(default_factory=dict)
 
 
 # ============================================================================

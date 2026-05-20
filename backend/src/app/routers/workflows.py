@@ -17,8 +17,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, ValidationError
+
+from app.services.auth import assert_owner, get_caller_sub
 
 
 def _validate_workflow_id(workflow_id: str) -> str:
@@ -93,7 +95,10 @@ class DeleteResponse(BaseModel):
 
 
 @router.post("", response_model=WorkflowResponse, status_code=status.HTTP_201_CREATED)
-async def create_workflow(request: WorkflowCreateRequest) -> WorkflowResponse:
+async def create_workflow(
+    request: WorkflowCreateRequest,
+    caller_sub: str = Depends(get_caller_sub),
+) -> WorkflowResponse:
     """Create a new workflow.
 
     Requirements: 9.1
@@ -113,6 +118,7 @@ async def create_workflow(request: WorkflowCreateRequest) -> WorkflowResponse:
         metadata=request.metadata,
         created_at=now,
         updated_at=now,
+        owner_sub=caller_sub,
     )
 
     try:
@@ -129,15 +135,35 @@ async def create_workflow(request: WorkflowCreateRequest) -> WorkflowResponse:
 
 
 @router.get("", response_model=list[WorkflowDefinition])
-async def list_workflows() -> list[WorkflowDefinition]:
-    """List all workflows."""
+async def list_workflows(
+    caller_sub: str = Depends(get_caller_sub),
+) -> list[WorkflowDefinition]:
+    """List workflows owned by the caller.
+
+    Tenant-isolation (Critic Finding 3): strict ``owner_sub == caller_sub``.
+    Pre-tenancy records (``owner_sub=None``) are excluded for every caller;
+    making them visible to "local-dev only" via a wildcard is the same trap
+    as the legacy-row bypass — fix is an explicit backfill, not a wildcard.
+    Filtering happens in Python because the underlying storage may be
+    DynamoDB (no GSI on owner_sub yet) or in-memory; flip to a query when
+    scale demands it.
+    """
     storage = get_workflow_storage()
-    return storage.list_all()
+    list_by_owner = getattr(storage, "list_by_owner", None)
+    if callable(list_by_owner):
+        return list_by_owner(caller_sub)
+    return [
+        wf for wf in storage.list_all()
+        if getattr(wf, "owner_sub", None) == caller_sub
+    ]
 
 
 @router.get("/{workflow_id}", response_model=WorkflowDefinition)
-async def get_workflow(workflow_id: str) -> WorkflowDefinition:
-    """Get a workflow by ID.
+async def get_workflow(
+    workflow_id: str,
+    caller_sub: str = Depends(get_caller_sub),
+) -> WorkflowDefinition:
+    """Get a workflow by ID. Caller must own it.
 
     Requirements: 9.5
     """
@@ -148,12 +174,17 @@ async def get_workflow(workflow_id: str) -> WorkflowDefinition:
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Workflow with ID '{workflow_id}' not found",
         )
+    assert_owner(getattr(workflow, "owner_sub", None), caller_sub)
     return workflow
 
 
 @router.put("/{workflow_id}", response_model=WorkflowResponse)
-async def update_workflow(workflow_id: str, request: WorkflowUpdateRequest) -> WorkflowResponse:
-    """Update an existing workflow.
+async def update_workflow(
+    workflow_id: str,
+    request: WorkflowUpdateRequest,
+    caller_sub: str = Depends(get_caller_sub),
+) -> WorkflowResponse:
+    """Update an existing workflow. Caller must own it.
 
     Requirements: 9.1
     """
@@ -164,6 +195,7 @@ async def update_workflow(workflow_id: str, request: WorkflowUpdateRequest) -> W
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Workflow with ID '{workflow_id}' not found",
         )
+    assert_owner(getattr(existing, "owner_sub", None), caller_sub)
 
     # Build updated workflow with only provided fields
     update_data = {}
@@ -198,13 +230,25 @@ async def update_workflow(workflow_id: str, request: WorkflowUpdateRequest) -> W
 
 
 @router.delete("/{workflow_id}", response_model=DeleteResponse)
-async def delete_workflow(workflow_id: str) -> DeleteResponse:
-    """Delete a workflow by ID.
+async def delete_workflow(
+    workflow_id: str,
+    caller_sub: str = Depends(get_caller_sub),
+) -> DeleteResponse:
+    """Delete a workflow by ID. Caller must own it.
 
     Requirements: 9.1
     """
     workflow_id = _validate_workflow_id(workflow_id)
-    deleted = get_workflow_storage().delete(workflow_id)
+    storage = get_workflow_storage()
+    existing = storage.get(workflow_id)
+    if existing is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow with ID '{workflow_id}' not found",
+        )
+    assert_owner(getattr(existing, "owner_sub", None), caller_sub)
+
+    deleted = storage.delete(workflow_id)
     if not deleted:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

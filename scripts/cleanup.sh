@@ -218,11 +218,41 @@ for item in items:
 
     log_info "  Cleaning deployment: ${dep_id:-unknown}"
 
-    # Delete MCP server runtime
+    # Delete MCP server runtime + its execution role (same pattern as the
+    # main runtime below).
     if [[ -n "${mcp_id}" ]]; then
+      local mcp_role_arn=""
+      mcp_role_arn=$(aws bedrock-agentcore-control get-agent-runtime \
+        --agent-runtime-id "${mcp_id}" --region "${AWS_REGION}" \
+        --query 'roleArn' --output text 2>/dev/null || echo "")
       log_info "    Deleting MCP server runtime: ${mcp_id}"
       aws bedrock-agentcore-control delete-agent-runtime \
         --agent-runtime-id "${mcp_id}" --region "${AWS_REGION}" 2>/dev/null || true
+
+      if [[ -n "${mcp_role_arn}" && "${mcp_role_arn}" != "None" ]]; then
+        local mcp_role_name="${mcp_role_arn##*/}"
+        if [[ -n "${mcp_role_name}" ]]; then
+          log_info "    Deleting MCP runtime execution role: ${mcp_role_name}"
+          local mcp_managed mcp_inline
+          mcp_managed=$(aws iam list-attached-role-policies \
+            --role-name "${mcp_role_name}" \
+            --query "AttachedPolicies[].PolicyArn" \
+            --output text 2>/dev/null || echo "")
+          for pol_arn in ${mcp_managed}; do
+            aws iam detach-role-policy \
+              --role-name "${mcp_role_name}" --policy-arn "${pol_arn}" 2>/dev/null || true
+          done
+          mcp_inline=$(aws iam list-role-policies \
+            --role-name "${mcp_role_name}" \
+            --query "PolicyNames[]" \
+            --output text 2>/dev/null || echo "")
+          for pol_name in ${mcp_inline}; do
+            aws iam delete-role-policy \
+              --role-name "${mcp_role_name}" --policy-name "${pol_name}" 2>/dev/null || true
+          done
+          aws iam delete-role --role-name "${mcp_role_name}" 2>/dev/null || true
+        fi
+      fi
     fi
 
     # Delete policy engine (detach + delete policies + delete engine)
@@ -291,11 +321,48 @@ for item in items:
         --knowledge-base-id "${kb_id}" --region "${AWS_REGION}" 2>/dev/null || true
     fi
 
-    # Delete agent runtime
+    # Delete agent runtime + its execution role.
+    # We capture the role ARN BEFORE deleting the runtime because
+    # get-agent-runtime fails on a deleted runtime, leaving the role orphaned.
+    # Verified 2026-05-15 — orphan AgentCore* roles accumulated until tester
+    # manually purged them. See tasks/lessons.md Bug 25.
     if [[ -n "${runtime_id}" ]]; then
+      local runtime_role_arn=""
+      runtime_role_arn=$(aws bedrock-agentcore-control get-agent-runtime \
+        --agent-runtime-id "${runtime_id}" --region "${AWS_REGION}" \
+        --query 'roleArn' --output text 2>/dev/null || echo "")
       log_info "    Deleting agent runtime: ${runtime_id}"
       aws bedrock-agentcore-control delete-agent-runtime \
         --agent-runtime-id "${runtime_id}" --region "${AWS_REGION}" 2>/dev/null || true
+
+      if [[ -n "${runtime_role_arn}" && "${runtime_role_arn}" != "None" ]]; then
+        # roleArn format: arn:aws:iam::<acct>:role/<RoleName>
+        local runtime_role_name="${runtime_role_arn##*/}"
+        if [[ -n "${runtime_role_name}" ]]; then
+          log_info "    Deleting runtime execution role: ${runtime_role_name}"
+          # Detach managed policies
+          local managed_pols
+          managed_pols=$(aws iam list-attached-role-policies \
+            --role-name "${runtime_role_name}" \
+            --query "AttachedPolicies[].PolicyArn" \
+            --output text 2>/dev/null || echo "")
+          for pol_arn in ${managed_pols}; do
+            aws iam detach-role-policy \
+              --role-name "${runtime_role_name}" --policy-arn "${pol_arn}" 2>/dev/null || true
+          done
+          # Delete inline policies
+          local inline_pols
+          inline_pols=$(aws iam list-role-policies \
+            --role-name "${runtime_role_name}" \
+            --query "PolicyNames[]" \
+            --output text 2>/dev/null || echo "")
+          for pol_name in ${inline_pols}; do
+            aws iam delete-role-policy \
+              --role-name "${runtime_role_name}" --policy-name "${pol_name}" 2>/dev/null || true
+          done
+          aws iam delete-role --role-name "${runtime_role_name}" 2>/dev/null || true
+        fi
+      fi
     fi
   done
 
@@ -305,23 +372,27 @@ for item in items:
 # ── Step 5: Sweep for orphaned AgentCore-* resources ─────────────────
 
 sweep_orphan_resources() {
-  log_info "Sweeping for orphaned AgentCore-* resources..."
+  log_info "Sweeping for orphaned AgentCore-* resources owned by this stack..."
+  # Filters use the stack's PROJECT_NAME prefix so sweeps cannot delete
+  # AgentCore resources owned by other stacks/users in this account.
+  # Verified 2026-05-15 — the broader `AgentCore*` filter wiped a foreign
+  # runtime's IAM role; see tasks/lessons.md Bug 20.
 
-  # 1. AgentCore-* Lambda functions
+  # 1. AgentCoreRuntime-${PROJECT_NAME}-* Lambda functions only
   local lambdas
   lambdas=$(aws lambda list-functions \
     --region "${AWS_REGION}" \
-    --query "Functions[?starts_with(FunctionName, 'AgentCore')].FunctionName" \
+    --query "Functions[?starts_with(FunctionName, 'AgentCoreRuntime-${PROJECT_NAME}')].FunctionName" \
     --output text 2>/dev/null || echo "")
   for fn in ${lambdas}; do
     log_info "  Deleting orphan Lambda: ${fn}"
     aws lambda delete-function --function-name "${fn}" --region "${AWS_REGION}" 2>/dev/null || true
   done
 
-  # 2. AgentCore-* IAM roles (detach policies first)
+  # 2. AgentCoreRuntime-${PROJECT_NAME}-* IAM roles only (detach policies first)
   local roles
   roles=$(aws iam list-roles \
-    --query "Roles[?starts_with(RoleName, 'AgentCore')].RoleName" \
+    --query "Roles[?starts_with(RoleName, 'AgentCoreRuntime-${PROJECT_NAME}')].RoleName" \
     --output text 2>/dev/null || echo "")
   for role_name in ${roles}; do
     log_info "  Deleting orphan IAM role: ${role_name}"
@@ -346,24 +417,38 @@ sweep_orphan_resources() {
     aws iam delete-role --role-name "${role_name}" 2>/dev/null || true
   done
 
-  # 3. Bedrock AgentCore runtimes
+  # 3. Bedrock AgentCore runtimes — only those whose name starts with the
+  #    project's runtime prefix used by direct deploys / SFN deploys.
+  #    Set CLEANUP_INCLUDE_FOREIGN_RUNTIMES=1 to opt back in to the broad sweep.
   local runtimes
-  runtimes=$(aws bedrock-agentcore-control list-agent-runtimes \
-    --region "${AWS_REGION}" \
-    --query "agentRuntimeSummaries[].agentRuntimeId" \
-    --output text 2>/dev/null || echo "")
+  if [[ "${CLEANUP_INCLUDE_FOREIGN_RUNTIMES:-0}" == "1" ]]; then
+    log_warn "  CLEANUP_INCLUDE_FOREIGN_RUNTIMES=1 set — sweeping ALL runtimes in account"
+    runtimes=$(aws bedrock-agentcore-control list-agent-runtimes \
+      --region "${AWS_REGION}" \
+      --query "agentRuntimeSummaries[].agentRuntimeId" \
+      --output text 2>/dev/null || echo "")
+  else
+    # Match runtimes whose name starts with the deployment table's prefix.
+    # Direct-deploy uses raw runtime_config.name, SFN uses sanitize_runtime_name(...).
+    # Without a hard prefix, skip the sweep — per-deployment cleanup above already ran.
+    runtimes=""
+  fi
   for rt_id in ${runtimes}; do
     log_info "  Deleting orphan runtime: ${rt_id}"
     aws bedrock-agentcore-control delete-agent-runtime \
       --agent-runtime-id "${rt_id}" --region "${AWS_REGION}" 2>/dev/null || true
   done
 
-  # 4. Bedrock Gateways (delete targets first)
+  # 4. Bedrock Gateways — same opt-in gate.
   local gateways
-  gateways=$(aws bedrock-agentcore-control list-gateways \
-    --region "${AWS_REGION}" \
-    --query "gatewaySummaries[].gatewayId" \
-    --output text 2>/dev/null || echo "")
+  if [[ "${CLEANUP_INCLUDE_FOREIGN_RUNTIMES:-0}" == "1" ]]; then
+    gateways=$(aws bedrock-agentcore-control list-gateways \
+      --region "${AWS_REGION}" \
+      --query "gatewaySummaries[].gatewayId" \
+      --output text 2>/dev/null || echo "")
+  else
+    gateways=""
+  fi
   for gw_id in ${gateways}; do
     log_info "  Deleting orphan gateway: ${gw_id}"
     local targets
@@ -381,36 +466,39 @@ sweep_orphan_resources() {
       --gateway-identifier "${gw_id}" --region "${AWS_REGION}" 2>/dev/null || true
   done
 
-  # 5. OAuth2 credential providers
-  local cred_providers
-  cred_providers=$(aws bedrock-agentcore-control list-oauth2-credential-providers \
-    --region "${AWS_REGION}" \
-    --query "oauth2CredentialProviders[].name" \
-    --output text 2>/dev/null || echo "")
+  # 5-7: OAuth2 providers / memories / policy engines — opt-in only.
+  # Per-deployment cleanup already targets these by ID; the unbounded sweep
+  # below is destructive in shared accounts. Set CLEANUP_INCLUDE_FOREIGN_RUNTIMES=1
+  # to enable.
+  local cred_providers memories engines
+  if [[ "${CLEANUP_INCLUDE_FOREIGN_RUNTIMES:-0}" == "1" ]]; then
+    cred_providers=$(aws bedrock-agentcore-control list-oauth2-credential-providers \
+      --region "${AWS_REGION}" \
+      --query "oauth2CredentialProviders[].name" \
+      --output text 2>/dev/null || echo "")
+    memories=$(aws bedrock-agentcore-control list-memories \
+      --region "${AWS_REGION}" \
+      --query "memorySummaries[].memoryId" \
+      --output text 2>/dev/null || echo "")
+    engines=$(aws bedrock-agentcore-control list-policy-engines \
+      --region "${AWS_REGION}" \
+      --query "policyEngineSummaries[].policyEngineId" \
+      --output text 2>/dev/null || echo "")
+  else
+    cred_providers=""
+    memories=""
+    engines=""
+  fi
   for cp_name in ${cred_providers}; do
     log_info "  Deleting orphan OAuth2 credential provider: ${cp_name}"
     aws bedrock-agentcore-control delete-oauth2-credential-provider \
       --name "${cp_name}" --region "${AWS_REGION}" 2>/dev/null || true
   done
-
-  # 6. Memory resources
-  local memories
-  memories=$(aws bedrock-agentcore-control list-memories \
-    --region "${AWS_REGION}" \
-    --query "memorySummaries[].memoryId" \
-    --output text 2>/dev/null || echo "")
   for mem_id in ${memories}; do
     log_info "  Deleting orphan memory: ${mem_id}"
     aws bedrock-agentcore-control delete-memory \
       --memory-id "${mem_id}" --region "${AWS_REGION}" 2>/dev/null || true
   done
-
-  # 7. Policy engines (delete policies first)
-  local engines
-  engines=$(aws bedrock-agentcore-control list-policy-engines \
-    --region "${AWS_REGION}" \
-    --query "policyEngineSummaries[].policyEngineId" \
-    --output text 2>/dev/null || echo "")
   for eng_id in ${engines}; do
     log_info "  Deleting orphan policy engine: ${eng_id}"
     local eng_policies
@@ -451,6 +539,25 @@ sweep_orphan_resources() {
       aws cognito-idp delete-user-pool \
         --user-pool-id "${pool_id}" --region "${AWS_REGION}" 2>/dev/null || true
     done
+  done
+
+  # 9. OTEL auth-header secrets created by /api/observability/credentials.
+  #    Sweeps only per-agent secrets created by POST /api/observability/credentials
+  #    (provider-prefixed: agentcore-otel/langfuse/* or agentcore-otel/custom/*).
+  #    Explicitly EXCLUDES the admin-managed platform secret at
+  #    agentcore-otel/platform/* — that secret outlives any individual stack
+  #    by design (see scripts/bootstrap-otel-secret.sh header).
+  #    Verified 2026-05-15: cleanup.sh used to delete the platform secret
+  #    silently, breaking the next deploy. See tasks/lessons.md Bug 24.
+  local otel_secrets
+  otel_secrets=$(aws secretsmanager list-secrets --region "${AWS_REGION}" \
+    --query "SecretList[?starts_with(Name, 'agentcore-otel/') && !starts_with(Name, 'agentcore-otel/platform/')].ARN" \
+    --output text 2>/dev/null || echo "")
+  for s_arn in ${otel_secrets}; do
+    log_info "  Deleting orphan per-agent OTEL secret: ${s_arn}"
+    aws secretsmanager delete-secret \
+      --secret-id "${s_arn}" --force-delete-without-recovery \
+      --region "${AWS_REGION}" 2>/dev/null || true
   done
 
   log_success "Orphan resource sweep complete."

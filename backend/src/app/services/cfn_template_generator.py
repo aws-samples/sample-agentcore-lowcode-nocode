@@ -29,6 +29,7 @@ import yaml
 
 from app.models.deployment_models import DeployRequest, RuntimeConfig
 from app.services.code_generator import generate_agent_code
+from app.services.observability import build_otel_env_vars
 
 logger = logging.getLogger(__name__)
 
@@ -274,8 +275,18 @@ class CfnTemplateGenerator:
         self._add_cfn_provider(template, has_mcp_server=has_mcp_server)
         self._add_code_package(template, config)
 
-        # Runtime IAM role (always needed)
-        self._add_runtime_role(template, connected_tools, has_gateway, has_memory, has_evaluation)
+        # Runtime IAM role (always needed). Forward the OTEL auth secret ARN
+        # if the user configured an OTLP backend that needs Bearer/Basic auth.
+        _obs = config.observability.model_dump() if getattr(config, "observability", None) else {}
+        _otel_secret_arn = _obs.get("auth_header_secret_arn") or _obs.get("authHeaderSecretArn")
+        self._add_runtime_role(
+            template,
+            connected_tools,
+            has_gateway,
+            has_memory,
+            has_evaluation,
+            otel_secret_arn=_otel_secret_arn,
+        )
 
         # Conditional components
         if has_gateway:
@@ -324,6 +335,11 @@ class CfnTemplateGenerator:
         self._add_outputs(template, has_gateway, has_memory, has_mcp_server)
 
         # Generate portable agent code
+        _obs_enabled = bool(
+            getattr(config, "observability", None)
+            or "observability" in (connected_tools or [])
+            or getattr(config, "enable_otel", False)
+        )
         agent_code = generate_agent_code(
             config=config,
             tools=connected_tools,
@@ -332,6 +348,7 @@ class CfnTemplateGenerator:
             gateway_tools=gateway_tools,
             custom_tools=[ct.model_dump() if hasattr(ct, "model_dump") else ct for ct in custom_tools],
             portable=True,
+            observability_enabled=_obs_enabled,
         )
 
         # Generate MCP server code if needed (FastMCP, not HTTP runtime)
@@ -446,7 +463,35 @@ class CfnTemplateGenerator:
                         }
                     ],
                 },
-            }
+            },
+            {
+                # Custom::AgentCorePolicy handler reads/creates policies on
+                # the policy engine. Always granted because templates may
+                # include Cedar policies. See tasks/lessons.md Bug 72.
+                "PolicyName": "AgentCorePolicyManagement",
+                "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": [
+                                "bedrock-agentcore:CreatePolicy",
+                                "bedrock-agentcore:DeletePolicy",
+                                "bedrock-agentcore:ListPolicies",
+                                "bedrock-agentcore:GetPolicy",
+                                "bedrock-agentcore:GetPolicyEngine",
+                                "bedrock-agentcore:ListPolicyEngines",
+                                # AgentCore CreatePolicy implicitly requires
+                                # ManageAdminPolicy permission (undocumented).
+                                # See tasks/lessons.md Bug 93.
+                                "bedrock-agentcore:ManageAdminPolicy",
+                                "bedrock-agentcore:UpdatePolicy",
+                            ],
+                            "Resource": "*",
+                        }
+                    ],
+                },
+            },
         ]
 
         # MCP server targets need OAuth2 credential provider management
@@ -530,6 +575,7 @@ class CfnTemplateGenerator:
         has_gateway: bool,
         has_memory: bool,
         has_evaluation: bool,
+        otel_secret_arn: Optional[str] = None,
     ) -> None:
         statements = [
             {
@@ -638,10 +684,20 @@ class CfnTemplateGenerator:
                 }
             )
 
+        if otel_secret_arn:
+            statements.append(
+                {
+                    "Sid": "OtelAuthHeaderSecret",
+                    "Effect": "Allow",
+                    "Action": ["secretsmanager:GetSecretValue"],
+                    "Resource": [otel_secret_arn],
+                }
+            )
+
         template["Resources"]["RuntimeExecutionRole"] = {
             "Type": "AWS::IAM::Role",
             "Properties": {
-                "RoleName": {"Fn::Sub": "AgentCoreRuntime-${DeploymentName}"},
+                "RoleName": {"Fn::Sub": "AgentCoreRuntime-${AWS::StackName}"},
                 "AssumeRolePolicyDocument": {
                     "Version": "2012-10-17",
                     "Statement": [
@@ -713,7 +769,7 @@ class CfnTemplateGenerator:
         template["Resources"]["GatewayRole"] = {
             "Type": "AWS::IAM::Role",
             "Properties": {
-                "RoleName": {"Fn::Sub": "AgentCoreGateway-${DeploymentName}"},
+                "RoleName": {"Fn::Sub": "AgentCoreGateway-${AWS::StackName}"},
                 "AssumeRolePolicyDocument": {
                     "Version": "2012-10-17",
                     "Statement": [
@@ -744,6 +800,11 @@ class CfnTemplateGenerator:
                                         "bedrock-agentcore:GetPolicy",
                                         "bedrock-agentcore:AuthorizeAction",
                                         "bedrock-agentcore:PartiallyAuthorizeActions",
+                                        # CFN-provider's GenesisPolicyEngineCheck binds the
+                                        # PolicyEngine to the Gateway target; that bind call
+                                        # validates the Gateway role can call this action on
+                                        # the policy engine. See tasks/lessons.md Bug 67.
+                                        "bedrock-agentcore:CheckAuthorizePermissions",
                                     ],
                                     "Resource": "*",
                                 },
@@ -818,7 +879,7 @@ class CfnTemplateGenerator:
         template["Resources"]["ToolLambdaRole"] = {
             "Type": "AWS::IAM::Role",
             "Properties": {
-                "RoleName": {"Fn::Sub": "AgentCoreLambda-${DeploymentName}"},
+                "RoleName": {"Fn::Sub": "AgentCoreLambda-${AWS::StackName}"},
                 "AssumeRolePolicyDocument": {
                     "Version": "2012-10-17",
                     "Statement": [
@@ -1079,7 +1140,7 @@ def handler(event, context):
     def _add_kb_tool_lambda_and_target(self, template: dict, deployment_name: str, kb_config: dict) -> None:
         """Add a Lambda function and Gateway Target for the Knowledge Base tool."""
         kb_mode = kb_config.get("kbMode", "existing")
-        foundation_model_id = kb_config.get("foundationModelId", "anthropic.claude-3-5-sonnet-20241022-v2:0")
+        foundation_model_id = kb_config.get("foundationModelId", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
 
         # For "existing" mode, KB ID is a parameter; for "create_new", it's created by the KB resources
         if kb_mode == "existing":
@@ -1101,7 +1162,7 @@ def handler(event, context):
         template["Resources"]["KBToolLambdaRole"] = {
             "Type": "AWS::IAM::Role",
             "Properties": {
-                "RoleName": {"Fn::Sub": "AgentCoreKBTool-${DeploymentName}"},
+                "RoleName": {"Fn::Sub": "AgentCoreKBTool-${AWS::StackName}"},
                 "AssumeRolePolicyDocument": {
                     "Version": "2012-10-17",
                     "Statement": [
@@ -1322,7 +1383,7 @@ def handler(event, context):
         template["Resources"]["KnowledgeBaseRole"] = {
             "Type": "AWS::IAM::Role",
             "Properties": {
-                "RoleName": {"Fn::Sub": "AgentCoreKBRole-${DeploymentName}"},
+                "RoleName": {"Fn::Sub": "AgentCoreKBRole-${AWS::StackName}"},
                 "AssumeRolePolicyDocument": {
                     "Version": "2012-10-17",
                     "Statement": [
@@ -1380,7 +1441,7 @@ def handler(event, context):
                 "BedrockDataAutomationConfiguration": {"ParsingModality": "MULTIMODAL"},
             }
         elif parsing_strategy == "bedrock_foundation_model":
-            parsing_model_id = kb_config.get("parsingModelId", "anthropic.claude-3-5-sonnet-20241022-v2:0")
+            parsing_model_id = kb_config.get("parsingModelId", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
             fm_cfg: dict = {
                 "ModelArn": {"Fn::Sub": f"arn:aws:bedrock:${{AWS::Region}}::foundation-model/{parsing_model_id}"},
                 "ParsingModality": "MULTIMODAL",
@@ -1608,7 +1669,7 @@ def handler(event, context):
         template["Resources"]["MemoryExecutionRole"] = {
             "Type": "AWS::IAM::Role",
             "Properties": {
-                "RoleName": {"Fn::Sub": "AgentCoreMemory-${DeploymentName}"},
+                "RoleName": {"Fn::Sub": "AgentCoreMemory-${AWS::StackName}"},
                 "AssumeRolePolicyDocument": {
                     "Version": "2012-10-17",
                     "Statement": [
@@ -1766,15 +1827,20 @@ def handler(event, context):
             if not statement:
                 statement = 'permit(principal, action, resource is AgentCore::Gateway) when { context.authenticated == true };'
 
+            # Use Custom::AgentCorePolicy (our cfn-provider Lambda) instead
+            # of native AWS::BedrockAgentCore::Policy so we can wait for the
+            # PolicyEngine to be truly ACTIVE before binding the policy. The
+            # native CFN type's stabilization timeout fires too quickly in
+            # fresh accounts, leaving the stack in ROLLBACK_COMPLETE. See
+            # tasks/lessons.md Bug 72.
             template["Resources"][logical_id] = {
-                "Type": "AWS::BedrockAgentCore::Policy",
-                "DependsOn": ["PolicyEngine", "AgentCoreGateway"],
+                "Type": "Custom::AgentCorePolicy",
+                "DependsOn": ["PolicyEngine", "AgentCoreGateway", "CfnProviderLambda"],
                 "Properties": {
+                    "ServiceToken": {"Fn::GetAtt": ["CfnProviderLambda", "Arn"]},
                     "PolicyEngineId": {"Fn::GetAtt": ["PolicyEngine", "PolicyEngineId"]},
                     "Name": name,
-                    "Definition": {
-                        "Cedar": {"Statement": statement}
-                    },
+                    "Statement": statement,
                     "Description": pol.get("description", ""),
                 },
             }
@@ -1838,7 +1904,7 @@ def handler(event, context):
         template["Resources"]["McpServerRole"] = {
             "Type": "AWS::IAM::Role",
             "Properties": {
-                "RoleName": {"Fn::Sub": "AgentCoreMCP-${DeploymentName}"},
+                "RoleName": {"Fn::Sub": "AgentCoreMCP-${AWS::StackName}"},
                 "AssumeRolePolicyDocument": {
                     "Version": "2012-10-17",
                     "Statement": [
@@ -2004,7 +2070,7 @@ def handler(event, context):
         template["Resources"]["EvaluationRole"] = {
             "Type": "AWS::IAM::Role",
             "Properties": {
-                "RoleName": {"Fn::Sub": "AgentCoreEval-${DeploymentName}"},
+                "RoleName": {"Fn::Sub": "AgentCoreEval-${AWS::StackName}"},
                 "AssumeRolePolicyDocument": {
                     "Version": "2012-10-17",
                     "Statement": [
@@ -2155,8 +2221,19 @@ def handler(event, context):
             env_vars["GUARDRAIL_ID"] = {"Fn::GetAtt": ["BedrockGuardrail", "GuardrailId"]}
             env_vars["GUARDRAIL_VERSION"] = {"Fn::GetAtt": ["BedrockGuardrailVersion", "Version"]}
 
-        if config.enable_otel:
-            env_vars["OTEL_EXPORTER_OTLP_ENDPOINT"] = "http://localhost:4318"
+        # Inject OTLP observability env vars via single source of truth.
+        # CFN exports favor a stable runtime name as deployment ID stand-in.
+        # NOTE: platform_defaults intentionally NOT passed here — CFN exports
+        # are designed to deploy in other AWS accounts that won't have this
+        # platform's SSM params. Per-canvas observability config is the only
+        # source for exports.
+        otel_env = build_otel_env_vars(
+            config.observability.model_dump() if getattr(config, "observability", None) else None,
+            runtime_name=deployment_name,
+            deployment_id=deployment_name,
+            enable_otel_legacy=bool(getattr(config, "enable_otel", False)),
+        )
+        env_vars.update(otel_env)
 
         template["Resources"]["AgentCoreRuntime"] = {
             "Type": "AWS::BedrockAgentCore::Runtime",
@@ -2243,15 +2320,36 @@ def handler(event, context):
     # ------------------------------------------------------------------
 
     def _package_cfn_provider(self) -> bytes:
-        """Package cfn_provider/ as a zip for Lambda deployment."""
+        """Package cfn_provider/ as a zip for Lambda deployment.
+
+        Bundles a recent boto3 + botocore from the Lambda's lib directory
+        so Custom::AgentCorePolicy can use APIs (list_policy_engines,
+        create_policy) that aren't yet in the runtime's bundled SDK.
+        See tasks/lessons.md Bug 92.
+        """
         buf = io.BytesIO()
         provider_dir = os.path.join(os.path.dirname(__file__), "cfn_provider")
+        # backend/lib already has boto3 + botocore from install-lambda-deps.sh
+        lib_dir = os.path.normpath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "lib"))
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for filename in ("handler.py", "cfn_response.py", "__init__.py"):
                 filepath = os.path.join(provider_dir, filename)
                 if os.path.exists(filepath):
                     with open(filepath) as f:
                         zf.writestr(filename, f.read())
+            # Bundle boto3 + botocore + dependencies if available locally.
+            if os.path.isdir(lib_dir):
+                for pkg in ("boto3", "botocore", "dateutil", "jmespath", "s3transfer", "urllib3"):
+                    pkg_dir = os.path.join(lib_dir, pkg)
+                    if not os.path.isdir(pkg_dir):
+                        continue
+                    for root, _dirs, files in os.walk(pkg_dir):
+                        for fname in files:
+                            if fname.endswith((".pyc",)) or "__pycache__" in root:
+                                continue
+                            full = os.path.join(root, fname)
+                            arcname = os.path.relpath(full, lib_dir)
+                            zf.write(full, arcname)
         buf.seek(0)
         return buf.read()
 

@@ -58,6 +58,18 @@ export function RuntimeConfigurationModal({
     }
   }, [isOpen, initialConfig, lastInitialConfig]);
 
+  // Platform-managed OTEL defaults — when on, the per-runtime "Enable OTEL"
+  // checkbox is meaningless (every agent emits traces regardless).
+  const [platformOtelEnabled, setPlatformOtelEnabled] = useState(false);
+  useEffect(() => {
+    if (!isOpen) return;
+    const apiBase = (import.meta.env.VITE_API_BASE_URL ?? '') as string;
+    fetch(`${apiBase}/api/observability/platform-defaults`)
+      .then((r) => (r.ok ? r.json() : { enabled: false }))
+      .then((data: { enabled: boolean }) => setPlatformOtelEnabled(data.enabled))
+      .catch(() => setPlatformOtelEnabled(false));
+  }, [isOpen]);
+
   const provider = config.modelProvider || 'bedrock';
   const providerInfo = PROVIDER_OPTIONS.find((p) => p.value === provider);
   const availableModels = useMemo(() => getModelsForProvider(provider), [provider]);
@@ -521,13 +533,22 @@ export function RuntimeConfigurationModal({
           </FormSection>
 
           <FormSection title="Features">
-            <CheckboxField
-              id="enableOtel"
-              label="Enable OpenTelemetry"
-              checked={config.enableOtel}
-              onChange={(checked) => updateConfig('enableOtel', checked)}
-              helpText="Distributed tracing and observability"
-            />
+            {platformOtelEnabled ? (
+              <div className="rounded-md border border-blue-200 bg-blue-50 p-3 text-sm text-blue-900">
+                <div className="font-medium">OpenTelemetry: platform-managed</div>
+                <p className="mt-1 text-xs">
+                  Every agent on this platform automatically emits traces to the admin-configured backend.
+                </p>
+              </div>
+            ) : (
+              <CheckboxField
+                id="enableOtel"
+                label="Enable OpenTelemetry"
+                checked={config.enableOtel}
+                onChange={(checked) => updateConfig('enableOtel', checked)}
+                helpText="Distributed tracing and observability"
+              />
+            )}
           </FormSection>
         </div>
       ),

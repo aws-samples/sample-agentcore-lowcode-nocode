@@ -3,6 +3,9 @@
 Requirements: 3.4
 """
 
+# Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
+import app.services._otel_platform  # noqa: F401
+
 import logging
 import os
 

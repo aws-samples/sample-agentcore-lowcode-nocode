@@ -142,6 +142,33 @@ class TestDeploymentStateRoundTrip:
         else:
             assert restored.completed_at is None
 
+    def test_serialize_omits_optional_none_fields_for_gsi_safety(self):
+        """Bug 111 regression — serialized item must NOT contain NULL values for
+        optional fields (runtime_id, gateway_url, completed_at, error_details).
+        DynamoDB GSIs key on runtime_id and reject NULL writes."""
+        from datetime import datetime, timezone
+        from app.models.deployment_models import DeploymentStatusEnum
+
+        state = DeploymentState(
+            deployment_id="d-1234",
+            workflow_id="w-1234",
+            status=DeploymentStatusEnum.PENDING,
+            current_step="validate",
+            started_at=datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc),
+            # runtime_id, gateway_url, completed_at, error_details, execution_arn,
+            # runtime_endpoint all default to None — must NOT appear in serialized item
+        )
+        item = serialize_deployment_state(state)
+        for key in ("runtime_id", "gateway_url", "completed_at", "error_details", "runtime_endpoint", "execution_arn"):
+            assert key not in item, (
+                f"serialize_deployment_state must omit None-valued '{key}' to avoid "
+                f"DDB GSI NULL-key rejection (Bug 111)"
+            )
+        # required fields are still present
+        assert item["deployment_id"] == "d-1234"
+        assert item["workflow_id"] == "w-1234"
+        assert "ttl" in item
+
     @given(state=deployment_state_st())
     @settings(max_examples=100)
     def test_ttl_within_30_days_plus_minus_one_hour(self, state: DeploymentState):

@@ -1,24 +1,23 @@
-"""Property-based tests for session ID passthrough (Property 10).
+"""Property-based tests for session ID passthrough on /api/test-runtime.
 
-Feature: serverless-migration
+Property: when the caller supplies a session_id, the boto3
+`invoke_agent_runtime` call must receive that exact value in BOTH the
+top-level `runtimeSessionId` parameter (for AgentCore-side routing) AND
+inside the JSON-encoded payload as `session_id` (so the agent's invoke
+body can read it for memory persistence — see lessons.md Bug 29).
 
-Property 10: Session ID Passthrough
-For any test-runtime request that includes a session ID string, the
-constructed invocation payload or CLI command should contain that exact
-session ID.
-
-**Validates: Requirements 9.2**
+When the caller omits session_id, neither placement is present.
 """
 
+import json
 import sys
+import types
+from unittest.mock import MagicMock, patch
+
+import pytest
+from hypothesis import HealthCheck, given, settings, strategies as st
 
 sys.path.insert(0, "src")
-
-import json
-import types
-from unittest.mock import patch, MagicMock
-
-from hypothesis import given, settings, strategies as st
 
 # deployment_handler imports mangum at module level; stub it so the module
 # can be loaded in test environments where mangum is not installed.
@@ -26,110 +25,168 @@ if "mangum" not in sys.modules:
     sys.modules["mangum"] = types.ModuleType("mangum")
     sys.modules["mangum"].Mangum = MagicMock()  # type: ignore[attr-defined]
 
-try:
-    from app.deployment_handler import _invoke_runtime_cli, _invoke_runtime_http
-except ImportError:
-    import pytest
+from fastapi.testclient import TestClient
 
-    pytest.skip(
-        "_invoke_runtime_cli / _invoke_runtime_http not yet implemented",
-        allow_module_level=True,
-    )
+from app.deployment_handler import deployment_app
 
 
 # ---------------------------------------------------------------------------
 # Strategies
 # ---------------------------------------------------------------------------
 
-# Session IDs: non-empty printable strings (realistic session tokens)
+# TestRequest.session_id is `Optional[str]` with `max_length=256`.
 session_id_st = st.text(
     alphabet=st.characters(whitelist_categories=("L", "N", "P", "S")),
     min_size=1,
-    max_size=128,
+    max_size=256,
 ).filter(lambda s: s.strip() != "")
 
-# Simple payload dicts for test-runtime requests
-payload_st = st.fixed_dictionaries(
-    {
-        "prompt": st.text(min_size=1, max_size=200),
+prompt_st = st.text(min_size=1, max_size=200)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _capture_invoke_kwargs():
+    """Patch _create_agentcore_client to return a mock that captures the
+    last invoke_agent_runtime kwargs. Returns (patcher, captured_dict).
+
+    The captured_dict will be populated with the kwargs dict on each call.
+    """
+    captured = {}
+    mock_client = MagicMock()
+
+    def _capture(**kwargs):
+        captured.clear()
+        captured.update(kwargs)
+        return {
+            "response": "ok",
+            "runtimeSessionId": kwargs.get("runtimeSessionId", ""),
+            "statusCode": 200,
+        }
+
+    mock_client.invoke_agent_runtime.side_effect = _capture
+    patcher = patch(
+        "app.deployment_handler._create_agentcore_client",
+        return_value=mock_client,
+    )
+    return patcher, captured
+
+
+def _post_test_runtime(client: TestClient, *, session_id, prompt: str = "hi"):
+    body = {
+        "input": prompt,
+        "runtimeId": "diag_runtime_abc123",
     }
-)
+    if session_id is not None:
+        body["sessionId"] = session_id
+    return client.post("/api/test-runtime", json=body)
 
 
 # ---------------------------------------------------------------------------
-# Property 10 – CLI path
+# Property — session_id supplied
 # ---------------------------------------------------------------------------
 
 
-class TestProperty10SessionIDPassthrough:
-    """Property 10: Session ID Passthrough
-
-    For any test-runtime request that includes a session ID string, the
-    constructed invocation payload or CLI command should contain that exact
-    session ID.
-
-    **Validates: Requirements 9.2**
+class TestSessionIDPassthrough:
+    """For any non-empty session_id, the boto3 invoke call carries the exact
+    value in BOTH `runtimeSessionId` AND `payload['session_id']`.
     """
 
-    @given(session_id=session_id_st, payload=payload_st)
-    @settings(max_examples=100)
-    def test_cli_command_contains_exact_session_id(self, session_id: str, payload: dict):
-        """CLI invocation includes --session-id with the exact value."""
-        captured_cmd = None
+    @given(session_id=session_id_st, prompt=prompt_st)
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_runtime_session_id_param_matches_exact(self, session_id: str, prompt: str):
+        """`runtimeSessionId` kwarg equals the supplied session_id verbatim."""
+        patcher, captured = _capture_invoke_kwargs()
+        with patcher:
+            client = TestClient(deployment_app)
+            resp = _post_test_runtime(client, session_id=session_id, prompt=prompt)
+            assert resp.status_code == 200, resp.text
+            assert captured.get("runtimeSessionId") == session_id
 
-        def _fake_run(cmd, **kwargs):
-            nonlocal captured_cmd
-            captured_cmd = cmd
-            mock_result = MagicMock()
-            mock_result.returncode = 0
-            mock_result.stdout = '{"response": "ok"}'
-            mock_result.stderr = ""
-            return mock_result
+    @given(session_id=session_id_st, prompt=prompt_st)
+    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_payload_body_session_id_matches_exact(self, session_id: str, prompt: str):
+        """The JSON `payload` body carries `session_id` with the exact value."""
+        patcher, captured = _capture_invoke_kwargs()
+        with patcher:
+            client = TestClient(deployment_app)
+            resp = _post_test_runtime(client, session_id=session_id, prompt=prompt)
+            assert resp.status_code == 200, resp.text
+            payload = json.loads(captured.get("payload", "{}"))
+            assert payload.get("session_id") == session_id
 
-        with patch("app.deployment_handler.subprocess.run", side_effect=_fake_run):
-            _invoke_runtime_cli("/tmp/fake_deploy", payload, session_id=session_id)
+    @given(session_id=session_id_st, prompt=prompt_st)
+    @settings(max_examples=20, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_both_placements_agree(self, session_id: str, prompt: str):
+        """The two placements never drift — same value in both spots, always."""
+        patcher, captured = _capture_invoke_kwargs()
+        with patcher:
+            client = TestClient(deployment_app)
+            resp = _post_test_runtime(client, session_id=session_id, prompt=prompt)
+            assert resp.status_code == 200, resp.text
+            payload = json.loads(captured.get("payload", "{}"))
+            assert captured.get("runtimeSessionId") == payload.get("session_id") == session_id
 
-        assert captured_cmd is not None, "subprocess.run was not called"
-        # The command must contain --session-id followed by the exact session ID
-        assert "--session-id" in captured_cmd, f"--session-id flag missing from command: {captured_cmd}"
-        sid_index = captured_cmd.index("--session-id")
-        assert captured_cmd[sid_index + 1] == session_id, (
-            f"Expected session ID {session_id!r} at index {sid_index + 1}, got {captured_cmd[sid_index + 1]!r}"
-        )
 
-    @given(session_id=session_id_st, payload=payload_st)
-    @settings(max_examples=100)
-    def test_http_headers_contain_exact_session_id(self, session_id: str, payload: dict):
-        """HTTP invocation includes the session ID header with the exact value."""
-        captured_headers = None
+# ---------------------------------------------------------------------------
+# Property — session_id omitted
+# ---------------------------------------------------------------------------
 
-        class FakeResponse:
-            status = 200
-            data = b'{"response": "ok"}'
-            headers = {}
 
-        class FakePoolManager:
-            def __init__(self, **kwargs):
-                pass
+class TestSessionIDOmittedNoLeakage:
+    """When the caller omits session_id, neither placement appears."""
 
-            def request(self, method, url, body=None, headers=None, timeout=None):
-                nonlocal captured_headers
-                captured_headers = dict(headers) if headers else {}
-                return FakeResponse()
+    def test_omitted_session_id_no_runtime_session_id_kwarg(self):
+        patcher, captured = _capture_invoke_kwargs()
+        with patcher:
+            client = TestClient(deployment_app)
+            resp = _post_test_runtime(client, session_id=None)
+            assert resp.status_code == 200, resp.text
+            assert "runtimeSessionId" not in captured
 
-        # urllib3 is imported locally inside _invoke_runtime_http, so we
-        # patch the top-level urllib3 module's PoolManager attribute.
-        with patch("urllib3.PoolManager", FakePoolManager):
-            _invoke_runtime_http(
-                runtime_arn="arn:aws:bedrock-agentcore:us-east-1:123456789:runtime/test",
-                region="us-east-1",
-                payload=json.dumps(payload),
-                session_id=session_id,
-            )
+    def test_omitted_session_id_no_payload_session_key(self):
+        patcher, captured = _capture_invoke_kwargs()
+        with patcher:
+            client = TestClient(deployment_app)
+            resp = _post_test_runtime(client, session_id=None)
+            assert resp.status_code == 200, resp.text
+            payload = json.loads(captured.get("payload", "{}"))
+            assert "session_id" not in payload
 
-        assert captured_headers is not None, "HTTP request was not made"
-        header_key = "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id"
-        assert header_key in captured_headers, f"Session ID header missing from headers: {captured_headers}"
-        assert captured_headers[header_key] == session_id, (
-            f"Expected session ID {session_id!r}, got {captured_headers[header_key]!r}"
-        )
+
+# ---------------------------------------------------------------------------
+# Property — no cross-request leakage
+# ---------------------------------------------------------------------------
+
+
+class TestSessionIDNoCrossRequestLeakage:
+    """A request without session_id immediately following one with session_id
+    must not inherit the prior value — each request stands alone.
+    """
+
+    @given(session_id=session_id_st)
+    @settings(max_examples=20, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    def test_subsequent_request_without_session_id_is_clean(self, session_id: str):
+        patcher, captured = _capture_invoke_kwargs()
+        with patcher:
+            client = TestClient(deployment_app)
+
+            # Request 1: with session_id
+            resp1 = _post_test_runtime(client, session_id=session_id)
+            assert resp1.status_code == 200
+            assert captured.get("runtimeSessionId") == session_id
+
+            # Request 2: without session_id — must not carry over
+            resp2 = _post_test_runtime(client, session_id=None)
+            assert resp2.status_code == 200
+            assert "runtimeSessionId" not in captured
+            payload2 = json.loads(captured.get("payload", "{}"))
+            assert "session_id" not in payload2
+
+
+# Pytest plugin sanity: ensure deployment_app is exported
+def test_deployment_app_is_importable():
+    assert deployment_app is not None

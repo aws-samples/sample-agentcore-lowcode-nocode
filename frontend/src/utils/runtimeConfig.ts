@@ -51,54 +51,37 @@ export const AVAILABLE_MODELS: ModelOption[] = regionalize([
   // Amazon Bedrock Models (provider: 'bedrock') — default, IAM-based, no API key
   // ============================================================================
 
-  // Anthropic Claude 4.5 Series (Latest)
+  // Anthropic Claude 4.5 Series — Bedrock GA Sep–Nov 2025
   { provider: 'bedrock', modelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0', label: 'Claude Sonnet 4.5', maxTokens: 200000 },
-  { provider: 'bedrock', modelId: 'us.anthropic.claude-opus-4-5-20251101-v1:0', label: 'Claude Opus 4.5', maxTokens: 200000 },
   { provider: 'bedrock', modelId: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', label: 'Claude Haiku 4.5', maxTokens: 200000 },
-  // Anthropic Claude 4.1 / 4 Series
-  { provider: 'bedrock', modelId: 'us.anthropic.claude-opus-4-1-20250805-v1:0', label: 'Claude Opus 4.1', maxTokens: 200000 },
-  { provider: 'bedrock', modelId: 'us.anthropic.claude-sonnet-4-20250514-v1:0', label: 'Claude Sonnet 4', maxTokens: 200000 },
-  // Anthropic Claude 3.5 / 3 Series
-  { provider: 'bedrock', modelId: 'us.anthropic.claude-3-5-haiku-20241022-v1:0', label: 'Claude 3.5 Haiku', maxTokens: 200000 },
-  { provider: 'bedrock', modelId: 'us.anthropic.claude-3-haiku-20240307-v1:0', label: 'Claude 3 Haiku', maxTokens: 200000 },
+  { provider: 'bedrock', modelId: 'us.anthropic.claude-opus-4-5-20251101-v1:0', label: 'Claude Opus 4.5', maxTokens: 200000 },
+  // NOTE: Older models are intentionally excluded by policy. Only models
+  // published on Amazon Bedrock between October 2025 and May 2026 are listed
+  // here. Claude Sonnet 4 / Opus 4.1 (May–Aug 2025), Claude 3.x, Nova v1
+  // (Pro/Lite/Micro), Titan Text Premier, Mistral Large 2407 / Small 2402,
+  // Cohere Command R/R+, Llama 3.x have all been removed because Bedrock
+  // flags pre-Q3-2025 models as Legacy and returns
+  // `ResourceNotFoundException: Access denied. This Model is marked by
+  // provider as Legacy and you have not been actively using the model in
+  // the last 30 days.` See tasks/lessons.md Bug 113.
 
-  // Amazon Nova Models
-  { provider: 'bedrock', modelId: 'us.amazon.nova-premier-v1:0', label: 'Amazon Nova Premier', maxTokens: 300000 },
-  { provider: 'bedrock', modelId: 'us.amazon.nova-pro-v1:0', label: 'Amazon Nova Pro', maxTokens: 300000 },
-  { provider: 'bedrock', modelId: 'us.amazon.nova-lite-v1:0', label: 'Amazon Nova Lite', maxTokens: 300000 },
-  { provider: 'bedrock', modelId: 'us.amazon.nova-micro-v1:0', label: 'Amazon Nova Micro', maxTokens: 128000 },
+  // Amazon Nova 2 — Bedrock GA Q4 2025
   { provider: 'bedrock', modelId: 'us.amazon.nova-2-lite-v1:0', label: 'Amazon Nova 2 Lite', maxTokens: 300000 },
+  { provider: 'bedrock', modelId: 'us.amazon.nova-premier-v1:0', label: 'Amazon Nova Premier', maxTokens: 300000 },
 
-  // Meta Llama 4 Series
+  // Meta Llama 4 — Bedrock GA Oct 2025
   { provider: 'bedrock', modelId: 'us.meta.llama4-maverick-17b-instruct-v1:0', label: 'Llama 4 Maverick 17B', maxTokens: 128000 },
   { provider: 'bedrock', modelId: 'us.meta.llama4-scout-17b-instruct-v1:0', label: 'Llama 4 Scout 17B', maxTokens: 128000 },
-  // Meta Llama 3.x Series
-  { provider: 'bedrock', modelId: 'us.meta.llama3-3-70b-instruct-v1:0', label: 'Llama 3.3 70B', maxTokens: 128000 },
-  { provider: 'bedrock', modelId: 'us.meta.llama3-2-90b-instruct-v1:0', label: 'Llama 3.2 90B', maxTokens: 128000 },
-  { provider: 'bedrock', modelId: 'us.meta.llama3-2-11b-instruct-v1:0', label: 'Llama 3.2 11B', maxTokens: 128000 },
-  { provider: 'bedrock', modelId: 'us.meta.llama3-2-3b-instruct-v1:0', label: 'Llama 3.2 3B', maxTokens: 128000 },
-  { provider: 'bedrock', modelId: 'us.meta.llama3-2-1b-instruct-v1:0', label: 'Llama 3.2 1B', maxTokens: 128000 },
-  { provider: 'bedrock', modelId: 'us.meta.llama3-1-405b-instruct-v1:0', label: 'Llama 3.1 405B', maxTokens: 128000 },
-  { provider: 'bedrock', modelId: 'us.meta.llama3-1-70b-instruct-v1:0', label: 'Llama 3.1 70B', maxTokens: 128000 },
-  { provider: 'bedrock', modelId: 'us.meta.llama3-1-8b-instruct-v1:0', label: 'Llama 3.1 8B', maxTokens: 128000 },
 
-  // Mistral (on Bedrock)
-  { provider: 'bedrock', modelId: 'mistral.mistral-large-2407-v1:0', label: 'Mistral Large', maxTokens: 128000 },
-  { provider: 'bedrock', modelId: 'mistral.mistral-small-2402-v1:0', label: 'Mistral Small', maxTokens: 32000 },
-
-  // Cohere (on Bedrock)
-  { provider: 'bedrock', modelId: 'cohere.command-r-plus-v1:0', label: 'Cohere Command R+', maxTokens: 128000 },
-  { provider: 'bedrock', modelId: 'cohere.command-r-v1:0', label: 'Cohere Command R', maxTokens: 128000 },
-
-  // AI21 (on Bedrock)
+  // AI21 Jamba 1.5 — Bedrock-current; 256k context, retained
   { provider: 'bedrock', modelId: 'ai21.jamba-1-5-large-v1:0', label: 'AI21 Jamba 1.5 Large', maxTokens: 256000 },
   { provider: 'bedrock', modelId: 'ai21.jamba-1-5-mini-v1:0', label: 'AI21 Jamba 1.5 Mini', maxTokens: 256000 },
 
-  // OpenAI OSS (on Bedrock)
+  // OpenAI OSS — Bedrock GA Q4 2025
   { provider: 'bedrock', modelId: 'openai.gpt-oss-120b-1:0', label: 'GPT OSS 120B', maxTokens: 128000 },
   { provider: 'bedrock', modelId: 'openai.gpt-oss-20b-1:0', label: 'GPT OSS 20B', maxTokens: 128000 },
 
-  // DeepSeek (on Bedrock)
+  // DeepSeek — Bedrock GA Q4 2025 (R1) / Q1 2026 (V3.1)
   { provider: 'bedrock', modelId: 'us.deepseek.r1-v1:0', label: 'DeepSeek R1', maxTokens: 128000 },
   { provider: 'bedrock', modelId: 'deepseek.v3-v1:0', label: 'DeepSeek V3.1', maxTokens: 128000 },
 

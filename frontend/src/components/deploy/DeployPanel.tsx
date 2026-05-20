@@ -52,6 +52,7 @@ export interface DeployPanelProps {
   guardrailsConfig?: Record<string, unknown> | null;
   mcpServerConfig?: Record<string, unknown> | null;
   knowledgeBaseConfig?: Record<string, unknown> | null;
+  observabilityConfig?: Record<string, unknown> | null;
   isVisible: boolean;
   onClose: () => void;
   restoredDeployment?: {
@@ -86,7 +87,11 @@ const STEP_ORDER = [
   'evaluation', 'auth', 'status_update',
 ];
 
-export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig, gatewayTools = [], templateId, identityConfig, customTools = [], memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, isVisible, onClose, restoredDeployment }: DeployPanelProps) {
+export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig, gatewayTools = [], templateId, identityConfig, customTools = [], memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, observabilityConfig, isVisible, onClose, restoredDeployment }: DeployPanelProps) {
+  // ============================================================
+  // State Hooks
+  // (Audit #14: deploy state, chat state, refs, memoized template)
+  // ============================================================
   const [deploymentStatus, setDeploymentStatus] = useState<DeploymentStatus>({ state: 'idle' });
   const { setNodeExecutionStateByType, resetAllExecutionStates } = useWorkflowStore();
   const [testInput, setTestInput] = useState('');
@@ -111,6 +116,11 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
     if (!templateId) return null;
     return WORKFLOW_TEMPLATES.find((t) => t.id === templateId) || null;
   }, [templateId]);
+
+  // ============================================================
+  // useEffect Chain
+  // (Audit #14: scroll-to-bottom, focus chat, hydrate from restored deployment)
+  // ============================================================
 
   // Auto-scroll chat to bottom when messages change
   useEffect(() => {
@@ -151,6 +161,11 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
     }
   }, [restoredDeployment]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ============================================================
+  // Deploy Submission
+  // (Audit #14: handleDeploy — POST /api/deploy, poll Step Functions for status)
+  // ============================================================
+
   const handleDeploy = useCallback(async () => {
     if (!config || !nodeId) return;
     setDeploymentStatus({ state: 'deploying', message: 'Starting deployment...' });
@@ -187,6 +202,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
           guardrailsConfig: guardrailsConfig || undefined,
           mcpServerConfig: mcpServerConfig || undefined,
           knowledgeBaseConfig: knowledgeBaseConfig || undefined,
+          observabilityConfig: observabilityConfig || undefined,
         }),
       });
 
@@ -328,6 +344,12 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
     }
   }, [config, nodeId, connectedTools, gatewayConfig, gatewayTools, templateId, identityConfig, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, warmupRuntime, resetAllExecutionStates, setNodeExecutionStateByType]);
 
+  // ============================================================
+  // CFN Download UI
+  // (Audit #14: handleDownloadCfn — POST /api/generate-cfn-template, trigger
+  // browser download of the generated CloudFormation .zip)
+  // ============================================================
+
   const [isDownloadingCfn, setIsDownloadingCfn] = useState(false);
 
   const handleDownloadCfn = useCallback(async () => {
@@ -364,6 +386,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
           guardrailsConfig: guardrailsConfig || undefined,
           mcpServerConfig: mcpServerConfig || undefined,
           knowledgeBaseConfig: knowledgeBaseConfig || undefined,
+          observabilityConfig: observabilityConfig || undefined,
         }),
       });
 
@@ -401,6 +424,12 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
       setIsDownloadingCfn(false);
     }
   }, [config, nodeId, connectedTools, gatewayConfig, gatewayTools, templateId, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, identityConfig]);
+
+  // ============================================================
+  // Streaming Chat
+  // (Audit #14: handleTest — invoke runtime via /api/test-runtime, consume SSE
+  // stream into chatMessages; handleNewSession; handleKeyDown; handleDelete)
+  // ============================================================
 
   const handleTest = useCallback(async () => {
     if (!deploymentStatus.endpoint && !deploymentStatus.runtimeId) return;
@@ -682,6 +711,12 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
   }, [deploymentStatus.runtimeId]);
 
   if (!isVisible) return null;
+
+  // ============================================================
+  // Render
+  // (Audit #14: header, deploy/chat tabs, deploy form, status/error banners,
+  // chat messages list, input box, footer with delete + close)
+  // ============================================================
 
   return (
     <>

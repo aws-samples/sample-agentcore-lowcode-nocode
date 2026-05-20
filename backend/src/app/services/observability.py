@@ -51,6 +51,20 @@ def _validate_user_otel_secret_arn(arn: str) -> str:
     return arn
 
 
+def _redact_arn(arn: Optional[str]) -> str:
+    """Redact a Secrets Manager ARN for logging.
+
+    The ARN is a pointer, not credential material, but it carries the AWS
+    account ID and the secret name — both of which we don't want in
+    CloudWatch where a less-privileged operator could read them. Returns a
+    fixed-shape string that's still useful for debugging (you can tell
+    whether an ARN was supplied) without leaking either field.
+    """
+    if not arn:
+        return "<none>"
+    return "<redacted-secrets-manager-arn>"
+
+
 # Provider -> default OTLP endpoint when caller leaves it blank.
 # Most providers require account-specific URLs, so only the truly fixed ones
 # are defaulted here. Custom and most clouds force the user to supply one.
@@ -176,8 +190,8 @@ def build_otel_env_vars(
                 or (canvas_sample is not None and canvas_sample != plat.get("sample_rate", 1.0)):
             logger.warning(
                 "Per-canvas Observability override ignored — platform defaults are locked. "
-                "Canvas wanted endpoint=%r secret=%r sample=%r; using platform endpoint=%r.",
-                canvas_endpoint, canvas_secret, canvas_sample, plat.get("otlp_endpoint"),
+                "Canvas wanted endpoint=%r secret=%s sample=%r; using platform endpoint=%r.",
+                canvas_endpoint, _redact_arn(canvas_secret), canvas_sample, plat.get("otlp_endpoint"),
             )
         # Merge: platform supplies endpoint/secret/sample/service-prefix; canvas
         # supplies any extra resource attributes (and only those).

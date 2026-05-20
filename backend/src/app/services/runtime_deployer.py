@@ -522,8 +522,10 @@ def _resolve_runtime_identifier(agentcore_ctrl, identifier: str) -> str:
     """
     if not identifier:
         return identifier
-    # Canonical id pattern: <name>-<10 hash chars>
-    if re.match(r".+-[A-Za-z0-9]{10}$", identifier):
+    # Canonical id pattern: <name>-<10 hash chars>. Anchored on both ends and
+    # restricted to the AgentCore-permitted name alphabet so the regex stays
+    # linear (no `.+` polynomial backtracking on adversarial input).
+    if re.match(r"^[A-Za-z0-9_-]+-[A-Za-z0-9]{10}$", identifier):
         return identifier
     # Name lookup — paginate list_agent_runtimes
     try:

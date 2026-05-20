@@ -169,7 +169,7 @@ def test_public_okta_endpoint_passes() -> None:
         out = _validate_discovery_url(
             "https://acme.okta.com/.well-known/openid-configuration"
         )
-        assert "okta.com" in out
+        assert out == "https://acme.okta.com/.well-known/openid-configuration"
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +189,7 @@ def test_allowlist_matching_host_passes(monkeypatch: pytest.MonkeyPatch) -> None
         out = _validate_discovery_url(
             "https://acme.okta.com/.well-known/openid-configuration"
         )
-        assert "okta.com" in out
+        assert out == "https://acme.okta.com/.well-known/openid-configuration"
 
 
 def test_allowlist_non_matching_host_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:

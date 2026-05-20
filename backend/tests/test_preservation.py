@@ -37,7 +37,7 @@ def _make_runtime_config(**overrides) -> RuntimeConfig:
         "name": "test-agent",
         "framework": "strands_agents",
         "model": {
-            "modelId": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
             "provider": "anthropic",
         },
         "systemPrompt": "You are a helpful assistant.",
@@ -55,7 +55,7 @@ def _make_runtime_configuration(
         "framework": AgentFramework.STRANDS_AGENTS,
         "model": ModelConfiguration(
             provider=provider,
-            model_id="anthropic.claude-3-5-sonnet-20241022-v2:0",
+            model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
         ),
         "system_prompt": "You are a helpful assistant.",
     }
@@ -80,9 +80,9 @@ _safe_text = st.text(
 
 _model_ids = st.sampled_from(
     [
-        "anthropic.claude-3-5-sonnet-20241022-v2:0",
-        "anthropic.claude-3-haiku-20240307-v1:0",
-        "amazon.nova-pro-v1:0",
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "us.amazon.nova-2-lite-v1:0",
         "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
     ]
 )
@@ -146,16 +146,10 @@ class TestDeploymentFrameworkLogicPreservation:
         assert model_id in code
         assert "You are a helpful assistant." in code
 
-    @given(provider=_all_providers)
-    @settings(max_examples=5)
-    def test_property_all_providers_have_invoke(self, provider):
-        """**Validates: Requirements 3.1, 3.6**
-
-        For ANY provider, the generated code MUST define an invoke function.
-        """
-        config = _make_runtime_configuration(provider=provider)
-        code = deployment_generate_agent_code(config)
-        assert "async def invoke(payload, context):" in code
+    # Removed: test_property_all_providers_have_invoke asserted the legacy
+    # `async def invoke(payload, context):` signature. Migrated to
+    # synchronous `def invoke(payload):` decorated with @app.entrypoint
+    # (BedrockAgentCoreApp pattern from amazon-bedrock-agentcore-samples).
 
     @given(provider=_all_providers)
     @settings(max_examples=5)
@@ -190,7 +184,7 @@ class TestCodeGeneratorFrameworkLogicPreservation:
         """
         code = code_generator._generate_langchain_web_search(
             "You are a search agent.",
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
             "us-east-1",
         )
         assert "duckduckgo_search" in code
@@ -198,33 +192,11 @@ class TestCodeGeneratorFrameworkLogicPreservation:
         assert "_converse_loop" in code
         assert "BedrockAgentCoreApp" in code
 
-    def test_customer_support_has_gateway_mcp(self):
-        """**Validates: Requirements 3.2**
-
-        _generate_customer_support MUST contain MCP protocol + gateway logic.
-        """
-        code = code_generator._generate_customer_support(
-            "You are a support agent.",
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
-            _GATEWAY_CREDS,
-        )
-        assert "_mcp_request" in code
-        assert "_get_gateway_token" in code
-        assert "BedrockAgentCoreApp" in code
-
-    def test_gateway_agent_has_mcp_protocol(self):
-        """**Validates: Requirements 3.2**
-
-        _generate_gateway_agent MUST contain MCP protocol logic.
-        """
-        code = code_generator._generate_gateway_agent(
-            "You are a gateway agent.",
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
-            _GATEWAY_CREDS,
-        )
-        assert "_mcp_request" in code
-        assert "_get_gateway_token" in code
-        assert "BedrockAgentCoreApp" in code
+    # Removed: test_customer_support_has_gateway_mcp and test_gateway_agent_has_mcp_protocol
+    # asserted the legacy `_mcp_request` / `_get_gateway_token` JSON-RPC helpers.
+    # Both generators now delegate to _generate_strands_gateway, which uses the
+    # official Strands MCPClient + streamablehttp_client pattern (per
+    # tasks/lessons.md Bug 13).
 
     def test_default_agent_has_boto3_converse(self):
         """**Validates: Requirements 3.1**
@@ -233,7 +205,7 @@ class TestCodeGeneratorFrameworkLogicPreservation:
         """
         code = code_generator._generate_default_agent(
             "You are a helpful assistant.",
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
             "us-east-1",
         )
         assert "import boto3" in code
@@ -258,7 +230,7 @@ class TestGatewayMCPPreservation:
         """
         code = code_generator._generate_strands_gateway(
             "You are a gateway agent.",
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
             _GATEWAY_CREDS,
         )
         assert "def _get_gateway_token():" in code
@@ -266,50 +238,19 @@ class TestGatewayMCPPreservation:
         assert "client_credentials" in code
         assert "access_token" in code
 
-    def test_strands_gateway_has_mcp_protocol(self):
-        """**Validates: Requirements 3.2**
-
-        _generate_strands_gateway MUST contain MCP protocol handling.
-        """
-        code = code_generator._generate_strands_gateway(
-            "You are a gateway agent.",
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
-            _GATEWAY_CREDS,
-        )
-        assert "def _mcp_request(" in code
-        assert "jsonrpc" in code
-        assert "def _list_gateway_tools(" in code
-        assert "def _call_gateway_tool(" in code
-        assert "def _to_bedrock_tools(" in code
-
-    def test_strands_gateway_has_agentic_loop(self):
-        """**Validates: Requirements 3.2**
-
-        _generate_strands_gateway MUST contain the Bedrock Converse agentic loop.
-        """
-        code = code_generator._generate_strands_gateway(
-            "You are a gateway agent.",
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
-            _GATEWAY_CREDS,
-        )
-        assert ".converse(" in code
-        assert "tool_use" in code
-        assert "toolResult" in code
-        assert "max_turns" in code
-
-    def test_strands_gateway_embeds_credentials(self):
-        """**Validates: Requirements 3.2**
-
-        _generate_strands_gateway MUST embed gateway credentials.
-        """
-        code = code_generator._generate_strands_gateway(
-            "You are a gateway agent.",
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
-            _GATEWAY_CREDS,
-        )
-        assert _GATEWAY_CREDS["client_id"] in code
-        assert _GATEWAY_CREDS["client_secret"] in code
-        assert _GATEWAY_CREDS["token_endpoint"] in code
+    # Removed: test_strands_gateway_has_mcp_protocol asserted hand-rolled
+    # `_mcp_request`/`_list_gateway_tools`/`_call_gateway_tool`/`_to_bedrock_tools`
+    # JSON-RPC helpers. Migrated to MCPClient + streamablehttp_client (per
+    # tasks/lessons.md Bug 13).
+    #
+    # Removed: test_strands_gateway_has_agentic_loop asserted boto3 Converse
+    # agentic loop (`.converse(`, `tool_use`, `toolResult`, `max_turns`).
+    # Strands Agent now handles the agentic loop natively.
+    #
+    # Removed: test_strands_gateway_embeds_credentials asserted that gateway
+    # credentials are embedded in source. Migrated to env-var-only injection
+    # at deploy time (per tasks/lessons.md Bug 13 — credentials must NOT be
+    # in generated code).
 
     def test_customer_support_has_cognito_oauth(self):
         """**Validates: Requirements 3.2**
@@ -318,54 +259,20 @@ class TestGatewayMCPPreservation:
         """
         code = code_generator._generate_customer_support(
             "You are a support agent.",
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
             _GATEWAY_CREDS,
         )
         assert "def _get_gateway_token():" in code
         assert "grant_type" in code
         assert "client_credentials" in code
 
-    def test_customer_support_has_mcp_helpers(self):
-        """**Validates: Requirements 3.2**
-
-        _generate_customer_support MUST use MCP helpers for tool listing.
-        """
-        code = code_generator._generate_customer_support(
-            "You are a support agent.",
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
-            _GATEWAY_CREDS,
-        )
-        assert "_mcp_request" in code
-        assert "_list_gateway_tools" in code
-
-    def test_gateway_agent_has_oauth_and_mcp(self):
-        """**Validates: Requirements 3.2**
-
-        _generate_gateway_agent MUST contain OAuth and MCP protocol logic.
-        """
-        code = code_generator._generate_gateway_agent(
-            "You are a gateway agent.",
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
-            _GATEWAY_CREDS,
-        )
-        assert "def _get_gateway_token():" in code
-        assert "_mcp_request" in code
-        assert "_list_gateway_tools" in code
-
-    @given(system_prompt=_safe_text, model_id=_model_ids)
-    @settings(max_examples=3)
-    def test_property_strands_gateway_mcp_helpers_always_present(self, system_prompt, model_id):
-        """**Validates: Requirements 3.2**
-
-        For ANY inputs, _generate_strands_gateway MUST always contain all
-        MCP helper functions.
-        """
-        code = code_generator._generate_strands_gateway(system_prompt, model_id, _GATEWAY_CREDS)
-        assert "_get_gateway_token" in code
-        assert "_mcp_request" in code
-        assert "_list_gateway_tools" in code
-        assert "_call_gateway_tool" in code
-        assert "_to_bedrock_tools" in code
+    # Removed: test_customer_support_has_mcp_helpers, test_gateway_agent_has_oauth_and_mcp,
+    # and test_property_strands_gateway_mcp_helpers_always_present asserted the
+    # legacy `_mcp_request` / `_list_gateway_tools` / `_call_gateway_tool` /
+    # `_to_bedrock_tools` JSON-RPC helpers. The generator now uses Strands MCPClient
+    # with streamablehttp_client (per tasks/lessons.md Bug 13). OAuth via
+    # _get_gateway_token() remains and is covered by the existing
+    # test_strands_gateway_has_cognito_oauth and test_customer_support_has_cognito_oauth.
 
 
 class TestBuiltInToolsPreservation:
@@ -377,34 +284,24 @@ class TestBuiltInToolsPreservation:
     def test_tools_agent_produces_valid_code(self):
         """**Validates: Requirements 3.3**
 
-        _generate_tools_agent MUST produce valid Python with boto3 Converse API.
-        Tools agent now delegates to default agent (boto3-based).
+        _generate_tools_agent MUST produce valid Python with Strands Agent.
+        Updated: tools agent migrated from boto3 Converse to Strands Agent +
+        BedrockModel (single-framework consolidation).
         """
         code = code_generator._generate_tools_agent(
             "You are a tools agent.",
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
             "us-east-1",
             has_browser=True,
             has_code_interpreter=False,
         )
-        assert "import boto3" in code
+        assert "from strands import Agent" in code
         assert "BedrockAgentCoreApp" in code
         compile(code, "<test>", "exec")
 
-    def test_tools_agent_uses_boto3(self):
-        """**Validates: Requirements 3.3**
-
-        _generate_tools_agent MUST use boto3 for Bedrock invocation.
-        """
-        code = code_generator._generate_tools_agent(
-            "You are a tools agent.",
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
-            "us-east-1",
-            has_browser=True,
-            has_code_interpreter=False,
-        )
-        assert "import boto3" in code
-        assert "bedrock" in code.lower()
+    # Removed: test_tools_agent_uses_boto3 asserted boto3 usage in the tools agent.
+    # The tools agent now uses Strands Agent + BedrockModel (single-framework
+    # consolidation); see test_tools_agent_produces_valid_code above.
 
 
 # ============================================================================
@@ -507,7 +404,7 @@ class TestSystemPromptEscapingPreservation:
         special_prompt = "You are an agent. Handle 'quotes' and \\backslashes\\ carefully."
         code = code_generator._generate_default_agent(
             code_generator._escape_triple_quotes(special_prompt),
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
             "us-east-1",
         )
         # The generated code should be syntactically valid Python
@@ -539,7 +436,7 @@ class TestSystemPromptEscapingPreservation:
         syntactically valid Python code.
         """
         escaped = code_generator._escape_triple_quotes(system_prompt)
-        code = code_generator._generate_default_agent(escaped, "anthropic.claude-3-5-sonnet-20241022-v2:0", "us-east-1")
+        code = code_generator._generate_default_agent(escaped, "us.anthropic.claude-sonnet-4-5-20250929-v1:0", "us-east-1")
         try:
             compile(code, "<test>", "exec")
         except SyntaxError as e:
@@ -583,26 +480,11 @@ class TestTemplateRoutingPreservation:
         code = code_generator.generate_agent_code(config, template_id="web-search-agent")
         assert "Web Search Agent" in code or "duckduckgo_search" in code
 
-    def test_routes_strands_gateway(self):
-        """**Validates: Requirements 3.5**
-
-        template_id="strands-gateway-agent" MUST route to _generate_strands_gateway.
-        """
-        config = _make_runtime_config()
-        gateway_config = {
-            "gateway_url": _GATEWAY_CREDS["url"],
-            "client_info": {
-                "client_id": _GATEWAY_CREDS["client_id"],
-                "client_secret": _GATEWAY_CREDS["client_secret"],
-                "token_endpoint": _GATEWAY_CREDS["token_endpoint"],
-                "scope": _GATEWAY_CREDS["scope"],
-            },
-        }
-        code = code_generator.generate_agent_code(
-            config, gateway_config=gateway_config, template_id="strands-gateway-agent"
-        )
-        assert "_mcp_request" in code
-        assert "_to_bedrock_tools" in code
+    # Removed: test_routes_strands_gateway asserted the legacy `_mcp_request` /
+    # `_to_bedrock_tools` JSON-RPC helpers. The strands-gateway-agent template
+    # now uses Strands MCPClient + streamablehttp_client (per
+    # tasks/lessons.md Bug 13). Routing is still covered by
+    # test_property_template_code_has_sdk_pattern in test_comprehensive_preservation.py.
 
     def test_routes_customer_support(self):
         """**Validates: Requirements 3.5**
@@ -626,33 +508,20 @@ class TestTemplateRoutingPreservation:
         )
         assert "_mcp_request" in code or "Gateway" in code
 
-    def test_routes_to_gateway_agent_with_gateway_tool(self):
-        """**Validates: Requirements 3.5**
-
-        tools=["gateway"] with gateway_config MUST route to _generate_gateway_agent.
-        """
-        config = _make_runtime_config()
-        gateway_config = {
-            "gateway_url": _GATEWAY_CREDS["url"],
-            "client_info": {
-                "client_id": _GATEWAY_CREDS["client_id"],
-                "client_secret": _GATEWAY_CREDS["client_secret"],
-                "token_endpoint": _GATEWAY_CREDS["token_endpoint"],
-                "scope": _GATEWAY_CREDS["scope"],
-            },
-        }
-        code = code_generator.generate_agent_code(config, tools=["gateway"], gateway_config=gateway_config)
-        assert "_mcp_request" in code
-        assert "Gateway" in code or "gateway" in code.lower()
+    # Removed: test_routes_to_gateway_agent_with_gateway_tool asserted the legacy
+    # `_mcp_request` JSON-RPC helper. The gateway-tool route now uses Strands
+    # MCPClient + streamablehttp_client (per tasks/lessons.md Bug 13).
 
     def test_routes_to_tools_agent_with_browser(self):
         """**Validates: Requirements 3.5**
 
-        tools=["browser"] MUST route to _generate_tools_agent.
+        tools=["browser"] MUST route to _generate_tools_agent (Strands-based).
         """
         config = _make_runtime_config()
         code = code_generator.generate_agent_code(config, tools=["browser"])
-        assert "import boto3" in code
+        # Updated: tools agent migrated from boto3 Converse to Strands Agent
+        # (single-framework consolidation).
+        assert "from strands import Agent" in code
 
     def test_routes_to_default_strands_agent(self):
         """**Validates: Requirements 3.5**
@@ -665,15 +534,10 @@ class TestTemplateRoutingPreservation:
         assert "from strands import Agent" in code
         assert "from bedrock_agentcore.runtime import BedrockAgentCoreApp" in code
 
-    def test_unrecognized_framework_still_generates_strands(self):
-        """**Validates: Requirements 3.5**
-
-        An unrecognized framework value is accepted and generates Strands code
-        (backward compatibility — no longer raises ValueError).
-        """
-        config = _make_runtime_config(framework="nonexistent_framework")
-        code = code_generator.generate_agent_code(config, tools=[])
-        assert "from strands import Agent" in code
+    # Removed: test_unrecognized_framework_still_generates_strands —
+    # RuntimeConfig.framework is now Literal["strands_agents"]; passing an
+    # unrecognized value raises a Pydantic ValidationError by design (Strands-only
+    # consolidation, no longer permits "backward compat" framework strings).
 
 
 # ============================================================================

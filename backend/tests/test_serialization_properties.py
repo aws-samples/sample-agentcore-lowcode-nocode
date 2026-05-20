@@ -358,19 +358,20 @@ def runtime_config_st(draw):
 
 @st.composite
 def gateway_config_st(draw):
-    """Generate a random valid GatewayConfiguration with matching target_config."""
-    # Pick a target type that has a simple matching config
-    variant = draw(st.sampled_from(["lambda", "smithy", "mcp_server", "openapi"]))
+    """Generate a random valid GatewayConfiguration with matching target_config.
+
+    Only the supported `lambda`, `smithy`, `openapi` target types are
+    exercised. `api_gateway` and `prebuilt` are rejected at the API
+    boundary (see backend/src/app/models/components.py
+    validate_target_config_type and tasks/lessons.md Bug 106).
+    """
+    variant = draw(st.sampled_from(["lambda", "smithy", "openapi"]))
     if variant == "lambda":
         target_type = GatewayTargetType.LAMBDA
         target_config = LambdaTargetConfig(type="lambda")
     elif variant == "smithy":
         target_type = GatewayTargetType.SMITHY
         target_config = SmithyTargetConfig(type="smithy", model_name="dynamodb")
-    elif variant == "mcp_server":
-        # mcp_server doesn't have a GatewayTargetType mapping check, use API_GATEWAY
-        target_type = GatewayTargetType.API_GATEWAY
-        target_config = MCPServerTargetConfig(type="mcp_server", server_url=draw(_url_st))
     else:
         target_type = GatewayTargetType.OPENAPI
         target_config = OpenAPITargetConfig(type="openapi", spec_url=draw(_url_st))

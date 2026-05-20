@@ -115,6 +115,7 @@ def create_runtime_iam_role(
     account_id: str,
     region: str,
     connected_tools: Optional[list] = None,
+    otel_secret_arn: Optional[str] = None,
 ) -> str:
     """Create or reuse an IAM execution role for an AgentCore runtime.
 
@@ -287,14 +288,31 @@ def create_runtime_iam_role(
                 }
             )
 
+    # Scoped Secrets Manager access for OTLP auth header (Langfuse,
+    # Honeycomb, etc.). Bug 9 reminder: keep this in sync with the SFN path.
+    if otel_secret_arn:
+        core_policy["Statement"].append(
+            {
+                "Sid": "OtelAuthHeaderSecret",
+                "Effect": "Allow",
+                "Action": ["secretsmanager:GetSecretValue"],
+                "Resource": [otel_secret_arn],
+            }
+        )
+
     iam_client.put_role_policy(
         RoleName=role_name,
         PolicyName="AgentCoreRuntimePolicy",
         PolicyDocument=json.dumps(core_policy),
     )
 
-    # Wait for IAM propagation
-    time.sleep(10)
+    # Wait for IAM propagation. AgentCore's service-side IAM cache for the
+    # role's S3 access check needs ~60s — a shorter sleep caused every fresh
+    # deploy to fail with `ValidationException: Access denied when trying to
+    # retrieve zip file from S3`. Verified live 2026-05-16. See lessons Bug 52.
+    # The downstream create_agent_runtime() also retries on this specific
+    # error so we're double-belted; this sleep keeps the happy path one-shot.
+    time.sleep(15)
     return role_arn
 
 
@@ -339,8 +357,55 @@ def create_agent_runtime(
     if authorizer_config:
         create_params["authorizerConfiguration"] = authorizer_config
 
+    def _create_with_transient_retry():
+        """Retry create_agent_runtime on two known transient ValidationExceptions.
+
+        Two distinct failure modes share the same outer exception type:
+
+        1. **S3 region redirect (Bug 63 root cause).** AgentCore's service-side
+           S3 client returns `S3 operation failed: Moved Permanently (Status
+           Code: 301)` on the FIRST call to a bucket whose region it hasn't
+           cached. The 301 response itself warms the cache — a retry within
+           seconds succeeds. Verified live 2026-05-18 with a controlled
+           diagnostic: identical (role, bucket, key) failed on call 1 with
+           301 and succeeded on call 2 ~30s later.
+
+        2. **IAM-propagation race.** Service-side IAM cache for the runtime
+           role's S3 read permission can lag the IAM control plane after
+           `put_role_policy`. Surfaces as `Access denied when trying to
+           retrieve zip file from S3`. Less common now that we pre-create
+           the shared role at stack init (Bug 60), but kept as a safety net.
+
+        Budget: 8 × 5s = 40s. The 301 case resolves in <1s; we just need a
+        few retry slots. Way under the SFN 240s ceiling.
+        """
+        retryable_markers = (
+            "Access denied when trying to retrieve",  # IAM-propagation race
+            "Moved Permanently",                       # S3 region cache miss
+            "Status Code: 301",                        # S3 region cache miss
+        )
+        last_err = None
+        attempts = 8
+        for attempt in range(attempts):
+            try:
+                return agentcore_ctrl.create_agent_runtime(**create_params)
+            except Exception as e:
+                err_str = str(e)
+                if "ValidationException" in err_str and any(
+                    m in err_str for m in retryable_markers
+                ):
+                    last_err = e
+                    logger.info(
+                        "create_agent_runtime transient (attempt %d/%d): %s",
+                        attempt + 1, attempts, err_str[:200],
+                    )
+                    time.sleep(5)
+                    continue
+                raise
+        raise last_err if last_err else RuntimeError("create_agent_runtime failed")
+
     try:
-        resp = agentcore_ctrl.create_agent_runtime(**create_params)
+        resp = _create_with_transient_retry()
     except Exception as e:
         if "ConflictException" in str(e) or "already exists" in str(e):
             # Find existing runtime by paginating through all runtimes
@@ -443,17 +508,155 @@ def wait_for_runtime_ready(agentcore_ctrl, runtime_id: str, timeout: int = 600) 
     }
 
 
-def destroy_runtime(runtime_id: str, region: str) -> dict:
-    """Delete an AgentCore runtime via boto3.
+def _resolve_runtime_identifier(agentcore_ctrl, identifier: str) -> str:
+    """Convert a runtime NAME (or already-an-id) to the canonical agentRuntimeId.
 
-    Returns dict with success and message.
+    AgentCore distinguishes the human-readable runtime name (e.g.
+    `my_agent_v1`) from the canonical id (e.g. `my_agent_v1-AbCdEfGh01`).
+    `delete_agent_runtime`/`get_agent_runtime` accept ONLY the canonical id —
+    passing the friendly name returns AccessDeniedException (not 404),
+    masking the real cause. See tasks/lessons.md Bug 50.
+
+    Heuristic: if the input looks like the canonical id (has `-` followed by
+    a 10-char hash) it's used as-is. Otherwise we list and match by name.
     """
+    if not identifier:
+        return identifier
+    # Canonical id pattern: <name>-<10 hash chars>
+    if re.match(r".+-[A-Za-z0-9]{10}$", identifier):
+        return identifier
+    # Name lookup — paginate list_agent_runtimes
     try:
-        agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
-        agentcore_ctrl.delete_agent_runtime(agentRuntimeId=runtime_id)
-        logger.info("Deleted runtime: %s", runtime_id)
-        return {"success": True, "message": f"Runtime {runtime_id} deleted"}
+        next_token = None
+        for _ in range(20):  # max 20 pages
+            kwargs = {}
+            if next_token:
+                kwargs["nextToken"] = next_token
+            try:
+                resp = agentcore_ctrl.list_agent_runtimes(**kwargs)
+            except Exception:
+                kwargs["maxResults"] = 100
+                resp = agentcore_ctrl.list_agent_runtimes(**kwargs)
+            runtimes = resp.get("agentRuntimeSummaries", resp.get("agentRuntimes", []))
+            for rt in runtimes:
+                if rt.get("agentRuntimeName") == identifier:
+                    return rt.get("agentRuntimeId", identifier)
+            next_token = resp.get("nextToken")
+            if not next_token:
+                break
     except Exception as e:
-        if "ResourceNotFound" in str(e):
-            return {"success": True, "message": f"Runtime {runtime_id} already deleted"}
-        return {"success": False, "message": f"Runtime destroy error: {e}"}
+        logger.warning("Could not resolve runtime name %s to id: %s", identifier, e)
+    return identifier  # fall through; caller will see ResourceNotFound and treat as no-op
+
+
+def destroy_runtime(runtime_id: str, region: str) -> dict:
+    """Delete an AgentCore runtime AND its execution role.
+
+    Order of operations matters: capture roleArn via get-agent-runtime BEFORE
+    delete-agent-runtime — after deletion the get fails and the role is orphaned
+    (verified live 2026-05-16 — the API DELETE path leaked roles before this
+    fix; see tasks/lessons.md Bug 25 / Bug 27 — drift between cleanup.sh and
+    runtime_deployer.destroy_runtime).
+
+    The `runtime_id` arg may be either the canonical agentRuntimeId or the
+    friendly agentRuntimeName — we resolve it (Bug 50).
+
+    Idempotent on already-deleted runtimes/roles.
+    """
+    agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
+    canonical_id = _resolve_runtime_identifier(agentcore_ctrl, runtime_id)
+
+    # AgentCore returns AccessDeniedException (NOT ResourceNotFound) when the
+    # runtime ID doesn't exist. Treat both as "runtime is gone" so DELETE on a
+    # never-created runtime still proceeds to IAM-role cleanup. See lessons Bug 55.
+    def _is_runtime_gone(err: Exception) -> bool:
+        s = str(err)
+        return "ResourceNotFound" in s or "AccessDeniedException" in s
+
+    # Capture roleArn first so we can also delete the IAM role.
+    role_arn = ""
+    try:
+        rt = agentcore_ctrl.get_agent_runtime(agentRuntimeId=canonical_id)
+        role_arn = rt.get("roleArn", "") or ""
+    except Exception as e:
+        if not _is_runtime_gone(e):
+            logger.warning("Could not get-agent-runtime before delete: %s", e)
+
+    try:
+        agentcore_ctrl.delete_agent_runtime(agentRuntimeId=canonical_id)
+        logger.info("Deleted runtime: %s", canonical_id)
+    except Exception as e:
+        if not _is_runtime_gone(e):
+            return {"success": False, "message": f"Runtime destroy error: {e}"}
+        logger.info("Runtime %s already deleted (or never existed)", canonical_id)
+
+    # Best-effort: delete the matched IAM execution role(s) too.
+    # When the runtime never existed, role_arn is empty (get_agent_runtime
+    # returned AccessDenied); fall back to the conventional names used by
+    # the SFN IAM step (`AgentCoreRuntime-{name}`) and the direct-deploy path
+    # (`{name}-role`). See lessons Bug 57.
+    candidate_role_names: list[str] = []
+    if role_arn:
+        # roleArn format: arn:aws:iam::<acct>:role/<RoleName>
+        candidate_role_names.append(role_arn.rsplit("/", 1)[-1])
+    # Use the original argument as the runtime "name" component for the
+    # convention-based fallback. canonical_id may include a `-XxXxXxXxXx`
+    # suffix; strip that to recover the runtime name.
+    name_for_role = re.sub(r"-[A-Za-z0-9]{10}$", "", runtime_id)
+    for role_name in (
+        f"AgentCoreRuntime-{name_for_role}",
+        f"{name_for_role}-role",
+    ):
+        if role_name not in candidate_role_names:
+            candidate_role_names.append(role_name)
+
+    # Bug 60 introduced a stack-managed shared role. Bug 62: never delete
+    # that role — every DELETE /api/runtime would nuke it, breaking every
+    # other runtime in the stack (and DemoTriage). Compare role NAME (not
+    # ARN) so this still works when the cleanup is via the name fallback.
+    shared_role_arn = os.environ.get("SHARED_RUNTIME_ROLE_ARN", "")
+    shared_role_name = (
+        shared_role_arn.rsplit("/", 1)[-1] if shared_role_arn else ""
+    )
+
+    iam = boto3.client("iam")
+    deleted_any_role = False
+    for role_name in candidate_role_names:
+        if not role_name:
+            continue
+        # Skip stack-managed shared roles. Match exact (Bug 60's role) or any
+        # role with `-shared` suffix as defense in depth against future shared
+        # roles. See tasks/lessons.md Bug 62.
+        if role_name == shared_role_name or role_name.endswith("-shared"):
+            logger.info("Skipping shared role %s (Bug 62 guard)", role_name)
+            continue
+        try:
+            # Detach managed policies
+            for p in iam.list_attached_role_policies(RoleName=role_name).get(
+                "AttachedPolicies", []
+            ):
+                try:
+                    iam.detach_role_policy(RoleName=role_name, PolicyArn=p["PolicyArn"])
+                except Exception as e:
+                    logger.warning("detach_role_policy %s: %s", p.get("PolicyArn"), e)
+            # Delete inline policies
+            for pn in iam.list_role_policies(RoleName=role_name).get(
+                "PolicyNames", []
+            ):
+                try:
+                    iam.delete_role_policy(RoleName=role_name, PolicyName=pn)
+                except Exception as e:
+                    logger.warning("delete_role_policy %s: %s", pn, e)
+            iam.delete_role(RoleName=role_name)
+            logger.info("Deleted runtime execution role: %s", role_name)
+            deleted_any_role = True
+        except iam.exceptions.NoSuchEntityException:
+            # Role doesn't exist for this candidate — try the next.
+            continue
+        except Exception as e:
+            # Don't fail the whole delete because of role cleanup issues.
+            logger.warning("Runtime %s role cleanup (%s) failed: %s", runtime_id, role_name, e)
+
+    if deleted_any_role:
+        return {"success": True, "message": f"Runtime {runtime_id} and execution role deleted"}
+    return {"success": True, "message": f"Runtime {runtime_id} deleted"}

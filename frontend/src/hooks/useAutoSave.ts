@@ -3,11 +3,25 @@
  * Requirements: 6.1, 6.2, 6.3
  */
 
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useWorkflowStore } from '../store/workflowStore';
 import type { AgentCoreNode } from '../store/workflowStore';
 import { useFlowStore } from '../store/flowStore';
 import type { Edge } from '@xyflow/react';
+
+/**
+ * Return value of {@link useAutoSave}.
+ *
+ * Audit issue #8: previously the hook returned `void` and silently swallowed
+ * save errors (only flowStore.error got set, which is overwritten by every
+ * other flow operation). Consumers can now read `lastSaveError` to render
+ * an autosave-specific banner/toast, and call `clearLastSaveError()` to
+ * dismiss it.
+ */
+export interface UseAutoSaveResult {
+  lastSaveError: Error | null;
+  clearLastSaveError: () => void;
+}
 
 const DEFAULT_INTERVAL = 5000;
 
@@ -97,13 +111,23 @@ function toBackendEdges(edges: Edge[]): unknown[] {
  * Subscribes directly to workflowStore changes and debounces saves
  * to flowStore.saveFlow() when an active flow is set.
  * Converts React Flow nodes/edges to backend-compatible format with snake_case keys.
+ *
+ * Returns {@link UseAutoSaveResult} so callers can render autosave-specific
+ * error UI. Backwards-compatible: existing callers that ignore the return
+ * value still work.
  */
-export function useAutoSave(flowId: string | null, interval: number = DEFAULT_INTERVAL): void {
+export function useAutoSave(
+  flowId: string | null,
+  interval: number = DEFAULT_INTERVAL,
+): UseAutoSaveResult {
   const flowIdRef = useRef(flowId);
   flowIdRef.current = flowId;
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hasReceivedFirstState = useRef(false);
+
+  const [lastSaveError, setLastSaveError] = useState<Error | null>(null);
+  const clearLastSaveError = useCallback(() => setLastSaveError(null), []);
 
   useEffect(() => {
     const unsubscribe = useWorkflowStore.subscribe(
@@ -162,9 +186,23 @@ export function useAutoSave(flowId: string | null, interval: number = DEFAULT_IN
             updated_at: now,
           };
 
-          saveFlow(currentFlowId, workflow as never).catch(() => {
-            // saveFlow already sets flowStore.error internally
-          });
+          saveFlow(currentFlowId, workflow as never)
+            .then(() => {
+              // Successful save: clear any previously surfaced auto-save error
+              // so a transient network blip doesn't leave a stale banner.
+              setLastSaveError((prev) => (prev === null ? prev : null));
+            })
+            .catch((err: unknown) => {
+              // Audit issue #8: surface auto-save failures to the consumer
+              // so it can render a dedicated toast/banner. flowStore.error
+              // is shared with every other flow operation and gets clobbered;
+              // this state is autosave-specific.
+              const error = err instanceof Error ? err : new Error(String(err));
+              // Log so the failure is also visible in dev tools / observability.
+              // eslint-disable-next-line no-console
+              console.error('[useAutoSave] flow save failed', error);
+              setLastSaveError(error);
+            });
         }, interval);
       }
     );
@@ -177,4 +215,6 @@ export function useAutoSave(flowId: string | null, interval: number = DEFAULT_IN
       }
     };
   }, [interval]);
+
+  return { lastSaveError, clearLastSaveError };
 }

@@ -31,9 +31,9 @@ from app.services.runtime_deployer import (
 from app.models import RuntimeConfiguration, ModelConfiguration, ModelProvider
 
 REGION = os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1"))
-BUCKET = os.environ.get("ARTIFACTS_BUCKET_NAME", "agentcore-workflow-dev-artifacts-166827918465")
+BUCKET = os.environ["ARTIFACTS_BUCKET_NAME"]
 BUNDLE_KEY = "agentcore-deps/strands-mcp.zip"
-MODEL_ID = "us.anthropic.claude-sonnet-4-20250514-v1:0"
+MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 RUN_ID = uuid.uuid4().hex[:6]
 
 

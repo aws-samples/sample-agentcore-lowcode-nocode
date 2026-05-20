@@ -209,6 +209,119 @@ def _handle_oauth2_cred_delete(event: dict) -> tuple[dict, str]:
 
 
 # ---------------------------------------------------------------------------
+# Custom::AgentCorePolicy — Cedar policy attached to a PolicyEngine
+# Native AWS::BedrockAgentCore::Policy has a stabilization timeout that
+# fires before the policy engine is ready in fresh accounts (Bug 72). This
+# Custom Resource gives us a longer wait + retries on the bind step.
+# ---------------------------------------------------------------------------
+
+def _handle_policy_create_update(event: dict) -> tuple[dict, str]:
+    props = event["ResourceProperties"]
+    name = props["Name"]
+    statement = props["Statement"]
+    engine_id = props["PolicyEngineId"]
+    description = props.get("Description", "")
+
+    ctrl = boto3.client("bedrock-agentcore-control")
+
+    # Wait for the policy engine to actually be ready before attaching a
+    # policy. Up to 5 minutes in fresh accounts.
+    # Use list_policy_engines instead of get_policy_engine because Lambda's
+    # bundled boto3 may not include the per-engine getter on older runtimes.
+    # See tasks/lessons.md Bug 92.
+    for attempt in range(30):
+        found_active = False
+        try:
+            next_token = None
+            for _ in range(20):
+                kw = {"nextToken": next_token} if next_token else {}
+                resp = ctrl.list_policy_engines(**kw)
+                items = resp.get("policyEngineSummaries", resp.get("policyEngines", resp.get("items", [])))
+                for item in items:
+                    pid = item.get("policyEngineId") or item.get("id")
+                    if pid == engine_id:
+                        status = item.get("status", "")
+                        if status in ("ACTIVE", "READY"):
+                            found_active = True
+                            break
+                        if "FAILED" in status:
+                            raise RuntimeError(f"PolicyEngine entered {status}")
+                if found_active:
+                    break
+                next_token = resp.get("nextToken")
+                if not next_token:
+                    break
+        except Exception as e:
+            err_str = str(e)
+            if "RuntimeError" in err_str and "FAILED" in err_str:
+                raise
+            logger.info("list_policy_engines attempt %d: %s", attempt + 1, err_str[:200])
+        if found_active:
+            break
+        time.sleep(10)
+
+    # Idempotent: look up existing policy by name
+    policy_id = None
+    try:
+        next_token = None
+        for _ in range(10):
+            kw = {"policyEngineId": engine_id}
+            if next_token:
+                kw["nextToken"] = next_token
+            resp = ctrl.list_policies(**kw)
+            for p in resp.get("policySummaries", resp.get("policies", [])):
+                if p.get("name") == name:
+                    policy_id = p.get("policyId") or p.get("id")
+                    break
+            if policy_id or not resp.get("nextToken"):
+                break
+            next_token = resp.get("nextToken")
+    except Exception as e:
+        logger.info("list_policies (idempotency check) failed (will create): %s", e)
+
+    if policy_id:
+        logger.info("Policy %s already exists (id=%s), reusing", name, policy_id)
+    else:
+        for attempt in range(10):
+            try:
+                resp = ctrl.create_policy(
+                    policyEngineId=engine_id,
+                    name=name,
+                    description=description,
+                    definition={"cedar": {"statement": statement}},
+                )
+                policy_id = resp.get("policyId") or resp.get("id") or resp.get("policy", {}).get("policyId", "")
+                break
+            except Exception as e:
+                err = str(e)
+                if "ResourceNotFoundException" in err or "PolicyEngine" in err and "not found" in err.lower():
+                    logger.info("PolicyEngine still propagating (attempt %d): %s", attempt + 1, err[:200])
+                    time.sleep(10)
+                    continue
+                raise
+
+    physical_id = f"{engine_id}/policies/{policy_id or name}"
+    return {"PolicyId": policy_id or "", "PolicyEngineId": engine_id}, physical_id
+
+
+def _handle_policy_delete(event: dict) -> tuple[dict, str]:
+    physical_id = event.get("PhysicalResourceId", "")
+    props = event.get("ResourceProperties", {})
+    engine_id = props.get("PolicyEngineId", "")
+    # Parse policy_id out of physical_id format "engine_id/policies/policy_id"
+    policy_id = ""
+    if "/policies/" in physical_id:
+        policy_id = physical_id.rsplit("/", 1)[-1]
+    if engine_id and policy_id:
+        try:
+            ctrl = boto3.client("bedrock-agentcore-control")
+            ctrl.delete_policy(policyEngineId=engine_id, policyId=policy_id)
+        except Exception as e:
+            logger.warning("delete_policy failed (treating as benign): %s", e)
+    return {}, physical_id or event.get("LogicalResourceId", "")
+
+
+# ---------------------------------------------------------------------------
 # Router — dispatches by resource type
 # ---------------------------------------------------------------------------
 
@@ -232,6 +345,13 @@ def handler(event: dict, context) -> None:
                 data, physical_id = _handle_oauth2_cred_update(event)
             elif request_type == "Delete":
                 data, physical_id = _handle_oauth2_cred_delete(event)
+            else:
+                raise ValueError(f"Unknown RequestType: {request_type}")
+        elif resource_type == "Custom::AgentCorePolicy":
+            if request_type in ("Create", "Update"):
+                data, physical_id = _handle_policy_create_update(event)
+            elif request_type == "Delete":
+                data, physical_id = _handle_policy_delete(event)
             else:
                 raise ValueError(f"Unknown RequestType: {request_type}")
         else:

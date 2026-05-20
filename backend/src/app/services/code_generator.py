@@ -9,6 +9,38 @@ protocol. Dependencies are pre-bundled into code.zip at deploy time via
 S3 dependency bundles, so no pip-install phase is needed during init.
 
 Requirements: 5.1, 5.2, 5.6
+
+Convention: code-as-strings via triple-quoted f-strings
+============================================================
+This module emits ~14 generator functions that build Python agent source
+files using triple-quoted f-strings. Audit #15 flagged this as a
+maintainability concern; it is intentional and documented here so future
+contributors do not try to "clean it up" without understanding the trade-offs:
+
+  (a) Generated code is post-processed by `_inject_otel(...)` (defined in
+      this file) which performs string-level rewrites — replacing import
+      lines, prepending OTEL bootstrap, etc. A Jinja-based template engine
+      would force every post-processor to re-parse and re-emit, doubling
+      the surface area.
+
+  (b) The per-template variation (provider, framework, tools, MCP/Gateway
+      wiring, memory, KB, guardrails, policy) is too dynamic for a flat
+      template language. Each generator function branches on RuntimeConfig
+      shape and connected-tool sets; a Jinja template would either need
+      dozens of `{% if %}` blocks (more complex than the f-string) or be
+      split into many small templates (more files, harder to navigate).
+
+  (c) Refactor cost (introduce Jinja2, port 14 generators, re-test every
+      template under matrix-tester) outweighs the current maintenance
+      burden. There is no syntax check on generated Python until deploy
+      time, but the matrix-tester sweeps every template+provider combo in
+      CI so regressions surface there.
+
+If you are tempted to convert this to Jinja or a code-AST builder, please:
+  1. Read tasks/lessons.md (numerous bugs around generated-code variants).
+  2. Verify the post-processor (`_inject_otel`) still works on the new
+     output without string heuristics.
+  3. Run the full matrix-tester suite end-to-end before merging.
 """
 
 import os
@@ -479,7 +511,14 @@ def _get_gateway_token():
 
 
 def get_full_tools_list(client):
-    """Retrieve all tools from MCP client, handling pagination."""
+    """Retrieve all tools from MCP client, handling pagination.
+
+    Loud-fail when the MCP server returns no tools — Bug 105's silent
+    empty-list bug let agents come up with `tools=[]` and only the system
+    prompt to fall back on, defeating the wiring proof gate.
+    """
+    import logging as _gw_log
+    _gw_logger = _gw_log.getLogger("agentcore.gateway")
     more_tools = True
     tools = []
     pagination_token = None
@@ -490,6 +529,13 @@ def get_full_tools_list(client):
             more_tools = False
         else:
             pagination_token = tmp_tools.pagination_token
+    _gw_logger.warning("Gateway MCPClient discovered %d tools from %s", len(tools), GATEWAY_URL)
+    if not tools:
+        _gw_logger.error(
+            "Gateway MCPClient returned ZERO tools from %s — gateway wiring may be broken. "
+            "Verify Cognito creds and that gateway targets actually exist.",
+            GATEWAY_URL,
+        )
     return tools
 
 
@@ -511,6 +557,15 @@ def _get_agent():
         mcp_client = MCPClient(_create_transport)
         mcp_client.start()
         tools = get_full_tools_list(mcp_client)
+        # Wiring proof gate: a gateway-enabled agent that came up with zero
+        # tools is silently broken. Surface it as an error rather than letting
+        # the model bluff a canary out of the system prompt.
+        if not tools:
+            raise RuntimeError(
+                f"Gateway MCPClient returned 0 tools from {{GATEWAY_URL}} — gateway "
+                "wiring is broken. Check Cognito credentials, gateway target schemas, "
+                "and that the target Lambda has been deployed."
+            )
         _agent = Agent(model=model, tools=tools, system_prompt=SYSTEM_PROMPT)
     else:
         _agent = Agent(model=model, system_prompt=SYSTEM_PROMPT)
@@ -546,8 +601,9 @@ def _generate_tools_agent(
     region: str,
     has_browser: bool,
     has_code_interpreter: bool,
+    has_kb: bool = False,
 ) -> str:
-    """Generate agent with built-in tools (code interpreter, browser)."""
+    """Generate agent with built-in tools (code interpreter, browser, KB retrieve)."""
     imports = [
         '"""AgentCore Runtime Agent — Strands Agent with Built-in Tools"""',
         "import os",
@@ -563,8 +619,48 @@ def _generate_tools_agent(
         imports.append("from bedrock_agentcore.tools.code_interpreter_client import code_session")
     if has_browser:
         imports.append("from bedrock_agentcore.tools.browser_client import browser_session")
+    if has_kb:
+        imports.append("import boto3")
 
     tool_defs = ""
+
+    if has_kb:
+        # KB_ID is injected as env var by runtime_configure_step. The agent
+        # calls bedrock-agent-runtime:Retrieve to query the knowledge base.
+        # See tasks/lessons.md Bug 87.
+        tools_list.append("retrieve_from_kb")
+        tool_defs += '''
+_kb_client = None
+def _get_kb_client():
+    global _kb_client
+    if _kb_client is None:
+        _kb_client = boto3.client("bedrock-agent-runtime", region_name=REGION)
+    return _kb_client
+
+@tool
+def retrieve_from_kb(query: str, num_results: int = 5) -> str:
+    """Retrieve relevant passages from the connected knowledge base. Use this
+    when the user asks about ingested documentation, internal facts, or
+    anything that requires looking up information stored in the KB.
+    """
+    kb_id = os.environ.get("KB_ID", "")
+    if not kb_id:
+        return json.dumps({"error": "No KB_ID configured for this runtime."})
+    try:
+        resp = _get_kb_client().retrieve(
+            knowledgeBaseId=kb_id,
+            retrievalQuery={"text": query},
+            retrievalConfiguration={"vectorSearchConfiguration": {"numberOfResults": max(1, min(num_results, 20))}},
+        )
+        results = []
+        for r in resp.get("retrievalResults", []):
+            content = r.get("content", {}).get("text", "")
+            score = r.get("score", 0.0)
+            results.append({"text": content, "score": score})
+        return json.dumps({"query": query, "results": results, "count": len(results)})
+    except Exception as e:
+        return json.dumps({"error": "KB retrieve failed: %s" % str(e), "query": query})
+'''
     if has_code_interpreter:
         tools_list.append("execute_python")
         tool_defs += '''
@@ -580,14 +676,38 @@ def execute_python(code: str, description: str = "") -> str:
 '''
 
     if has_browser:
+        # NOTE: AgentCore's BrowserClient has NO `invoke(action, params)` API.
+        # Real browsing requires `generate_ws_headers()` then connecting via
+        # Playwright/CDP over WebSocket — substantially more involved and
+        # framework-dependent. The previous one-liner wrapper was broken
+        # (CW Logs showed "Tool #1: browse_web" → "Invalid HTTP request").
+        # See tasks/lessons.md Bug 74. Until the platform ships proper
+        # browser_session+Playwright integration, expose a minimal session
+        # bootstrap so the tool reports its limitation honestly rather than
+        # masquerading as functional.
         tools_list.append("browse_web")
         tool_defs += '''
 @tool
 def browse_web(url: str, action: str = "navigate") -> str:
-    """Browse a web page and return its content."""
+    """Open an AgentCore browser session and return the WebSocket connection
+    info. Note: full headless browsing requires Playwright/CDP wiring; this
+    tool only confirms session creation and returns the live-view URL plus
+    a session id that an external Playwright-aware caller can connect to.
+    """
     with browser_session(REGION) as client:
-        response = client.invoke(action, {"url": url})
-    return json.dumps(response) if isinstance(response, dict) else str(response)
+        try:
+            ws_url, headers = client.generate_ws_headers()
+            live_url = client.generate_live_view_url()
+            return json.dumps({
+                "session_id": client.session_id,
+                "ws_url": ws_url,
+                "live_view_url": live_url,
+                "note": "Connect a Playwright/CDP client to ws_url to navigate to %s." % url,
+                "url_requested": url,
+                "action_requested": action,
+            })
+        except Exception as e:
+            return json.dumps({"error": "browse_web is not yet wired for navigation: %s" % str(e), "url_requested": url})
 '''
 
     tl = ", ".join(tools_list)
@@ -910,7 +1030,14 @@ def _get_gateway_token():
 
 
 def get_full_tools_list(client):
-    """Retrieve all tools from MCP client, handling pagination."""
+    """Retrieve all tools from MCP client, handling pagination.
+
+    Loud-fail when the MCP server returns no tools — Bug 105's silent
+    empty-list bug let agents come up with `tools=[]` and only the system
+    prompt to fall back on, defeating the wiring proof gate.
+    """
+    import logging as _gw_log
+    _gw_logger = _gw_log.getLogger("agentcore.gateway")
     more_tools = True
     tools = []
     pagination_token = None
@@ -921,6 +1048,13 @@ def get_full_tools_list(client):
             more_tools = False
         else:
             pagination_token = tmp_tools.pagination_token
+    _gw_logger.warning("Gateway MCPClient discovered %d tools from %s", len(tools), GATEWAY_URL)
+    if not tools:
+        _gw_logger.error(
+            "Gateway MCPClient returned ZERO tools from %s — gateway wiring may be broken. "
+            "Verify Cognito creds and that gateway targets actually exist.",
+            GATEWAY_URL,
+        )
     return tools
 
 
@@ -941,6 +1075,15 @@ def _get_gateway_tools():
             mcp_client = MCPClient(_create_transport)
             mcp_client.start()
             _gateway_tools = get_full_tools_list(mcp_client)
+            # Wiring proof gate — empty tool list with non-empty GATEWAY_URL
+            # is a silent wiring failure. Fail loudly rather than let the
+            # model bluff a canary out of the system prompt.
+            if not _gateway_tools:
+                raise RuntimeError(
+                    f"Gateway MCPClient returned 0 tools from {GATEWAY_URL} — "
+                    "gateway wiring is broken. Check Cognito credentials, "
+                    "gateway target schemas, and target Lambda deployment."
+                )
     return _gateway_tools"""
         agent_tools = "tools=_get_gateway_tools(), "
     else:
@@ -1236,6 +1379,29 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 
 
+def _collect_multi_agent_imports(parent_provider: str, agents: list, model_id: str, region: str) -> str:
+    """Build the full set of `from strands.models...` imports needed for a
+    multi-agent file: parent provider plus every distinct sub-agent provider.
+
+    Without this, agents whose `modelProvider` differs from the parent's
+    reference an unimported class (e.g. `AnthropicModel`) and crash with
+    NameError on first invoke. Verified live 2026-05-16; tasks/lessons.md Bug 32.
+    """
+    seen: set[str] = set()
+    lines: list[str] = []
+    providers = [parent_provider] + [
+        ag.get("modelProvider", parent_provider) for ag in agents
+    ]
+    for prov in providers:
+        if prov in seen:
+            continue
+        seen.add(prov)
+        imp, _ = _get_model_init_code(prov, model_id, region)
+        if imp not in lines:
+            lines.append(imp)
+    return "\n".join(lines)
+
+
 def _generate_graph_agent(
     system_prompt: str,
     model_id: str,
@@ -1243,14 +1409,20 @@ def _generate_graph_agent(
     provider: str,
     multi_agent_config: dict,
 ) -> str:
-    """Generate Strands Graph multi-agent code using GraphBuilder."""
+    """Generate Strands Graph multi-agent code using GraphBuilder.
+
+    Strands Graph API contract (verified live 2026-05-16):
+      - GraphBuilder.add_node(executor, node_id=...) — executor first
+      - graph.build() returns a Graph
+      - Graph is invoked via __call__ (graph(task)) — there is no .run()
+    """
     agents = multi_agent_config.get("agents", [])
     if not agents:
         # Empty agents list — fall through to standard single-agent
         return _generate_strands_default(system_prompt, model_id, region, provider)
     edges = multi_agent_config.get("edges", [])
     entry_point = _sanitize_agent_id(multi_agent_config.get("entryPoint", agents[0]["agentId"]))
-    model_import, _ = _get_model_init_code(provider, model_id, region)
+    model_import = _collect_multi_agent_imports(provider, agents, model_id, region)
 
     agent_defs = ""
     for ag in agents:
@@ -1270,7 +1442,8 @@ def _generate_graph_agent(
     for ag in agents:
         ag_id = _sanitize_agent_id(ag["agentId"])
         safe_var = ag_id.replace("-", "_")
-        node_adds += f'    graph.add_node("{ag_id}", agent_{safe_var})\n'
+        # Strands GraphBuilder.add_node(executor, node_id=...) — executor first.
+        node_adds += f'    graph.add_node(agent_{safe_var}, node_id="{ag_id}")\n'
 
     edge_adds = ""
     for e in edges:
@@ -1305,7 +1478,8 @@ def _build_graph():
 def invoke(payload):
     graph = _build_graph()
     prompt = payload.get("prompt", "Hello!")
-    result = graph.run(prompt)
+    # Graph is invoked via __call__; there is no .run() method.
+    result = graph(prompt)
     return {{"response": str(result)}}
 
 if __name__ == "__main__":
@@ -1320,11 +1494,16 @@ def _generate_swarm_agent(
     provider: str,
     multi_agent_config: dict,
 ) -> str:
-    """Generate Strands Swarm multi-agent code."""
+    """Generate Strands Swarm multi-agent code.
+
+    Strands Swarm API contract (verified live 2026-05-16):
+      - Swarm(nodes=[Agent, ...]) — first kwarg is `nodes`, not `agents`
+      - Invoked via __call__ (swarm(task)) — there is no .execute()
+    """
     agents = multi_agent_config.get("agents", [])
     if not agents:
         return _generate_strands_default(system_prompt, model_id, region, provider)
-    model_import, _ = _get_model_init_code(provider, model_id, region)
+    model_import = _collect_multi_agent_imports(provider, agents, model_id, region)
 
     agent_defs = ""
     agent_list_items = []
@@ -1333,9 +1512,13 @@ def _generate_swarm_agent(
         _, ag_init = _get_model_init_code(ag.get("modelProvider", provider), ag.get("modelId", model_id), region)
         ag_prompt = _escape_triple_quotes(ag.get("systemPrompt", "You are a helpful agent."))
         safe = ag_id.replace("-", "_")
+        # Strands Swarm requires unique agent names across nodes. Without an
+        # explicit name= kwarg, Strands defaults all agents to "Strands Agents",
+        # which collides at runtime. See tasks/lessons.md Bug 75.
         agent_defs += f'''
     {ag_init.replace("model = ", f"model_{safe} = ")}
     agent_{safe} = Agent(
+        name="{safe}",
         model=model_{safe},
         system_prompt="""{ag_prompt}""",
     )
@@ -1362,14 +1545,16 @@ def _build_swarm():
     if _swarm is not None:
         return _swarm
 {agent_defs}
-    _swarm = Swarm(agents=[{agents_list}])
+    # Swarm constructor takes `nodes`, not `agents`.
+    _swarm = Swarm(nodes=[{agents_list}])
     return _swarm
 
 @app.entrypoint
 def invoke(payload):
     swarm = _build_swarm()
     prompt = payload.get("prompt", "Hello!")
-    result = swarm.execute(prompt)
+    # Swarm is invoked via __call__; there is no .execute() method.
+    result = swarm(prompt)
     return {{"response": str(result)}}
 
 if __name__ == "__main__":
@@ -1387,7 +1572,7 @@ def _generate_workflow_agent(
     """Generate Strands Workflow (DAG) multi-agent code with sequential steps."""
     agents = multi_agent_config.get("agents", [])
     steps = multi_agent_config.get("steps", [])
-    model_import, _ = _get_model_init_code(provider, model_id, region)
+    model_import = _collect_multi_agent_imports(provider, agents, model_id, region)
 
     # Build agent definitions
     agent_defs = ""
@@ -1483,6 +1668,126 @@ BROWSER TOOL GUIDELINES:
 - If an action times out, retry with a different strategy (e.g., scroll into view, use a different selector, or navigate directly via URL instead of clicking)."""
 
 
+# ---------------------------------------------------------------------------
+# OTEL bootstrap — injected when the Observability node is connected.
+# ---------------------------------------------------------------------------
+#
+# The snippet below runs at module load (BEFORE Strands or any agent code).
+# It:
+#   1) Resolves OTEL_EXPORTER_OTLP_HEADERS from a Secrets Manager ARN if set
+#      (so secret values are never stored as plaintext runtime env vars).
+#   2) Boots Strands' StrandsTelemetry().setup_otlp_exporter() — this honors
+#      OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_EXPORTER_OTLP_HEADERS, OTEL_RESOURCE_*,
+#      and OTEL_TRACES_SAMPLER* env vars set by build_otel_env_vars().
+#   3) Optionally wires a second BatchSpanProcessor for the AgentCore-native
+#      sidecar (dual-export mode), so CloudWatch GenAI dashboards still work
+#      while a 3rd-party backend like Langfuse receives the same spans.
+#   4) Exposes _otel_force_flush() so invoke() can flush BEFORE the runtime
+#      is killed at idle stop — otherwise the last invocation is lost.
+#
+# Resilient by design: any failure logs and continues, never breaks the agent.
+
+OTEL_BOOTSTRAP = '''
+# OTEL observability bootstrap (injected by AgentCore Flows)
+import os as _otel_os
+import logging as _otel_logging
+_otel_log = _otel_logging.getLogger("agentcore.otel")
+_otel_provider = None
+
+def _otel_bootstrap():
+    global _otel_provider
+    endpoint = _otel_os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "")
+    if not endpoint:
+        return
+    # Resolve headers from Secrets Manager if an ARN is provided. This keeps
+    # API tokens (Langfuse, Honeycomb, etc.) out of plaintext runtime env.
+    secret_arn = _otel_os.environ.get("OTEL_AUTH_SECRET_ARN", "")
+    if secret_arn:
+        try:
+            import boto3 as _otel_boto3
+            sm = _otel_boto3.client("secretsmanager")
+            secret_value = sm.get_secret_value(SecretId=secret_arn).get("SecretString", "")
+            extra = _otel_os.environ.get("OTEL_EXPORTER_OTLP_EXTRA_HEADERS", "")
+            merged = ",".join(h for h in (secret_value, extra) if h)
+            if merged:
+                _otel_os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = merged
+        except Exception as e:
+            _otel_log.warning("Could not resolve OTEL auth secret: %s", e)
+    elif _otel_os.environ.get("OTEL_EXPORTER_OTLP_EXTRA_HEADERS"):
+        _otel_os.environ["OTEL_EXPORTER_OTLP_HEADERS"] = (
+            _otel_os.environ["OTEL_EXPORTER_OTLP_EXTRA_HEADERS"]
+        )
+    try:
+        from strands.telemetry import StrandsTelemetry
+        from opentelemetry import trace as _otel_trace_api
+        telemetry = StrandsTelemetry()
+        telemetry.setup_otlp_exporter()
+        _otel_provider = _otel_trace_api.get_tracer_provider()
+        # Use WARNING so the message is visible in AgentCore Runtime logs;
+        # the container's default Python log level filters below WARNING.
+        _otel_log.warning("OTEL bootstrap complete (endpoint=%s)", endpoint)
+    except Exception as e:
+        _otel_log.warning("OTEL bootstrap failed (continuing without tracing): %s", e)
+
+
+def _otel_force_flush():
+    """Flush pending spans. Call from invoke() finally: so spans land before idle-stop."""
+    global _otel_provider
+    if _otel_provider is None:
+        return
+    try:
+        _otel_provider.force_flush(timeout_millis=3000)
+    except Exception as e:
+        _otel_log.debug("OTEL flush failed: %s", e)
+
+
+_otel_bootstrap()
+'''
+
+
+def _inject_otel(code: str) -> str:
+    """Post-process generated code to add OTLP observability bootstrap.
+
+    Inserts the OTEL_BOOTSTRAP block right after the BedrockAgentCoreApp() line
+    so it runs at module load (before any agent invocation), and wraps the
+    invoke() body in a try/finally that calls _otel_force_flush().
+    """
+    # Insert the bootstrap block right after `app = BedrockAgentCoreApp()`.
+    marker = "app = BedrockAgentCoreApp()"
+    idx = code.find(marker)
+    if idx >= 0:
+        eol = code.find("\n", idx)
+        if eol >= 0:
+            code = code[: eol + 1] + OTEL_BOOTSTRAP + code[eol + 1 :]
+
+    # Wrap the @app.entrypoint invoke() body with force_flush in finally.
+    # Strategy: find each `def invoke(payload):` block and append a flush call
+    # via a try/finally around the existing return. We do this conservatively
+    # by appending a top-level decorator that wraps the invoke function.
+    if "@app.entrypoint" in code and "_otel_invoke_wrap" not in code:
+        wrap_block = '''
+# Wrap invoke() so spans flush before AgentCore idle-stop kills the runtime.
+_otel_inner_invoke = invoke
+def _otel_invoke_wrap(payload):
+    try:
+        return _otel_inner_invoke(payload)
+    finally:
+        _otel_force_flush()
+invoke = _otel_invoke_wrap
+'''
+        # Append after the file's existing __main__ block check, or at end.
+        if 'if __name__ == "__main__":' in code:
+            code = code.replace(
+                'if __name__ == "__main__":',
+                wrap_block + '\nif __name__ == "__main__":',
+                1,
+            )
+        else:
+            code = code + wrap_block
+
+    return code
+
+
 def _inject_guardrails(code: str) -> str:
     """Post-process generated code to add guardrail support via env vars.
 
@@ -1554,6 +1859,7 @@ def generate_agent_code(
     gateway_tools: Optional[list] = None,
     custom_tools: Optional[list[dict]] = None,
     portable: bool = False,
+    observability_enabled: bool = False,
 ) -> str:
     """Generate agent Python code for the given configuration.
 
@@ -1620,11 +1926,17 @@ def generate_agent_code(
 
     # Check guardrails early so inner helper can reference it
     has_guardrails = "guardrails" in tools
+    has_observability = bool(observability_enabled) or "observability" in tools
 
-    # Helper to apply guardrails post-processing if connected
+    # Helper to apply post-processors (guardrails + OTEL) when connected.
+    # Order matters: guardrails injection mutates SYSTEM_PROMPT/MODEL_ID region;
+    # OTEL injection inserts a bootstrap block right after BedrockAgentCoreApp()
+    # and wraps invoke(). Run guardrails first, OTEL second.
     def _maybe_inject_guardrails(code: str) -> str:
         if has_guardrails:
-            return _inject_guardrails(code)
+            code = _inject_guardrails(code)
+        if has_observability:
+            code = _inject_otel(code)
         return code
 
     # Template-specific code generation
@@ -1655,6 +1967,7 @@ def generate_agent_code(
     has_code_interpreter = "code_interpreter" in tools
     has_gateway = "gateway" in tools and (gateway_config or portable)
     has_memory = "memory" in tools
+    has_kb = "knowledge_base" in tools or "knowledgeBase" in tools
 
     # Inject browser guidance into system prompt when browser tool is connected
     if has_browser:
@@ -1683,9 +1996,9 @@ def generate_agent_code(
         creds = _extract_gateway_credentials(gateway_config)
         return _maybe_inject_guardrails(_generate_gateway_agent(system_prompt, model_id, creds))
 
-    # Built-in tools agent (falls back to default Converse agent)
-    if has_browser or has_code_interpreter:
-        return _maybe_inject_guardrails(_generate_tools_agent(system_prompt, model_id, region, has_browser, has_code_interpreter))
+    # Built-in tools agent (handles browser, code interpreter, knowledge base)
+    if has_browser or has_code_interpreter or has_kb:
+        return _maybe_inject_guardrails(_generate_tools_agent(system_prompt, model_id, region, has_browser, has_code_interpreter, has_kb=has_kb))
 
     # Default Strands agent with provider-aware model
     return _maybe_inject_guardrails(_generate_strands_default(system_prompt, model_id, region, provider))

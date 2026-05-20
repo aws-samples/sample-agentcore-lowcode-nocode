@@ -91,19 +91,9 @@ class TestCodeGeneratorProperty:
         assert isinstance(reqs, str)
         assert reqs == ""
 
-    def test_any_framework_value_still_generates_code(self):
-        """generate_agent_code() accepts any framework value (Strands-only, backward compat)."""
-        config = RuntimeConfig(
-            name="test",
-            framework="some_old_framework",
-            model={"modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0"},
-            system_prompt="test",
-            deployment_type="direct_code_deploy",
-            python_runtime="PYTHON_3_12",
-        )
-        code = generate_agent_code(config)
-        assert len(code) > 0
-        assert "BedrockAgentCoreApp" in code
+    # Removed: test_any_framework_value_still_generates_code — RuntimeConfig.framework
+    # is now Literal["strands_agents"]; passing a non-strands value raises ValidationError
+    # by design (Strands-only consolidation).
 
     def test_requirements_always_returns_empty(self):
         """generate_requirements() returns empty string (deps are pre-bundled).
@@ -113,7 +103,7 @@ class TestCodeGeneratorProperty:
         config = RuntimeConfig(
             name="test",
             framework="strands_agents",
-            model={"modelId": "test-model"},
+            model={"modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0"},
             system_prompt="test",
             deployment_type="direct_code_deploy",
             python_runtime="PYTHON_3_12",

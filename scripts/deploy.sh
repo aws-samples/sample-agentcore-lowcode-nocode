@@ -122,6 +122,8 @@ check_aws_credentials() {
   local account_id
   account_id=$(aws sts get-caller-identity --region "${AWS_REGION}" --query "Account" --output text)
   log_success "Authenticated to AWS account: ${account_id}"
+  log_info "Deployment target: stack '${STACK_NAME}' in region '${AWS_REGION}'"
+  log_info "(Override with AWS_REGION=... or ENVIRONMENT_NAME=... before invoking this script.)"
 }
 
 # ── Step 3: Install CDK dependencies ─────────────────────────────────
@@ -208,12 +210,19 @@ run_cdk_deploy() {
   log_info "This creates API Gateway, Lambda functions, Step Functions, DynamoDB tables, S3, and CloudFront."
   log_info "Lambda code is packaged automatically by CDK from the backend directory."
   cd "${PROJECT_ROOT}/infra"
+  # Optional platform OTEL defaults — feature is enabled iff both
+  # OTEL_ENDPOINT and OTEL_AUTH_SECRET_ARN are set. Run scripts/bootstrap-otel-secret.sh
+  # first to obtain a secret ARN.
   npx cdk deploy "${STACK_NAME}" \
     --require-approval never \
     -c environment_name="${ENVIRONMENT_NAME}" \
     -c aws_region="${AWS_REGION}" \
     -c project_name="${PROJECT_NAME}" \
-    -c cognito_users="${COGNITO_USERS}"
+    -c cognito_users="${COGNITO_USERS}" \
+    -c otel_endpoint="${OTEL_ENDPOINT:-}" \
+    -c otel_auth_secret_arn="${OTEL_AUTH_SECRET_ARN:-}" \
+    -c otel_sample_rate="${OTEL_SAMPLE_RATE:-1.0}" \
+    -c otel_service_name_prefix="${OTEL_SERVICE_NAME_PREFIX:-}"
   cd "${PROJECT_ROOT}"
   log_success "CDK stack deployed."
 }

@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import './auth/configure';
 import './index.css';
 import App from './App.tsx';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 const needsAuth = !!import.meta.env.VITE_COGNITO_USER_POOL_ID;
 
@@ -13,15 +14,19 @@ async function render() {
 
     createRoot(document.getElementById('root')!).render(
       <StrictMode>
-        <Authenticator hideSignUp={true}>
-          {() => <App />}
-        </Authenticator>
+        <ErrorBoundary>
+          <Authenticator hideSignUp={true}>
+            {() => <App />}
+          </Authenticator>
+        </ErrorBoundary>
       </StrictMode>,
     );
   } else {
     createRoot(document.getElementById('root')!).render(
       <StrictMode>
-        <App />
+        <ErrorBoundary>
+          <App />
+        </ErrorBoundary>
       </StrictMode>,
     );
   }

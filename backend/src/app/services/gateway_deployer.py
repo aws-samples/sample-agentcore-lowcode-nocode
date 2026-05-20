@@ -7,17 +7,164 @@ setup, JWT auth configuration, and resource cleanup.
 Requirements: 5.3
 """
 
+import fnmatch
 import io
+import ipaddress
 import json
 import logging
+import os
 import re
+import socket
 import time
+import urllib.parse
 import zipfile
 from typing import Optional
 
 import boto3
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# SSRF guard for OIDC discovery + any operator-supplied URL we fetch
+# ---------------------------------------------------------------------------
+
+
+class _DiscoveryUrlInvalid(ValueError):
+    """The supplied URL is structurally invalid (bad scheme, missing host, etc.)."""
+
+
+class _DiscoveryUrlBlocked(ValueError):
+    """The supplied URL points (after DNS resolution) at a disallowed network."""
+
+
+# Networks we refuse to talk to. Built once at module import time.
+# Covers loopback, link-local (IMDS at 169.254.169.254 + Lambda creds at 169.254.170.2),
+# RFC1918 private space, CGNAT, multicast, "this network", and IPv4/IPv6 reserved space.
+_DISALLOWED_NETWORKS: tuple[ipaddress._BaseNetwork, ...] = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        # IPv4
+        "0.0.0.0/8",         # "this network"
+        "10.0.0.0/8",        # RFC1918
+        "100.64.0.0/10",     # CGNAT
+        "127.0.0.0/8",       # loopback
+        "169.254.0.0/16",    # link-local (IMDS, Lambda creds)
+        "172.16.0.0/12",     # RFC1918
+        "192.0.0.0/24",      # IETF
+        "192.0.2.0/24",      # TEST-NET-1
+        "192.168.0.0/16",    # RFC1918
+        "198.18.0.0/15",     # benchmark
+        "198.51.100.0/24",   # TEST-NET-2
+        "203.0.113.0/24",    # TEST-NET-3
+        "224.0.0.0/4",       # multicast
+        "240.0.0.0/4",       # reserved (incl. 255.255.255.255)
+        # IPv6
+        "::1/128",           # loopback
+        "::/128",            # unspecified
+        "::ffff:0:0/96",     # IPv4-mapped (so an IPv4 RFC1918 mapped into v6 is also blocked
+                             # via the v4 check, but we keep this for belt-and-braces)
+        "fc00::/7",          # ULA (private)
+        "fe80::/10",         # link-local
+        "ff00::/8",          # multicast
+        "2001:db8::/32",     # documentation
+    )
+)
+
+
+def _load_oidc_host_allowlist() -> Optional[tuple[str, ...]]:
+    """Return tuple of allowed host glob patterns from env, or None if no allowlist set.
+
+    Env var: OIDC_DISCOVERY_HOST_ALLOWLIST=*.okta.com,*.auth0.com,*.amazoncognito.com
+    """
+    raw = os.environ.get("OIDC_DISCOVERY_HOST_ALLOWLIST", "").strip()
+    if not raw:
+        return None
+    parts = tuple(p.strip().lower() for p in raw.split(",") if p.strip())
+    return parts or None
+
+
+def _host_matches_allowlist(host: str, allowlist: tuple[str, ...]) -> bool:
+    host = host.lower()
+    return any(fnmatch.fnmatchcase(host, pattern) for pattern in allowlist)
+
+
+def _validate_discovery_url(url: str) -> str:
+    """Validate that ``url`` is safe to fetch from a server-side context.
+
+    Raises ``_DiscoveryUrlInvalid`` for structural problems and
+    ``_DiscoveryUrlBlocked`` if any resolved IP falls in a disallowed network or the
+    host is not on the operator-configured allowlist.
+
+    Returns the validated URL on success (caller should use this verbatim with
+    ``urlopen``). Note: a residual race remains where DNS could re-resolve to a
+    private IP between this validation and the actual ``urlopen`` call; we mitigate
+    by requiring a strict urlopen timeout in the caller. To eliminate the race
+    entirely, one would have to issue the HTTP request against a pinned IP with
+    SNI/Host overrides — out of scope here.
+    """
+    if not url or not isinstance(url, str):
+        raise _DiscoveryUrlInvalid("OIDC discovery URL is empty")
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https":
+        raise _DiscoveryUrlInvalid(
+            f"OIDC discovery URL must use https scheme (got '{parsed.scheme}')"
+        )
+    host = parsed.hostname
+    if not host:
+        raise _DiscoveryUrlInvalid("OIDC discovery URL has no host component")
+
+    allowlist = _load_oidc_host_allowlist()
+    if allowlist is not None and not _host_matches_allowlist(host, allowlist):
+        raise _DiscoveryUrlBlocked(
+            f"OIDC discovery host '{host}' is not on OIDC_DISCOVERY_HOST_ALLOWLIST"
+        )
+
+    # Resolve every A/AAAA record under a strict timeout so an attacker cannot stall
+    # us on DNS to keep a half-validated socket alive.
+    prev_timeout = socket.getdefaulttimeout()
+    socket.setdefaulttimeout(5)
+    try:
+        try:
+            infos = socket.getaddrinfo(
+                host, 443, socket.AF_UNSPEC, socket.SOCK_STREAM
+            )
+        except (socket.gaierror, socket.timeout, OSError) as e:
+            raise _DiscoveryUrlBlocked(
+                f"OIDC discovery URL host '{host}' could not be resolved: {e}"
+            ) from e
+    finally:
+        socket.setdefaulttimeout(prev_timeout)
+
+    if not infos:
+        raise _DiscoveryUrlBlocked(
+            f"OIDC discovery URL host '{host}' returned no DNS records"
+        )
+
+    for info in infos:
+        sockaddr = info[4]
+        ip_str = sockaddr[0]
+        # IPv6 sockaddr can carry a scope id like "fe80::1%eth0" — strip it.
+        if "%" in ip_str:
+            ip_str = ip_str.split("%", 1)[0]
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+        except ValueError as e:
+            raise _DiscoveryUrlBlocked(
+                f"OIDC discovery URL resolved to unparseable IP '{ip_str}': {e}"
+            ) from e
+        for net in _DISALLOWED_NETWORKS:
+            # ip_address(v4) in ip_network(v6) raises TypeError, so guard on family.
+            if ip_obj.version != net.version:
+                continue
+            if ip_obj in net:
+                raise _DiscoveryUrlBlocked(
+                    "OIDC discovery URL resolves to disallowed IP "
+                    f"({ip_str} in {net})"
+                )
+
+    return url
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +327,7 @@ CUSTOMER_SUPPORT_TOOLS_SCHEMA = {
 }
 
 DYNAMIC_TOOLS_LAMBDA_CODE = """
+import ipaddress
 import json
 import time
 import urllib.request
@@ -241,14 +389,35 @@ def _do_weather(location):
     desc = WMO_CODES.get(code, f"Code {code}")
     return json.dumps({"location": f"{place}, {country}", "description": desc, "temperature_F": cur.get("temperature_2m"), "humidity_pct": cur.get("relative_humidity_2m"), "wind_mph": cur.get("wind_speed_10m")})
 
+_FETCH_BLOCKED_NETS = [ipaddress.ip_network(n) for n in (
+    "0.0.0.0/8","10.0.0.0/8","100.64.0.0/10","127.0.0.0/8","169.254.0.0/16",
+    "172.16.0.0/12","192.0.0.0/24","192.168.0.0/16","198.18.0.0/15","224.0.0.0/4",
+    "240.0.0.0/4","::1/128","::/128","::ffff:0:0/96","fc00::/7","fe80::/10","ff00::/8",
+)]
+
 def _do_fetch_webpage(url):
-    # SECURITY: Validate URL scheme to prevent SSRF via file://, gopher://, etc.
+    # SECURITY: Validate scheme + DNS-resolve host and block private/link-local/IMDS
+    # ranges. Substring/literal-host denylists are bypassable via DNS rebinding.
+    import socket as _socket
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
         return json.dumps({"error": "Only http/https URLs are allowed"})
     host = (parsed.hostname or "").lower()
-    if host in ("169.254.169.254", "metadata.google.internal", "localhost", "127.0.0.1", "0.0.0.0"):
-        return json.dumps({"error": "Requests to internal endpoints are blocked"})
+    if not host:
+        return json.dumps({"error": "URL has no host component"})
+    try:
+        infos = _socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), _socket.AF_UNSPEC, _socket.SOCK_STREAM)
+    except Exception as e:
+        return json.dumps({"error": f"DNS resolution failed: {e}"})
+    for info in infos:
+        ip_str = info[4][0].split("%", 1)[0]
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+        except ValueError:
+            return json.dumps({"error": f"Unparseable resolved IP: {ip_str}"})
+        for net in _FETCH_BLOCKED_NETS:
+            if ip_obj.version == net.version and ip_obj in net:
+                return json.dumps({"error": "Requests to internal/private endpoints are blocked"})
     text = _http_get(url, timeout=12).decode(errors="replace")
     return json.dumps({"url": url, "content": text[:8000]})
 
@@ -843,18 +1012,34 @@ def _create_external_oauth_config(identity_config: dict, region: str) -> dict:
     scopes = identity_config.get("scopes", [])
     audience = identity_config.get("audience", "")
 
-    # Derive token_endpoint from discovery document
+    # Derive token_endpoint from discovery document.
+    # The URL came from operator-supplied identity_config; validate it before any
+    # DNS-aware HTTP call so we can't be tricked into hitting the IMDS endpoint
+    # (169.254.169.254), Lambda credentials endpoint (169.254.170.2), or any
+    # private-network host. See _validate_discovery_url() for the policy.
     token_endpoint = ""
     if discovery_url:
-        try:
-            import urllib.request
+        import urllib.request
 
-            req = urllib.request.Request(discovery_url, headers={"Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=10) as resp:  # nosemgrep: dynamic-urllib-use-detected -- URL from Cognito OIDC discovery endpoint (AWS-controlled)
+        # Raises _DiscoveryUrlInvalid / _DiscoveryUrlBlocked (both ValueError) on
+        # any policy violation. We deliberately do NOT swallow these — a half-
+        # configured gateway with a bad discovery_url is worse than a failed deploy.
+        validated_url = _validate_discovery_url(discovery_url)
+
+        req = urllib.request.Request(validated_url, headers={"Accept": "application/json"})
+        try:
+            # Strict 10s timeout so an attacker can't burn CPU by stalling us on
+            # the actual fetch. The host has been validated above; the residual
+            # DNS-rebinding race window is bounded by this timeout.
+            with urllib.request.urlopen(req, timeout=10) as resp:  # nosemgrep: dynamic-urllib-use-detected -- URL validated by _validate_discovery_url (scheme=https + IP denylist + optional allowlist)
                 discovery_doc = json.loads(resp.read().decode())
                 token_endpoint = discovery_doc.get("token_endpoint", "")
         except Exception as e:
-            logger.warning("Could not fetch OIDC discovery document from %s: %s", discovery_url, e)
+            # Re-raise: a transient discovery-doc fetch failure must fail the
+            # deploy, not silently produce a gateway with empty token_endpoint.
+            raise RuntimeError(
+                f"Failed to fetch OIDC discovery document from {validated_url}: {e}"
+            ) from e
 
     authorizer_config = {
         "customJWTAuthorizer": {

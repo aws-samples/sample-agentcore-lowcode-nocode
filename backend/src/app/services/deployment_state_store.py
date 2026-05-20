@@ -186,7 +186,12 @@ def serialize_deployment_state(state: DeploymentState) -> dict:
     Returns:
         Dict suitable for DynamoDB ``put_item``.
     """
-    item = state.model_dump(mode="json")
+    # exclude_none=True so optional fields (e.g. runtime_id before the runtime
+    # is created) are omitted from the DDB item rather than written as NULL.
+    # The runtime_id-index GSI rejects NULL key values; see tasks/lessons.md
+    # Bug 111. Also keeps the item smaller and back-compat with consumers
+    # that key off attribute presence.
+    item = state.model_dump(mode="json", exclude_none=True)
     # Always recompute TTL from started_at
     item["ttl"] = _compute_ttl(state.started_at)
     # DynamoDB requires Decimal instead of float

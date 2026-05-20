@@ -86,16 +86,27 @@ main() {
   rm -rf "${OUTPUT_DIR}"
   mkdir -p "${OUTPUT_DIR}"
 
-  # Bundle 1: base (bedrock-agentcore + boto3)
-  log_info "Building base bundle (bedrock-agentcore + boto3)..."
+  # OpenTelemetry packages — required when the Observability node is wired
+  # to push traces to any OTLP backend (Langfuse, Phoenix, Honeycomb, AgentCore
+  # native CloudWatch sidecar, etc.). Strands' setup_otlp_exporter() lazily
+  # imports the HTTP exporter, so it MUST be in the bundle.
+  local otel_packages=(
+    "opentelemetry-api"
+    "opentelemetry-sdk"
+    "opentelemetry-semantic-conventions"
+    "opentelemetry-exporter-otlp-proto-http"
+  )
+
+  # Bundle 1: base (bedrock-agentcore + boto3 + opentelemetry)
+  log_info "Building base bundle (bedrock-agentcore + boto3 + opentelemetry)..."
   local base_dir="${OUTPUT_DIR}/base"
-  install_packages "${base_dir}" bedrock-agentcore boto3
+  install_packages "${base_dir}" bedrock-agentcore boto3 "${otel_packages[@]}"
   create_bundle_zip "${base_dir}" "${OUTPUT_DIR}/base.zip"
 
-  # Bundle 2: strands-mcp (bedrock-agentcore + boto3 + strands-agents + strands-agents-tools + mcp)
-  log_info "Building strands-mcp bundle (bedrock-agentcore + boto3 + strands-agents + strands-agents-tools + mcp)..."
+  # Bundle 2: strands-mcp (everything in base + strands-agents + strands-agents-tools + mcp)
+  log_info "Building strands-mcp bundle (bedrock-agentcore + boto3 + strands-agents + strands-agents-tools + mcp + opentelemetry)..."
   local strands_dir="${OUTPUT_DIR}/strands-mcp"
-  install_packages "${strands_dir}" bedrock-agentcore boto3 strands-agents strands-agents-tools mcp
+  install_packages "${strands_dir}" bedrock-agentcore boto3 strands-agents strands-agents-tools mcp "${otel_packages[@]}"
   create_bundle_zip "${strands_dir}" "${OUTPUT_DIR}/strands-mcp.zip"
 
   local base_size strands_size

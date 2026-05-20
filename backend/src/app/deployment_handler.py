@@ -11,6 +11,9 @@ API endpoints:
 Requirements: 3.1, 3.7, 9.1, 9.2, 9.3, 9.4
 """
 
+# Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
+import app.services._otel_platform  # noqa: F401
+
 import json
 import logging
 import os
@@ -110,23 +113,53 @@ def _get_state_store() -> DeploymentStateStore:
 
 
 def _scan_for_runtime(table, runtime_id: str) -> Optional[dict]:
-    """Scan DynamoDB for a deployment record matching the given runtime_id.
+    """Look up a deployment record by runtime_id.
 
-    Paginates through all items to avoid the DynamoDB Limit pitfall
-    (Limit caps items *evaluated*, not items *returned*).
+    Audit issue #7: previously this did a full O(N) Scan with a
+    FilterExpression. The DeploymentsTable now has a `runtime_id-index` GSI,
+    so we Query that GSI first (O(1) on the partition key). If the GSI Query
+    returns nothing — which happens for partial-failed deploys whose
+    runtime_id was never populated, so the item was never projected onto
+    the GSI — we fall back to the original paginated Scan so the caller
+    can still find the record via the deployment_id surrogate.
     """
-    kwargs = {
+    if not runtime_id:
+        return None
+
+    # Fast path: Query the runtime_id GSI.
+    try:
+        query_kwargs: dict = {
+            "IndexName": "runtime_id-index",
+            "KeyConditionExpression": "runtime_id = :rid",
+            "ExpressionAttributeValues": {":rid": runtime_id},
+            "Limit": 1,
+        }
+        resp = table.query(**query_kwargs)
+        items = resp.get("Items", [])
+        if items:
+            return items[0]
+    except Exception as exc:
+        # GSI may be missing on stacks that haven't redeployed since the
+        # CDK change; log and fall through to the scan path so we don't
+        # break delete/test on those deployments.
+        logger.warning(
+            "runtime_id-index Query failed (%s); falling back to Scan", exc,
+        )
+
+    # Fallback: paginated Scan (covers partial-failed deploys whose
+    # runtime_id attribute was never set, plus pre-GSI stacks).
+    scan_kwargs: dict = {
         "FilterExpression": "runtime_id = :rid",
         "ExpressionAttributeValues": {":rid": runtime_id},
     }
     while True:
-        resp = table.scan(**kwargs)
+        resp = table.scan(**scan_kwargs)
         items = resp.get("Items", [])
         if items:
             return items[0]
         if "LastEvaluatedKey" not in resp:
             break
-        kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+        scan_kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
     return None
 
 
@@ -202,11 +235,26 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     store = _get_state_store()
     store.create(state)
 
+    # Auto-derive connected_tools from sibling configs so the codegen step
+    # always sees the right tool list, even when a caller forgot to include
+    # `connectedTools` explicitly. See tasks/lessons.md Bug 89.
+    auto_connected = list(request.connected_tools or [])
+    if request.knowledge_base_config and "knowledge_base" not in auto_connected:
+        auto_connected.append("knowledge_base")
+    if request.memory_config and "memory" not in auto_connected:
+        auto_connected.append("memory")
+    if request.gateway_config and "gateway" not in auto_connected:
+        auto_connected.append("gateway")
+    if request.guardrails_config and "guardrails" not in auto_connected:
+        auto_connected.append("guardrails")
+    if request.observability_config and "observability" not in auto_connected:
+        auto_connected.append("observability")
+
     sfn_input = {
         "deployment_id": deployment_id,
         "workflow_id": request.node_id,
         "config": request.config.model_dump(mode="json", by_alias=True),
-        "connected_tools": request.connected_tools or [],
+        "connected_tools": auto_connected,
         "template_id": request.template_id,
     }
     # Only include gateway fields if gateway is configured
@@ -230,6 +278,8 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         sfn_input["knowledge_base_config"] = request.knowledge_base_config
     if request.guardrails_config:
         sfn_input["guardrails_config"] = request.guardrails_config
+    if getattr(request, "observability_config", None):
+        sfn_input["observability_config"] = request.observability_config
 
     execution_arn: Optional[str] = None
     try:
@@ -325,8 +375,8 @@ async def handle_list_deployments(
 
 
 @deployment_app.post("/api/test-runtime", response_model=TestResponse, response_model_by_alias=True)
-async def handle_test_runtime(request: TestRequest) -> TestResponse:
-    """Invoke a deployed runtime via boto3 API.
+async def handle_test_runtime(request: TestRequest, raw_request: Request) -> TestResponse:
+    """Invoke a deployed runtime via boto3 API. Caller must own the deployment.
 
     Requirements: 9.1, 9.2, 9.4
     """
@@ -345,6 +395,7 @@ async def handle_test_runtime(request: TestRequest) -> TestResponse:
             return TestResponse(success=False, error="Invalid runtime_id format")
 
         region = config.aws_region
+        caller_sub = _get_user_id(raw_request)
 
         # Look up deployment state to get runtime_arn and gateway_config
         store = _get_state_store()
@@ -360,6 +411,15 @@ async def handle_test_runtime(request: TestRequest) -> TestResponse:
                 runtime_id,
                 exc,
             )
+
+        # Tenant isolation: caller must own the deployment.
+        # Pre-tenancy records (user_id=None) are accessible to keep legacy
+        # data working until a backfill pass; new deploys always carry user_id.
+        # See tasks/lessons.md Bug 37.
+        if deployment_state:
+            owner = deployment_state.get("user_id")
+            if owner and owner != caller_sub:
+                raise HTTPException(status_code=404, detail="Runtime not found")
 
         # Build prompt with conversation history
         prompt = request.input
@@ -398,12 +458,18 @@ async def handle_test_runtime(request: TestRequest) -> TestResponse:
                 except Exception:
                     logger.warning("Could not get Cognito token for gateway auth validation")
 
-        # Invoke runtime via boto3 API
+        # Invoke runtime via boto3 API. Pass session_id BOTH as runtimeSessionId
+        # (AgentCore-level routing) and inside payload (so the agent's invoke()
+        # body can read it for memory persistence) — see tasks/lessons.md Bug 29:
+        # the memory agent reads payload["session_id"], not the AgentCore context.
         try:
             agentcore_client = _create_agentcore_client(region)
+            payload_body: dict[str, str] = {"prompt": prompt}
+            if request.session_id:
+                payload_body["session_id"] = request.session_id
             invoke_params = {
                 "agentRuntimeArn": runtime_arn,
-                "payload": json.dumps({"prompt": prompt}),
+                "payload": json.dumps(payload_body),
             }
             if request.session_id:
                 invoke_params["runtimeSessionId"] = request.session_id
@@ -630,11 +696,19 @@ def _validate_deployment_id(deployment_id: str) -> str:
     response_model=DeleteResponse,
     response_model_by_alias=True,
 )
-async def handle_delete_runtime(runtime_id: str) -> DeleteResponse:
-    """Delete a runtime and clean up all associated resources."""
+async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> DeleteResponse:
+    """Delete a runtime and clean up all associated resources. Caller must own it."""
     runtime_id = _validate_runtime_id(runtime_id)
     cleanup_messages: list[str] = []
+    # Audit #11 (tasks/lessons.md Bug 106): track per-step cleanup failures.
+    # Bug 44 only flipped the success flag for runtime-destroy; gateway / KB /
+    # memory / guardrail / policy-engine / mcp-server cleanups still swallowed
+    # exceptions silently into cleanup_messages while returning success=True.
+    # Now: any failure here flips overall_success to False so the caller gets
+    # an honest signal that resources may have leaked.
+    cleanup_failures: list[str] = []
     region = config.aws_region
+    caller_sub = _get_user_id(raw_request)
 
     # Look up deployment state for gateway config.
     # Try by runtime_id first, then fall back to deployment_id (covers partial failures
@@ -654,6 +728,13 @@ async def handle_delete_runtime(runtime_id: str) -> DeleteResponse:
             gateway_result = deployment_record.get("gateway_result")
             if gateway_result:
                 gateway_config = gateway_result
+            # Tenant isolation: caller must own the deployment.
+            # See tasks/lessons.md Bug 37.
+            owner = deployment_record.get("user_id")
+            if owner and owner != caller_sub:
+                raise HTTPException(status_code=404, detail="Runtime not found")
+    except HTTPException:
+        raise
     except Exception as exc:
         cleanup_messages.append(f"State lookup error: {exc}")
 
@@ -663,8 +744,13 @@ async def handle_delete_runtime(runtime_id: str) -> DeleteResponse:
         try:
             mcp_destroy = destroy_runtime(mcp_server_runtime_id, region)
             cleanup_messages.append(f"MCP server runtime destroyed: {mcp_destroy.get('message', 'ok')}")
+            # destroy_runtime() can return success:false without raising
+            # (AccessDenied path) — surface that as a cleanup failure too.
+            if not mcp_destroy.get("success", True):
+                cleanup_failures.append("mcp_server_runtime")
         except Exception as exc:
             cleanup_messages.append(f"MCP server runtime cleanup error: {exc}")
+            cleanup_failures.append("mcp_server_runtime")
 
     # Step 0.5: Clean up policy engine if one was attached
     # Correct order: detach from gateway → delete policies → delete engine
@@ -715,6 +801,7 @@ async def handle_delete_runtime(runtime_id: str) -> DeleteResponse:
                 cleanup_messages.append(f"Policy engine deleted: {policy_engine_id}")
             except Exception as exc:
                 cleanup_messages.append(f"Policy engine cleanup error: {exc}")
+                cleanup_failures.append("policy_engine")
 
     # Step 0.6: Clean up memory if one was created
     if deployment_record:
@@ -727,6 +814,7 @@ async def handle_delete_runtime(runtime_id: str) -> DeleteResponse:
                 cleanup_messages.append(f"Memory deleted: {memory_id}")
             except Exception as exc:
                 cleanup_messages.append(f"Memory cleanup error: {exc}")
+                cleanup_failures.append("memory")
 
     # Step 0.7: Clean up guardrail if we created it
     if deployment_record:
@@ -740,6 +828,7 @@ async def handle_delete_runtime(runtime_id: str) -> DeleteResponse:
                     cleanup_messages.append(f"Guardrail deleted: {guardrail_id}")
                 except Exception as exc:
                     cleanup_messages.append(f"Guardrail cleanup error: {exc}")
+                    cleanup_failures.append("guardrail")
 
     # Step 1: Clean up gateway resources
     if gateway_config:
@@ -750,8 +839,15 @@ async def handle_delete_runtime(runtime_id: str) -> DeleteResponse:
                 gateway_config=gateway_config,
             )
             cleanup_messages.extend(gw_log)
+            # cleanup_gateway_resources() never raises but reports per-resource
+            # errors as " ... error:" lines in its log. Treat any of those as
+            # a cleanup failure so we don't return success=True when a target
+            # / pool / Lambda was actually leaked.
+            if any(" error:" in line or " error " in line for line in gw_log):
+                cleanup_failures.append("gateway")
         except Exception as exc:
             cleanup_messages.append(f"Gateway cleanup error: {exc}")
+            cleanup_failures.append("gateway")
 
     # Step 1.5: Clean up Knowledge Base resources
     kb_result = (deployment_record or {}).get("knowledge_base_result") or {}
@@ -780,6 +876,7 @@ async def handle_delete_runtime(runtime_id: str) -> DeleteResponse:
                 pass  # May not exist
         except Exception as exc:
             cleanup_messages.append(f"KB Lambda cleanup error: {exc}")
+            cleanup_failures.append("kb_lambda")
     # Delete Knowledge Base if we created it
     if kb_result.get("created_by_flow"):
         try:
@@ -805,17 +902,35 @@ async def handle_delete_runtime(runtime_id: str) -> DeleteResponse:
                     cleanup_messages.append(f"KB IAM role deleted: {kb_iam_role_name}")
         except Exception as exc:
             cleanup_messages.append(f"KB cleanup error: {exc}")
+            cleanup_failures.append("knowledge_base")
 
     # Step 2: Destroy the runtime via boto3
+    runtime_destroy_failed = False
     try:
         destroy_result = destroy_runtime(runtime_id, region)
         cleanup_messages.append(destroy_result.get("message", "Runtime destroy completed"))
+        # destroy_runtime returns success:false on AccessDenied / other errors;
+        # propagate that to the top-level response. See tasks/lessons.md Bug 44
+        # — previously this handler returned success:true even when the
+        # underlying destroy failed, masking IAM and AccessDenied errors.
+        if not destroy_result.get("success", True):
+            runtime_destroy_failed = True
     except Exception:
         logger.exception("Runtime destroy error for %s", runtime_id)
         cleanup_messages.append("Runtime destroy error (check server logs)")
+        runtime_destroy_failed = True
 
+    # Audit #11 (tasks/lessons.md Bug 106): overall_success is False if either
+    # runtime-destroy failed (Bug 44) OR any other cleanup step (gateway, KB,
+    # memory, guardrail, policy engine, MCP server) leaked. Failed steps are
+    # listed in the response message so the caller can act on the leak.
+    overall_success = not runtime_destroy_failed and not cleanup_failures
+    if cleanup_failures:
+        cleanup_messages.append(
+            f"Cleanup failures in: {', '.join(sorted(set(cleanup_failures)))}"
+        )
     summary = "; ".join(cleanup_messages) if cleanup_messages else "Cleanup completed"
-    return DeleteResponse(success=True, message=summary)
+    return DeleteResponse(success=overall_success, message=summary)
 
 
 # ---------------------------------------------------------------------------
@@ -831,48 +946,57 @@ async def handle_generate_tool(request: ToolGenerateRequest):
     Generation mode (has history): async self-invoke + polling to avoid
     API Gateway's 30s hard timeout (Sonnet generation takes 40-60s).
     """
-    has_prior_context = bool(request.conversation_history) or request.existing_tool is not None
+    try:
+        has_prior_context = bool(request.conversation_history) or request.existing_tool is not None
 
-    if not has_prior_context:
-        # Clarification mode — fast, stays synchronous
-        result = generate_tool(
-            prompt=request.prompt,
-            conversation_history=request.conversation_history,
-            existing_tool=request.existing_tool,
-            region=config.aws_region,
-        )
-        return ToolGenerateResponse(**result)
+        if not has_prior_context:
+            # Clarification mode — fast, stays synchronous
+            result = generate_tool(
+                prompt=request.prompt,
+                conversation_history=request.conversation_history,
+                existing_tool=request.existing_tool,
+                region=config.aws_region,
+            )
+            return ToolGenerateResponse(**result)
 
-    # Generation mode — async to avoid 30s API Gateway timeout
-    job_id = f"gen-{uuid.uuid4().hex[:12]}"
+        # Generation mode — async to avoid 30s API Gateway timeout
+        job_id = f"gen-{uuid.uuid4().hex[:12]}"
 
-    table = _get_deploy_table()
-    table.put_item(
-        Item={
-            "deployment_id": job_id,
-            "status": "running",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-    )
-
-    lambda_client = boto3.client("lambda", region_name=config.aws_region)
-    function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
-    lambda_client.invoke(
-        FunctionName=function_name,
-        InvocationType="Event",
-        Payload=json.dumps(
-            {
-                "_async_generate": True,
-                "job_id": job_id,
-                "prompt": request.prompt,
-                "conversation_history": request.conversation_history,
-                "existing_tool": request.existing_tool,
-                "region": config.aws_region,
+        table = _get_deploy_table()
+        table.put_item(
+            Item={
+                "deployment_id": job_id,
+                "status": "running",
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
-        ).encode(),
-    )
+        )
 
-    return {"jobId": job_id, "status": "running"}
+        lambda_client = boto3.client("lambda", region_name=config.aws_region)
+        function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
+        lambda_client.invoke(
+            FunctionName=function_name,
+            InvocationType="Event",
+            Payload=json.dumps(
+                {
+                    "_async_generate": True,
+                    "job_id": job_id,
+                    "prompt": request.prompt,
+                    "conversation_history": request.conversation_history,
+                    "existing_tool": request.existing_tool,
+                    "region": config.aws_region,
+                }
+            ).encode(),
+        )
+
+        return {"jobId": job_id, "status": "running"}
+    except Exception as e:
+        # Catch-all so the client gets structured JSON instead of plaintext
+        # "Internal Server Error" 500. See tasks/lessons.md Bug 33.
+        logger.exception("handle_generate_tool failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"Tool generation failed: {type(e).__name__}: {e}"},
+        ) from e
 
 
 @deployment_app.get("/api/generate-tool/{job_id}")
@@ -927,36 +1051,45 @@ async def handle_test_tool(request: ToolTestRequest):
     The actual test runs in an async Lambda invocation to avoid the
     API Gateway 30s timeout. Poll GET /api/test-tool/{testId} for results.
     """
-    test_id = f"test-{uuid.uuid4().hex[:12]}"
+    try:
+        test_id = f"test-{uuid.uuid4().hex[:12]}"
 
-    # Store initial "running" state
-    table = _get_deploy_table()
-    table.put_item(
-        Item={
-            "deployment_id": test_id,
-            "status": "running",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-        }
-    )
-
-    # Async invoke self to run the test (InvocationType=Event returns immediately)
-    lambda_client = boto3.client("lambda", region_name=config.aws_region)
-    function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
-    lambda_client.invoke(
-        FunctionName=function_name,
-        InvocationType="Event",
-        Payload=json.dumps(
-            {
-                "_async_test": True,
-                "test_id": test_id,
-                "lambda_code": request.lambda_code,
-                "test_cases": [tc.model_dump(by_alias=True) for tc in request.test_cases],
-                "region": config.aws_region,
+        # Store initial "running" state
+        table = _get_deploy_table()
+        table.put_item(
+            Item={
+                "deployment_id": test_id,
+                "status": "running",
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
-        ).encode(),
-    )
+        )
 
-    return {"testId": test_id, "status": "running"}
+        # Async invoke self to run the test (InvocationType=Event returns immediately)
+        lambda_client = boto3.client("lambda", region_name=config.aws_region)
+        function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
+        lambda_client.invoke(
+            FunctionName=function_name,
+            InvocationType="Event",
+            Payload=json.dumps(
+                {
+                    "_async_test": True,
+                    "test_id": test_id,
+                    "lambda_code": request.lambda_code,
+                    "test_cases": [tc.model_dump(by_alias=True) for tc in request.test_cases],
+                    "region": config.aws_region,
+                }
+            ).encode(),
+        )
+
+        return {"testId": test_id, "status": "running"}
+    except Exception as e:
+        # Catch-all so the client gets structured JSON instead of plaintext
+        # "Internal Server Error" 500. See tasks/lessons.md Bug 33.
+        logger.exception("handle_test_tool failed")
+        raise HTTPException(
+            status_code=500,
+            detail={"error": f"Tool test failed: {type(e).__name__}: {e}"},
+        ) from e
 
 
 @deployment_app.get("/api/test-tool/{test_id}")

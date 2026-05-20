@@ -8,9 +8,13 @@ Supports two modes:
 Requirements: 3.x (guardrails integration)
 """
 
+# Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
+import app.services._otel_platform  # noqa: F401
+
 import logging
 import os
 import time
+import uuid
 from typing import Optional
 
 import boto3
@@ -123,6 +127,30 @@ def _build_word_config(word_filters: list) -> dict:
     return {"wordsConfig": words}
 
 
+def _find_guardrail_id_by_name(bedrock, name: str) -> Optional[str]:
+    """Return the guardrailId of a guardrail with the given name, or None.
+
+    Used for idempotent upsert when ``create_guardrail`` raises
+    ``ResourceAlreadyExistsException`` from a prior partial run.
+    """
+    try:
+        paginator = bedrock.get_paginator("list_guardrails")
+        for page in paginator.paginate():
+            for gr in page.get("guardrails", []):
+                if gr.get("name") == name:
+                    return gr.get("id") or gr.get("guardrailId")
+    except Exception:
+        # Fallback: non-paginated call
+        try:
+            resp = bedrock.list_guardrails()
+            for gr in resp.get("guardrails", []):
+                if gr.get("name") == name:
+                    return gr.get("id") or gr.get("guardrailId")
+        except Exception:
+            logger.warning("list_guardrails failed during upsert lookup", exc_info=True)
+    return None
+
+
 def handler(event: dict, context) -> dict:
     deployment_id = event.get("deployment_id", "")
 
@@ -198,9 +226,32 @@ def handler(event: dict, context) -> dict:
             if word_policy:
                 create_params["wordPolicyConfig"] = word_policy
 
-        resp = bedrock.create_guardrail(**create_params)
-        guardrail_id = resp["guardrailId"]
-        _LOG("Created guardrail: %s", guardrail_id)
+        # Bug 82: idempotent upsert. A prior partial run can leave a
+        # guardrail with this name behind; create_guardrail then fails with
+        # ResourceAlreadyExistsException. Look up the existing guardrail by
+        # name and update_guardrail in place, falling back to a UUID-suffixed
+        # rename if the name lookup races.
+        guardrail_id: Optional[str] = None
+        try:
+            resp = bedrock.create_guardrail(**create_params)
+            guardrail_id = resp["guardrailId"]
+            _LOG("Created guardrail: %s", guardrail_id)
+        except bedrock.exceptions.ResourceAlreadyExistsException:
+            existing_id = _find_guardrail_id_by_name(bedrock, name)
+            if existing_id:
+                _LOG("Guardrail name %s already exists (id=%s); updating in place", name, existing_id)
+                update_params = {k: v for k, v in create_params.items() if k != "name"}
+                update_params["guardrailIdentifier"] = existing_id
+                bedrock.update_guardrail(**update_params)
+                guardrail_id = existing_id
+            else:
+                # Race or rename collision: retry once with a UUID-suffixed name.
+                fallback_name = f"{name}-{uuid.uuid4().hex[:8]}"
+                _LOG("Guardrail %s exists but lookup failed; retrying with name %s", name, fallback_name)
+                create_params["name"] = fallback_name
+                resp = bedrock.create_guardrail(**create_params)
+                guardrail_id = resp["guardrailId"]
+                _LOG("Created guardrail with fallback name %s: %s", fallback_name, guardrail_id)
 
         # Wait for guardrail to be READY
         for attempt in range(24):  # 120s max

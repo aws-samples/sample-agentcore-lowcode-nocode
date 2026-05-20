@@ -39,6 +39,8 @@ from app.models.components import (
     EvaluationConfiguration,
     PolicyConfiguration,
     A2AConfiguration,
+    GuardrailsConfiguration,
+    ToolConfiguration,
 )
 from app.models.enums import (
     AgentCoreComponentType,
@@ -227,6 +229,14 @@ def _make_a2a_config(name: str) -> A2AConfiguration:
     )
 
 
+def _make_guardrails_config(name: str) -> GuardrailsConfiguration:
+    return GuardrailsConfiguration(component_type="guardrails", name=name, enabled=True)
+
+
+def _make_tool_config(name: str) -> ToolConfiguration:
+    return ToolConfiguration(component_type="tool", name=name, tool_id=name, enabled=True)
+
+
 COMPONENT_CONFIG_FACTORIES = {
     AgentCoreComponentType.RUNTIME: _make_runtime_config,
     AgentCoreComponentType.MEMORY: _make_memory_config,
@@ -238,6 +248,8 @@ COMPONENT_CONFIG_FACTORIES = {
     AgentCoreComponentType.EVALUATION: _make_evaluation_config,
     AgentCoreComponentType.POLICY: _make_policy_config,
     AgentCoreComponentType.A2A: _make_a2a_config,
+    AgentCoreComponentType.GUARDRAILS: _make_guardrails_config,
+    AgentCoreComponentType.TOOL: _make_tool_config,
 }
 
 
@@ -305,6 +317,8 @@ def workflow_with_edges_st(draw):
         AgentCoreComponentType.EVALUATION,
         AgentCoreComponentType.POLICY,
         AgentCoreComponentType.A2A,
+        AgentCoreComponentType.GUARDRAILS,
+        AgentCoreComponentType.TOOL,
     ]
     num_extra = draw(st.integers(min_value=1, max_value=4))
     for i in range(num_extra):

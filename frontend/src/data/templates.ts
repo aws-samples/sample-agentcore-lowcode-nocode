@@ -282,7 +282,7 @@ Guidelines:
           framework: 'strands_agents',
           model: {
             provider: 'anthropic',
-            modelId: rm('us.anthropic.claude-sonnet-4-20250514-v1:0'),
+            modelId: rm('us.anthropic.claude-sonnet-4-5-20250929-v1:0'),
             temperature: 0.7,
             topP: 0.9,
           },
@@ -508,7 +508,10 @@ Demo customers: CUST-001 (John Doe), CUST-002 (Jane Smith)`,
           systemPrompt: 'You are a helpful assistant with embedded tools. Use the get_weather tool to check weather, search_web to find information, and fetch_url to read web pages. Always use tools when the user asks for real-time data.',
           deploymentType: 'direct_code_deploy',
           pythonRuntime: 'PYTHON_3_13',
-          protocol: 'MCP',
+          // Generated agent uses BedrockAgentCoreApp HTTP entrypoint, not FastMCP.
+          // Setting protocol: 'MCP' makes AgentCore reject every invocation with 406.
+          // See tasks/lessons.md Bug 28. (A real FastMCP server is a v2 effort.)
+          protocol: 'HTTP',
           idleTimeout: 300,
           maxLifetime: 3600,
           enableOtel: false,

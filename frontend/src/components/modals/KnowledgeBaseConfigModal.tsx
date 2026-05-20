@@ -39,11 +39,14 @@ const EMBEDDING_MODELS = [
 ];
 
 const FOUNDATION_MODELS = [
-  { value: 'anthropic.claude-3-5-sonnet-20241022-v2:0', label: 'Claude 3.5 Sonnet v2' },
-  { value: 'anthropic.claude-3-haiku-20240307-v1:0', label: 'Claude 3 Haiku' },
-  { value: 'amazon.titan-text-premier-v1:0', label: 'Amazon Titan Text Premier' },
-  { value: 'meta.llama3-70b-instruct-v1:0', label: 'Llama 3 70B Instruct' },
-  { value: 'mistral.mistral-large-2402-v1:0', label: 'Mistral Large' },
+  // Bedrock-current models (Oct 2025 – May 2026 policy window).
+  // Older models (Titan, Llama 3, Mistral Large 2402, Claude 3.x) removed —
+  // Bedrock flags them Legacy. See tasks/lessons.md Bug 113.
+  { value: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0', label: 'Claude Sonnet 4.5' },
+  { value: 'us.anthropic.claude-haiku-4-5-20251001-v1:0', label: 'Claude Haiku 4.5' },
+  { value: 'us.anthropic.claude-opus-4-5-20251101-v1:0', label: 'Claude Opus 4.5' },
+  { value: 'us.amazon.nova-2-lite-v1:0', label: 'Amazon Nova 2 Lite' },
+  { value: 'us.amazon.nova-premier-v1:0', label: 'Amazon Nova Premier' },
 ];
 
 const CHUNKING_STRATEGIES: { value: KBChunkingStrategy; label: string; description: string }[] = [
@@ -90,7 +93,7 @@ function createDefaultKBConfig(): KnowledgeBaseToolConfig {
     maxTokens: 300,
     overlapPercentage: 20,
     embeddingModelId: 'amazon.titan-embed-text-v2:0',
-    foundationModelId: 'anthropic.claude-3-5-sonnet-20241022-v2:0',
+    foundationModelId: 'us.anthropic.claude-sonnet-4-5-20250929-v1:0',
     vectorStoreType: 's3_vectors',
     parsingStrategy: 'default',
     dataDeletionPolicy: 'DELETE',
@@ -416,7 +419,7 @@ export function KnowledgeBaseConfigModal({
         <SelectField
           label="RAG Foundation Model"
           id="kb-foundation-model"
-          value={config.foundationModelId || 'anthropic.claude-3-5-sonnet-20241022-v2:0'}
+          value={config.foundationModelId || 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'}
           onChange={(v) => updateField('foundationModelId', v)}
           options={FOUNDATION_MODELS}
           required

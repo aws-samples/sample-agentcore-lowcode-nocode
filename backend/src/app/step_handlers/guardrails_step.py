@@ -240,8 +240,9 @@ def handler(event: dict, context) -> dict:
             existing_id = _find_guardrail_id_by_name(bedrock, name)
             if existing_id:
                 _LOG("Guardrail name %s already exists (id=%s); updating in place", name, existing_id)
-                update_params = {k: v for k, v in create_params.items() if k != "name"}
-                update_params["guardrailIdentifier"] = existing_id
+                # UpdateGuardrail requires `name` as a mandatory body field
+                # (separate from guardrailIdentifier).
+                update_params = {**create_params, "guardrailIdentifier": existing_id}
                 bedrock.update_guardrail(**update_params)
                 guardrail_id = existing_id
             else:

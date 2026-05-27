@@ -609,15 +609,11 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
                 "parsingStrategy": "BEDROCK_DATA_AUTOMATION",
                 "bedrockDataAutomationConfiguration": {"parsingModality": "MULTIMODAL"},
             }
-            # BDA parsing requires `supplementalDataStorageConfiguration` on
-            # the KB itself for intermediate output. See tasks/lessons.md Bug 95.
-            # We point it at the artifacts bucket under a per-KB prefix so
-            # cleanup is implicit on bucket lifecycle. Set on a sibling field
-            # the caller of _build_data_source_config can read.
-            bda_supp_uri = kb_config.get("bdaSupplementalS3Uri") or (
-                f"s3://{os.environ.get('ARTIFACTS_BUCKET_NAME','')}/kb-supplemental/{kb_config.get('kbName','default')}/"
-            )
-            ingestion_config["_bdaSupplementalS3Uri"] = bda_supp_uri
+            # BDA's intermediate-output bucket is configured on the KB itself
+            # via `supplementalDataStorageConfiguration` at create_knowledge_base
+            # time (see the vector_kb_config block above). create_data_source
+            # rejects unknown keys on vectorIngestionConfiguration, so do not
+            # add anything BDA-related here.
         elif parsing_strategy == "bedrock_foundation_model":
             parsing_model_id = kb_config.get("parsingModelId", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
             fm_config: dict = {

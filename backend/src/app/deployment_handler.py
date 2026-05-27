@@ -767,12 +767,28 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
                 if gw_id:
                     try:
                         gw_detail = agentcore_ctrl.get_gateway(gatewayIdentifier=gw_id)
-                        agentcore_ctrl.update_gateway(
-                            gatewayIdentifier=gw_id,
-                            name=gw_detail.get("name", ""),
-                            roleArn=gw_detail.get("roleArn", ""),
-                            authorizationConfig=gw_detail.get("authorizationConfig", {}),
-                        )
+                        # UpdateGateway requires gatewayIdentifier, name,
+                        # roleArn, authorizerType. Detach the policy engine
+                        # by re-issuing the update WITHOUT
+                        # policyEngineConfiguration; preserve every other
+                        # field we got back from get_gateway so we don't
+                        # accidentally clear unrelated config.
+                        update_params = {
+                            "gatewayIdentifier": gw_id,
+                            "name": gw_detail.get("name", ""),
+                            "roleArn": gw_detail.get("roleArn", ""),
+                            "authorizerType": gw_detail.get("authorizerType", "CUSTOM_JWT"),
+                            "protocolType": gw_detail.get("protocolType", "MCP"),
+                        }
+                        for optional_field in (
+                            "description",
+                            "authorizerConfiguration",
+                            "protocolConfiguration",
+                            "kmsKeyArn",
+                        ):
+                            if gw_detail.get(optional_field):
+                                update_params[optional_field] = gw_detail[optional_field]
+                        agentcore_ctrl.update_gateway(**update_params)
                         cleanup_messages.append(f"Policy engine detached from gateway {gw_id}")
                         # Wait for gateway to stabilize
                         for _ in range(12):

@@ -45,7 +45,7 @@ def _make_runtime_config(**overrides) -> RuntimeConfig:
         "name": "test-agent",
         "framework": "strands_agents",
         "model": {
-            "modelId": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "modelId": "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
             "provider": "anthropic",
         },
         "systemPrompt": "You are a helpful assistant.",
@@ -61,7 +61,7 @@ def _make_runtime_configuration(framework: AgentFramework, **overrides) -> Runti
         "framework": framework,
         "model": ModelConfiguration(
             provider=ModelProvider.ANTHROPIC,
-            model_id="anthropic.claude-3-5-sonnet-20241022-v2:0",
+            model_id="us.anthropic.claude-sonnet-4-5-20250929-v1:0",
         ),
         "system_prompt": "You are a helpful assistant.",
     }
@@ -80,9 +80,9 @@ _safe_text = st.text(
 
 _model_ids = st.sampled_from(
     [
-        "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
         "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-        "amazon.nova-pro-v1:0",
+        "us.amazon.nova-2-lite-v1:0",
     ]
 )
 
@@ -177,19 +177,10 @@ class TestCodeGeneratorPreservation:
         assert "fetch_webpage" in code
         assert "_converse_loop" in code
 
-    def test_strands_gateway_template_content(self):
-        """**Validates: Requirements 3.2**
-
-        strands-gateway-agent template MUST produce Strands + MCP gateway code.
-        """
-        config = _make_runtime_config()
-        code = code_generator.generate_agent_code(
-            config,
-            gateway_config=_GATEWAY_CONFIG,
-            template_id="strands-gateway-agent",
-        )
-        assert "_mcp_request" in code
-        assert "_to_bedrock_tools" in code
+    # Removed: test_strands_gateway_template_content asserted the legacy
+    # _mcp_request / _to_bedrock_tools JSON-RPC helpers. Migrated to the official
+    # Strands MCPClient pattern (per tasks/lessons.md Bug 13: gateway agent must use
+    # MCPClient + streamablehttp_client, not hand-rolled MCP helpers).
 
     def test_customer_support_template_content(self):
         """**Validates: Requirements 3.2**
@@ -391,16 +382,10 @@ class TestDeploymentGenerateAgentCodePreservation:
         code = deployment_generate_agent_code(config)
         assert model_id in code
 
-    @given(framework=_all_frameworks)
-    @settings(max_examples=9)
-    def test_property_all_frameworks_have_invoke_handler(self, framework):
-        """**Validates: Requirements 3.3**
-
-        For ANY framework, generated code MUST define invoke(payload, context).
-        """
-        config = _make_runtime_configuration(framework)
-        code = deployment_generate_agent_code(config)
-        assert "async def invoke(payload, context):" in code
+    # Removed: test_property_all_frameworks_have_invoke_handler asserted the legacy
+    # `async def invoke(payload, context):` signature. The current
+    # BedrockAgentCoreApp pattern uses synchronous `def invoke(payload):` decorated
+    # with @app.entrypoint (per amazon-bedrock-agentcore-samples).
 
     @given(framework=_all_frameworks)
     @settings(max_examples=9)
@@ -461,7 +446,7 @@ class TestSystemPromptEscapingPreservation:
         escaped = code_generator._escape_triple_quotes(system_prompt)
         code = code_generator._generate_default_agent(
             escaped,
-            "anthropic.claude-3-5-sonnet-20241022-v2:0",
+            "us.anthropic.claude-sonnet-4-5-20250929-v1:0",
             "us-east-1",
         )
         try:
@@ -627,12 +612,15 @@ class TestFrontendRetryLogicPreservation:
     def test_is_testing_reset_in_finally(self):
         """**Validates: Requirements 3.4**
 
-        isTesting MUST be reset to false in the finally block.
+        isTesting MUST be reset to false in the finally block of handleTest.
         """
         content = self._read_deploy_panel()
-        # Find the finally block and verify setIsTesting(false) is inside it
-        finally_idx = content.index("} finally {")
-        after_finally = content[finally_idx : finally_idx + 200]
+        # handleTest sets isTesting(true) then must reset it in its own finally.
+        # Locate the handleTest function body and check its finally block.
+        handle_test_idx = content.index("const handleTest = useCallback")
+        handle_test_section = content[handle_test_idx:]
+        finally_idx = handle_test_section.index("} finally {")
+        after_finally = handle_test_section[finally_idx : finally_idx + 200]
         assert "setIsTesting(false)" in after_finally
 
     def test_is_testing_set_true_at_start(self):
@@ -644,80 +632,9 @@ class TestFrontendRetryLogicPreservation:
         assert "setIsTesting(true)" in content
 
 
-# ============================================================================
-# Router Endpoint Preservation (Req 3.5, 3.6)
-# ============================================================================
-
-
-class TestRouterEndpointPreservation:
-    """test_runtime() reads response.get("response") first with
-    response.get("body") fallback. delete_runtime() uses
-    runtime_deployer.destroy_runtime().
-
-    **Validates: Requirements 3.5, 3.6**
-    """
-
-    def _read_router_source(self) -> str:
-        """Read the routers/deployment.py source."""
-        router_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "src",
-            "app",
-            "routers",
-            "deployment.py",
-        )
-        with open(router_path, "r") as f:
-            return f.read()
-
-    def test_test_runtime_reads_response_first(self):
-        """**Validates: Requirements 3.5**
-
-        test_runtime() MUST read response.get("response") first.
-        """
-        source = self._read_router_source()
-        # The pattern: response.get("response") or response.get("body")
-        assert 'response.get("response")' in source
-
-    def test_test_runtime_has_body_fallback(self):
-        """**Validates: Requirements 3.5**
-
-        test_runtime() MUST fall back to response.get("body").
-        """
-        source = self._read_router_source()
-        assert 'response.get("body"' in source
-
-    def test_response_before_body_in_source(self):
-        """**Validates: Requirements 3.5**
-
-        "response" key MUST be checked before "body" key.
-        """
-        source = self._read_router_source()
-        resp_idx = source.index('response.get("response")')
-        body_idx = source.index('response.get("body"')
-        assert resp_idx < body_idx, "response.get('response') must come before response.get('body')"
-
-    def test_delete_runtime_uses_destroy_runtime(self):
-        """**Validates: Requirements 3.6**
-
-        delete_runtime() MUST use runtime_deployer.destroy_runtime().
-        """
-        source = self._read_router_source()
-        # Find the delete_runtime function
-        assert "async def delete_runtime" in source
-        func_idx = source.index("async def delete_runtime")
-        func_section = source[func_idx : func_idx + 500]
-        assert "destroy_runtime" in func_section
-
-    def test_delete_runtime_imports_from_runtime_deployer(self):
-        """**Validates: Requirements 3.6**
-
-        delete_runtime() MUST import from app.services.runtime_deployer.
-        """
-        source = self._read_router_source()
-        func_idx = source.index("async def delete_runtime")
-        func_section = source[func_idx : func_idx + 500]
-        assert "runtime_deployer" in func_section
+# Removed TestRouterEndpointPreservation: the dead routers/deployment.py file
+# this class read was deleted. /api/test-runtime + /api/runtime/{id} are owned
+# by the Deployment Lambda's deployment_handler.py now. See tasks/lessons.md Bug 31.
 
 
 # ============================================================================
@@ -750,7 +667,13 @@ class TestGatewayDeployerPreservation:
         deploy() MUST use gateway_deployer.deploy_gateway (boto3) for gateway operations.
         """
         source = self._read_deployment_source()
-        assert "from app.services.gateway_deployer import deploy_gateway" in source
+        # Updated: import is now multi-line with an alias to avoid shadowing the
+        # generator helper. Match either form (single-line or split across lines).
+        assert (
+            "from app.services.gateway_deployer import deploy_gateway" in source
+            or "from app.services.gateway_deployer import (" in source
+            and "deploy_gateway" in source
+        )
 
     def test_deploy_gateway_injects_env_vars(self):
         """**Validates: Requirements 3.7**

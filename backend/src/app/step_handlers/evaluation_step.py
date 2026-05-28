@@ -7,6 +7,9 @@ References:
 - https://github.com/awslabs/amazon-bedrock-agentcore-samples/tree/main/01-tutorials/09-AgentCore-E2E/lab-05-agentcore-evals.ipynb
 - https://github.com/aws/bedrock-agentcore-starter-toolkit (operations/evaluation/)
 """
+# Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
+import app.services._otel_platform  # noqa: F401
+
 import re
 
 import json

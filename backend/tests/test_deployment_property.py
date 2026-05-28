@@ -150,7 +150,7 @@ class TestCodeGeneration:
             framework=AgentFramework.STRANDS_AGENTS,
             model=ModelConfiguration(
                 provider=StrandsModelProvider.BEDROCK,
-                model_id="amazon.titan-text-express-v1",
+                model_id="us.amazon.nova-2-lite-v1:0",
             ),
             system_prompt="You are helpful.",
         )
@@ -213,7 +213,7 @@ class TestRequirementsGeneration:
             framework=AgentFramework.STRANDS_AGENTS,
             model=ModelConfiguration(
                 provider=StrandsModelProvider.BEDROCK,
-                model_id="amazon.titan-text-express-v1",
+                model_id="us.amazon.nova-2-lite-v1:0",
             ),
             system_prompt="test",
         )

@@ -194,6 +194,9 @@ class WorkflowDefinition(BaseModel):
     metadata: WorkflowMetadata
     created_at: datetime
     updated_at: datetime
+    # Cognito sub of the user who created this workflow. None for pre-tenancy
+    # records (legacy data). See services/auth.py + tasks/lessons.md Bug 37.
+    owner_sub: Optional[str] = None
 
     @model_validator(mode="after")
     def validate_edge_references(self) -> "WorkflowDefinition":

@@ -22,6 +22,7 @@ export interface RuntimeConfiguration {
   maxLifetime: number;
   vpcConfig?: VPCConfiguration;
   enableOtel: boolean;
+  observability?: ObservabilityConfiguration;
   executionRoleArn?: string;
   // Strands model provider
   modelProvider: StrandsModelProvider;
@@ -216,9 +217,23 @@ export interface GuardrailsConfiguration {
 // Observability Configuration
 // ============================================================================
 
+export type ObservabilityProvider =
+  | 'langfuse'
+  | 'custom';
+
+export type OtlpProtocol = 'http/protobuf' | 'grpc';
+
 export interface ObservabilityConfiguration {
   name: string;
   enableOtel: boolean;
+  provider: ObservabilityProvider;
+  otlpEndpoint?: string;
+  otlpProtocol: OtlpProtocol;
+  serviceName?: string;
+  sampleRate: number;
+  resourceAttributes: Record<string, string>;
+  authHeaderSecretArn?: string;
+  extraHeaders: Record<string, string>;
 }
 
 // ============================================================================
@@ -423,6 +438,10 @@ export interface KnowledgeBaseToolConfig extends ToolConfiguration {
   embeddingModelId?: string;
   // Vector Store
   vectorStoreType?: KBVectorStoreType;
+  // S3 Vectors vector store (advanced; optional — defaults to fully managed)
+  s3VectorsBucketArn?: string;
+  s3VectorsIndexName?: string;
+  s3VectorsIndexArn?: string;
   // S3 data source
   s3BucketUri?: string;
   // Web Crawler data source

@@ -36,6 +36,9 @@ class Flow(BaseModel):
     deployment_status: DeploymentStatus = DeploymentStatus.NOT_DEPLOYED
     created_at: datetime
     updated_at: datetime
+    # Cognito sub of the user who created this flow. None for pre-tenancy
+    # records. See services/auth.py + tasks/lessons.md Bug 37.
+    owner_sub: Optional[str] = None
 
 
 class FlowCreateRequest(BaseModel):

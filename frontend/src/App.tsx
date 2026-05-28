@@ -14,21 +14,24 @@ import { MemoryConfigurationModal } from './components/modals/MemoryConfiguratio
 import { PolicyConfigurationModal } from './components/modals/PolicyConfigurationModal';
 import { KnowledgeBaseConfigModal } from './components/modals/KnowledgeBaseConfigModal';
 import { GuardrailsConfigurationModal } from './components/modals/GuardrailsConfigurationModal';
+import { ObservabilityConfigurationModal } from './components/modals/ObservabilityConfigurationModal';
 import { useWorkflowStore } from './store/workflowStore';
 import { useFlowStore } from './store/flowStore';
 import { useAutoSave } from './hooks/useAutoSave';
 import { instantiateTemplate } from './utils/templates';
 import type { AgentCoreComponentType } from './types/workflow';
 import type { WorkflowTemplate } from './types/templates';
-import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration, MemoryConfiguration, PolicyConfiguration, GuardrailsConfiguration, ComponentConfiguration, ToolConfiguration, KnowledgeBaseToolConfig } from './types/components';
+import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration, MemoryConfiguration, PolicyConfiguration, GuardrailsConfiguration, ObservabilityConfiguration, ComponentConfiguration, ToolConfiguration, KnowledgeBaseToolConfig } from './types/components';
 import type { GeneratedTool } from './services/api';
 import './App.css';
 
 function App() {
   const { activeFlowId, activeFlowName } = useFlowStore();
 
-  // Auto-save active flow workflow (only saves when activeFlowId is set)
-  useAutoSave(activeFlowId);
+  // Auto-save active flow workflow (only saves when activeFlowId is set).
+  // Audit issue #8: surface auto-save errors via a toast so users can see
+  // when their work has stopped persisting.
+  const { lastSaveError, clearLastSaveError } = useAutoSave(activeFlowId);
 
   const [paletteCollapsed, setPaletteCollapsed] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -118,7 +121,7 @@ function App() {
 
   // Get connected tools, gateway config, identity config, custom tools, and MCP server config
   const getConnectedToolsAndGateway = useCallback(() => {
-    if (!deployableNodeId) return { tools: [], gatewayConfig: null, gatewayTools: [], identityConfig: null, customTools: [], memoryConfig: null, evaluationConfig: null, policyConfig: null, guardrailsConfig: null, mcpServerConfig: null, knowledgeBaseConfig: null };
+    if (!deployableNodeId) return { tools: [], gatewayConfig: null, gatewayTools: [], identityConfig: null, customTools: [], memoryConfig: null, evaluationConfig: null, policyConfig: null, guardrailsConfig: null, observabilityConfig: null, mcpServerConfig: null, knowledgeBaseConfig: null };
     const connectedTools: string[] = [];
     const gatewayTools: string[] = [];
     let gatewayConfig = null;
@@ -128,6 +131,7 @@ function App() {
     let evaluationConfig: Record<string, unknown> | null = null;
     let policyConfig: Record<string, unknown> | null = null;
     let guardrailsConfig: Record<string, unknown> | null = null;
+    let observabilityConfig: Record<string, unknown> | null = null;
     let mcpServerConfig: Record<string, unknown> | null = null;
 
     // Find direct connections to the runtime node
@@ -152,8 +156,8 @@ function App() {
             if (type === 'evaluation') {
               evaluationConfig = (otherNode.data.configuration as unknown as Record<string, unknown>) || { enabled: true };
             }
-            if (type === 'observability' && !evaluationConfig) {
-              evaluationConfig = (otherNode.data.configuration as unknown as Record<string, unknown>) || { enabled: false };
+            if (type === 'observability') {
+              observabilityConfig = (otherNode.data.configuration as unknown as Record<string, unknown>) || { enabled: false };
             }
             if (type === 'policy') {
               policyConfig = (otherNode.data.configuration as unknown as Record<string, unknown>) || { enabled: true };
@@ -230,10 +234,10 @@ function App() {
       });
     }
 
-    return { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig };
+    return { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig };
   }, [deployableNodeId, edges, nodes]);
 
-  const { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig } = getConnectedToolsAndGateway();
+  const { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig } = getConnectedToolsAndGateway();
 
   // Handle pending node creation - open modal when node appears
   useEffect(() => {
@@ -421,6 +425,59 @@ function App() {
             onRestore={handleRestoreDeployment}
           />
 
+          {/* Auto-save error toast (audit issue #8) — appears bottom-right
+              so it doesn't collide with the selected-node info card on the
+              bottom-left. Dismissable; auto-cleared on next successful save. */}
+          {lastSaveError && (
+            <div
+              data-testid="autosave-error-toast"
+              role="alert"
+              className="absolute bottom-4 right-4 z-40 max-w-sm rounded-md border border-red-300 bg-red-50 shadow-md"
+            >
+              <div className="flex items-start gap-2 px-3 py-2.5">
+                <svg
+                  className="mt-0.5 h-4 w-4 shrink-0 text-red-500"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  aria-hidden="true"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z"
+                  />
+                </svg>
+                <div className="flex-1 min-w-0">
+                  <div className="text-[13px] font-semibold text-red-800">
+                    Auto-save failed
+                  </div>
+                  <div className="text-[12px] text-red-700 mt-0.5 break-words">
+                    Your recent changes have not been saved. Check your connection and try again.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={clearLastSaveError}
+                  aria-label="Dismiss auto-save error"
+                  className="-mr-1 -mt-1 rounded p-1 text-red-500 hover:bg-red-100 hover:text-red-700"
+                >
+                  <svg
+                    className="h-3.5 w-3.5"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    stroke="currentColor"
+                    strokeWidth={2.5}
+                    aria-hidden="true"
+                  >
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+            </div>
+          )}
+
           {/* Selected Node Info Card */}
           {selectedNode && (
             <div className="absolute bottom-4 left-4 z-30 bg-white rounded-lg shadow-md border border-[#e9ebed] p-3.5 min-w-[220px]">
@@ -495,6 +552,7 @@ function App() {
         guardrailsConfig={guardrailsConfig}
         mcpServerConfig={mcpServerConfig}
         knowledgeBaseConfig={knowledgeBaseConfig}
+        observabilityConfig={observabilityConfig}
         isVisible={showDeployPanel}
         onClose={() => setShowDeployPanel(false)}
         restoredDeployment={restoredDeployment}
@@ -552,6 +610,16 @@ function App() {
           onClose={handleCloseConfig}
           onSave={(config) => handleSaveConfig(config)}
           initialConfig={configModal.initialConfig as Partial<GuardrailsConfiguration>}
+        />
+      )}
+
+      {configModal.componentType === 'observability' && (
+        <ObservabilityConfigurationModal
+          isOpen={configModal.isOpen}
+          onClose={handleCloseConfig}
+          onSave={(config) => handleSaveConfig(config)}
+          initialConfig={configModal.initialConfig as Partial<ObservabilityConfiguration>}
+          apiBaseUrl={import.meta.env.VITE_API_BASE_URL ?? ''}
         />
       )}
 

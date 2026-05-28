@@ -27,7 +27,7 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 ## Key Features
 
 - **Visual Canvas** -- Drag-and-drop AgentCore components (Runtime, Gateway, Memory, Knowledge Base, Browser, Identity, Observability, Policy) and wire them together.
-- **Template Gallery** -- Seven production-ready templates to deploy in one click: Web Search Agent, Strands + Gateway, Customer Support Blueprint, Customer Support Assistant, MCP Server Runtime, and MCP Server Gateway Target.
+- **Template Gallery** -- Six production-ready templates to deploy in one click: Web Search Agent, Strands + Gateway, Customer Support Assistant, Customer Support Blueprint, MCP Server Runtime, and MCP Server Gateway Target.
 - **CloudFormation Export** -- Generate downloadable CloudFormation stacks from any template or free-form diagram. Includes `deploy.sh`, `teardown.sh`, template YAML, and all code artifacts in a single zip. External users can deploy without the platform.
 - **AI Tool Generator** -- Describe a tool in natural language (e.g. "a tool that fetches GitHub repo info") and Claude Sonnet on Bedrock generates a complete Lambda function with tool schema. Add it to your canvas and deploy as a Gateway Target.
 - **MCP Server on Runtime** -- Host tools directly on the Runtime via MCP protocol with embedded Python functions. No Gateway or Lambda needed -- the simplest path to a tool-using agent.
@@ -43,7 +43,7 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 - **Step Functions Orchestration** -- Multi-step deployments with built-in retries (3 attempts, exponential backoff), per-step timeouts, and persistent state tracking.
 - **Deployment Persistence** -- Active deployments are stored per-user. Switching browsers or refreshing shows a banner to restore the last deployment with its test panel.
 - **In-Canvas Testing** -- Test deployed agents directly from the UI with conversation history support.
-- **Knowledge Base (RAG)** -- Create Bedrock Knowledge Bases with 5 data source types (S3, Web Crawler, Confluence, Salesforce, SharePoint), 3 vector store types (S3 Vectors, OpenSearch Serverless, RDS Aurora PostgreSQL), 3 parsing strategies (Default, Bedrock Data Automation, Foundation Model), custom transformation Lambda, and configurable chunking, deletion policy, and KMS encryption. Deployed as a Gateway tool target with a per-deployment Lambda for RetrieveAndGenerate.
+- **Knowledge Base (RAG)** -- Create Bedrock Knowledge Bases with 5 data source types (S3, Web Crawler, Confluence, Salesforce, SharePoint), 3 vector store types (S3 Vectors, OpenSearch Serverless, RDS Aurora PostgreSQL), 3 parsing strategies (Default, Bedrock Data Automation, Foundation Model), 3 chunking strategies (Fixed-Size, Hierarchical, Semantic), custom transformation Lambda, and configurable deletion policy and KMS encryption. The Web Crawler data source filters empty / null seed URLs before submission, BDA parsing auto-attaches `supplementalDataStorageConfiguration` pointing at the artifacts bucket, and S3 Vectors managed mode is the default — with an "Advanced (custom bucket)" toggle in the modal to attach an existing `s3VectorsBucketArn` / `s3VectorsIndexName` / `s3VectorsIndexArn`. Deployed as a Gateway tool target with a per-deployment Lambda for RetrieveAndGenerate.
 - **Full Resource Cleanup** -- Delete from AWS removes Runtime, Gateway, Gateway Targets, Cognito User Pool, custom tool Lambdas, Knowledge Base, Memory, Policy Engine, and Lambda functions.
 
 ## Security
@@ -57,13 +57,31 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
   - `X-Content-Type-Options: nosniff`
   - `X-XSS-Protection: 1; mode=block`
   - `Referrer-Policy: strict-origin-when-cross-origin`
-- **Least-privilege IAM** -- Bedrock permissions scoped to `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` (not `bedrock:*`). CDK feature flag `@aws-cdk/aws-iam:minimizePolicies` merges overlapping statements.
+- **Least-privilege IAM** -- Bedrock permissions scoped to `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` (not `bedrock:*`). Each Step Functions step Lambda has its own role with only the IAM actions it needs (no shared kitchen-sink policy). CDK feature flag `@aws-cdk/aws-iam:minimizePolicies` merges overlapping statements.
+- **Tenant isolation** -- Workflows, flows, and deployments are owner-scoped to the Cognito JWT `sub` claim. Cross-tenant reads return 404 (not 403) to avoid leaking record existence. Enforced in `backend/src/app/services/auth.py::assert_owner`.
+- **Shared runtime execution role** -- The platform pre-creates one `AgentCoreRuntime-{project}-{env}-shared` role at stack-init with `s3:GetObject` on the artifacts bucket + Bedrock + tool permissions, rather than minting a fresh per-deploy role. This avoids the IAM-cache propagation race that otherwise blocks first-time `CreateAgentRuntime` calls. The `DELETE /api/runtime/{id}` path explicitly skips deleting this shared role.
+- **Cognito hardening** -- `prevent_user_existence_errors=ENABLED`, `USER_PASSWORD_AUTH` disabled (SRP only), `ADMIN_NO_SRP_AUTH` disabled.
 - **TLS 1.2 minimum** -- CDK feature flag `@aws-cdk/aws-cloudfront:defaultSecurityPolicyTLSv1.2_2021` enforces TLS 1.2+ on CloudFront.
 - **CORS** -- API Gateway allows `http://localhost:5173` only (for local dev). In production, the frontend and API are served from the same CloudFront domain, making requests same-origin — no CORS headers needed.
 
 ### CDK-NAG (AWS Solutions Checks)
 
-CDK-NAG (`cdk_nag.AwsSolutionsChecks`) runs during every `cdk synth` to flag security best-practice violations. All suppressions are documented with reasons in `infra/app.py` so auditors understand each trade-off. Unsuppressed violations cause synthesis to fail.
+CDK-NAG (`cdk_nag.AwsSolutionsChecks`) runs during every `cdk synth` to flag security best-practice violations. Suppressions are scoped per-construct via `NagSuppressions.add_resource_suppressions(<construct>, [...], apply_to_children=True)` in `PlatformStack._apply_nag_suppressions()` — never stack-wide. Each suppression names the specific construct that legitimately needs the exception (e.g. shared runtime exec role for IAM4/IAM5, Cognito user pool for COG2/COG4/COG8, the State Machine for SF1) so a future contributor adding a wildcard policy to an unrelated construct fails the build instead of silently absorbing the finding. Unsuppressed violations cause synthesis to fail.
+
+### Reliability & Operational Hardening
+
+- **RemovalPolicy gating** — DynamoDB tables, S3 buckets, and the Cognito user pool default to `RETAIN` in production. Set `ENVIRONMENT_NAME` to one of `dev|test|sandbox|preview|ephemeral` (or export `AGENTCORE_ALLOW_DESTROY=true`) to switch to `DESTROY` + `auto_delete_objects=True` for fast iteration. Guards against accidental data loss on `cdk destroy` against a long-running prod stack.
+- **runtime_id-index GSI** — `DeploymentsTable` has a GSI keyed on `runtime_id` so `DELETE /api/runtime/{id}` and `POST /api/test-runtime` resolve via O(1) Query instead of O(N) Scan. Falls back to paginated Scan when the GSI is absent (covers stacks deployed before the GSI was added).
+- **Cleanup-failure aggregation** — `handle_delete_runtime` tracks per-resource cleanup failures (`mcp_server_runtime`, `policy_engine`, `memory`, `guardrail`, `gateway`, `kb_lambda`, `knowledge_base`) and only returns `success=true` when **all** cleanups succeed. Prevents reporting success when a Cognito pool / KB / guardrail leaks.
+- **Idempotent guardrail creation** — `guardrails_step` catches `ResourceAlreadyExistsException` from `create_guardrail`, then either updates the existing guardrail in place or retries with a UUID-suffixed name. Step Functions retries no longer break a partially-deployed flow.
+- **Gateway deploy rollback** — `deploy_gateway` tracks partial state (Cognito client info, gateway ID, tool Lambdas, custom-tool roles) and runs `cleanup_gateway_resources` on any mid-flow exception before re-raising. No more orphan Cognito pools / Lambdas after a transient AgentCore error.
+- **SSRF guard on Gateway URL fetches** — Any URL the gateway deployer follows is validated before `urlopen` against a 21-network IPv4/IPv6 denylist (loopback, link-local incl. IMDS `169.254.169.254` and Lambda creds `169.254.170.2`, RFC1918, CGNAT, multicast, ULA, IPv4-mapped IPv6). DNS resolution is performed up-front so hostname rebinding (`evil.com → 169.254.169.254`) cannot bypass the check. Optional `OIDC_DISCOVERY_HOST_ALLOWLIST` env var pins discovery hosts to an operator-approved set. Same defense applied to the embedded `_do_fetch_webpage` tool Lambda.
+- **OTEL secret namespace lock** — User-supplied `auth_header_secret_arn` (per-canvas Observability node) is validated against `^arn:aws:secretsmanager:.*:secret:agentcore-otel/.*` before being granted to the runtime IAM role. Foreign ARNs are rejected at the API boundary; tenant cannot trick the runtime into reading + exfiltrating arbitrary secrets via OTLP headers. Secrets created via `POST /api/observability/credentials` are tagged with `owner_sub` (Cognito sub) so cross-tenant ownership is auditable.
+- **Tenant isolation hardening** — The `X-Test-Sub` header bypass is removed from `services/auth.py`; tests inject sub via FastAPI `dependency_overrides`. `assert_owner` returns 404 for None-owner records (no legacy-data bypass). Flow/workflow listing uses strict `owner_sub == caller_sub` equality (no None-coalescing fallback that previously surfaced legacy rows in every tenant's list).
+- **MCPClient wiring proof gate** — When a runtime is configured with `GATEWAY_URL` but `MCPClient.list_tools_sync()` returns an empty list, the runtime raises `RuntimeError("Gateway MCPClient returned 0 tools…")` at first invocation rather than letting the agent bluff a canary out of the system prompt. Coverage-audit finding #109 (9 silent-canary GW PASSes) is now structurally impossible.
+- **DDB GSI NULL-key safety** — `DeploymentState` serializer omits None-valued optional fields (`runtime_id`, `gateway_url`, `completed_at`, etc.) via `model_dump(mode="json", exclude_none=True)` so the `runtime_id-index` GSI accepts the initial intake write. Pairs with the runtime_id-index GSI for cost-bounded delete/test/invoke lookups.
+- **Frontend ErrorBoundary** — `frontend/src/components/ErrorBoundary.tsx` wraps the app root. A render-time exception shows a recoverable banner with reset/reload buttons instead of a blank screen.
+- **Auto-save error toast** — `useAutoSave` exposes `lastSaveError` so a transient save failure renders a dismissable toast instead of being clobbered by a subsequent successful read.
 
 ### Pre-commit Hooks
 
@@ -77,6 +95,24 @@ CDK-NAG (`cdk_nag.AwsSolutionsChecks`) runs during every `cdk synth` to flag sec
 
 Install with `pip install pre-commit && pre-commit install`. Run manually with `pre-commit run --all-files`.
 
+## Observability
+
+The platform supports two OTEL deployment modes — they are not mutually exclusive.
+
+**Per-canvas (the original mode).** Drop an Observability node onto the canvas, configure the OTLP endpoint + credentials in the modal, and the agent's traces are exported to that backend.
+
+**Platform-level (added later).** Configure once at deploy time via the `OTEL_*` env vars listed above. Every deployed agent inherits the configuration automatically, AND every platform Lambda (workflow Lambda, deployment Lambda, all Step Functions step handlers) emits OTLP spans to the same backend. When a deploy is stuck, the stuck step Lambda shows up as a span in your backend alongside the agent invocations it's trying to set up.
+
+Platform-level config takes precedence over per-canvas: the endpoint, secret ARN, sample rate, and service-name prefix are admin-locked. Per-canvas Observability nodes can still add resource attributes additively (e.g. `team=ops`), but cannot override the endpoint.
+
+Implementation:
+
+- `backend/src/app/services/_otel_platform.py` — module-load OTel SDK setup imported as the first import of every Lambda handler. Resolves `OTEL_AUTH_SECRET_ARN` from Secrets Manager into `OTEL_EXPORTER_OTLP_HEADERS`, sets up `BatchSpanProcessor` + `OTLPSpanExporter` (HTTP), instruments boto3.
+- `backend/src/app/services/observability.py::get_platform_observability_defaults()` — reads SSM at module load, cached via `lru_cache`.
+- `backend/src/app/services/code_generator.py::_inject_otel()` — post-processes generated agent code to bootstrap Strands `StrandsTelemetry` + force-flush spans on shutdown.
+
+Verified live against Langfuse Cloud — both platform Lambda traces and deployed-agent traces appear under the same project.
+
 ## Prerequisites
 
 - **AWS CLI** v2 -- configured with credentials (`aws configure`)
@@ -87,13 +123,42 @@ No Docker installation required. CDK is invoked via `npx` (no global install nee
 
 ## Deploy
 
+The platform supports two deploy modes. Pick **one** per environment.
+
+### Mode 1: Without OTEL (default)
+
+Use this when you don't have an OTLP backend yet, or you don't need centralized tracing. Each deployed agent can still configure its own per-canvas Observability node from the UI later — platform Lambdas just won't emit traces.
+
 ```bash
-# Deploy with defaults (dev environment, us-east-1)
+# Minimal deploy (dev environment, us-east-1)
 COGNITO_USERS="user@example.com" ./scripts/deploy.sh
 
-# Deploy to a specific environment and region
+# Specific environment and region
 COGNITO_USERS="user@example.com" ENVIRONMENT_NAME=prod AWS_REGION=us-west-2 ./scripts/deploy.sh
 ```
+
+### Mode 2: With platform-level OTEL
+
+Use this when you want **every deployed agent AND every platform Lambda** (workflow, deployment, all 13 Step Functions step handlers) to export OTLP traces to a single backend automatically. The endpoint becomes admin-locked — per-canvas Observability nodes can still add resource attributes (e.g. `team=ops`) but cannot override the endpoint.
+
+**Prerequisite (one-time)**: create the auth-header secret with your OTLP backend credentials. The example below uses Langfuse Cloud; any OTLP-compatible backend with HTTP Basic auth works.
+
+```bash
+LANGFUSE_PUBLIC_KEY=pk-... LANGFUSE_SECRET_KEY=sk-... ./scripts/bootstrap-otel-secret.sh
+# Prints the secret ARN — copy it for the next command.
+```
+
+**Deploy with platform OTEL enabled**:
+
+```bash
+COGNITO_USERS="user@example.com" \
+  OTEL_ENDPOINT="https://cloud.langfuse.com/api/public/otel" \
+  OTEL_AUTH_SECRET_ARN="arn:aws:secretsmanager:us-east-1:...:secret:agentcore-otel/platform/dev-XXXXXX" \
+  OTEL_SAMPLE_RATE=1.0 \
+  ./scripts/deploy.sh
+```
+
+To switch an existing deployment from Mode 1 → Mode 2 (or vice versa), just re-run `./scripts/deploy.sh` with the new env vars set/unset. CDK reconciles the change in place; no resource churn.
 
 The deploy script (`scripts/deploy.sh`) will:
 1. Validate prerequisites (Node.js, Python, AWS CLI -- exits with descriptive error if missing)
@@ -137,6 +202,10 @@ Look for `CloudFrontUrl` (frontend), `ApiGatewayUrl` (API), and `S3BucketName` (
 | `AWS_REGION` | `us-east-1` | Target AWS region |
 | `PROJECT_NAME` | `agentcore-workflow` | Project name used for resource naming and tagging |
 | `COGNITO_USERS` | *(none)* | Comma-separated emails for pre-created Cognito users (e.g., `user1@example.com,user2@example.com`) |
+| `OTEL_ENDPOINT` | *(unset)* | OTLP HTTP endpoint for platform-level observability (e.g. `https://cloud.langfuse.com/api/public/otel`). When set, every platform Lambda + every deployed agent exports traces here. Per-canvas Observability nodes can still add resource attributes additively but cannot override the endpoint. |
+| `OTEL_AUTH_SECRET_ARN` | *(unset)* | ARN of a Secrets Manager secret holding the precomputed `Authorization` header value (e.g. `Basic <base64>`). Created by `scripts/bootstrap-otel-secret.sh`. Required when `OTEL_ENDPOINT` is set. |
+| `OTEL_SAMPLE_RATE` | `1.0` | Trace sampling ratio (0.0–1.0). |
+| `OTEL_SERVICE_NAME_PREFIX` | `{PROJECT_NAME}` | Prefix prepended to `service.name` resource attribute on every span. |
 
 These are passed as CDK context parameters to the infrastructure stack.
 
@@ -159,6 +228,10 @@ Application configuration is stored under `/agentcore-workflow/{env}/` in SSM Pa
 | `/agentcore-workflow/{env}/cors-origins` | Allowed CORS origins |
 | `/agentcore-workflow/{env}/aws-region` | AWS region |
 | `/agentcore-workflow/{env}/dynamodb-table-name` | Workflows DynamoDB table name |
+| `/agentcore-workflow/{env}/otel/endpoint` | OTLP endpoint (when platform OTEL is configured) |
+| `/agentcore-workflow/{env}/otel/auth-secret-arn` | Secrets Manager ARN for the OTLP auth header |
+| `/agentcore-workflow/{env}/otel/sample-rate` | Trace sampling ratio |
+| `/agentcore-workflow/{env}/otel/service-name-prefix` | `service.name` prefix |
 
 ## Deployment Flow
 
@@ -202,14 +275,16 @@ When you run `./scripts/deploy.sh`, this is the sequence of operations:
      → API Gateway HTTP API (routes /api/* to Lambda)
      → Workflow Lambda (FastAPI + Mangum, handles CRUD)
      → Deployment Lambda (handles deploy/test/delete/generate-tool)
-     → 13 Step Function step Lambdas (validate, codegen, iam, gateway,
-       knowledge_base, mcp_server, memory, policy, evaluation,
-       runtime_configure, runtime_launch, auth, status_update)
-     → Step Functions state machine (orchestrates the 11 steps)
+     → 13 Step Function step Lambdas, each with its own least-privilege IAM role
+       (validate, codegen, iam, gateway, knowledge_base, mcp_server, memory,
+       policy, evaluation, runtime_configure, runtime_launch, auth, status_update)
+     → Step Functions state machine (orchestrates the 13 steps)
+     → Shared AgentCore runtime execution role (warmed at stack-init to bypass
+       AgentCore's IAM-cache propagation race)
      → DynamoDB tables (workflows + deployments)
      → S3 bucket (frontend assets + dependency bundles + code artifacts)
      → CloudFront distribution (SPA routing + API origin)
-     → SSM parameters (CORS origins, region, table name)
+     → SSM parameters (CORS origins, region, table name, OTEL config when enabled)
      → IAM roles (least-privilege per function)
      → CloudWatch log groups (Lambda + Step Functions)
 
@@ -539,12 +614,12 @@ For gateway-enabled agents (Templates 2-5):
 - OAuth2 tokens are acquired via `client_credentials` grant (Cognito)
 - Gateway credentials are injected as environment variables by the runtime configure step (`COGNITO_*`)
 
-For MCP Server agents (Template 6):
+For MCP Server Runtime agents (Template 5):
 - Tools are embedded as Python functions directly in the agent code
 - No Gateway, Lambda, or Cognito resources are created
 - The agent uses the Strands tool-calling loop to route to embedded tool handlers
 
-For MCP Server Gateway Target (Template 7):
+For MCP Server Gateway Target (Template 6):
 - Two Runtimes: an Agent Runtime (HTTP) and an MCP Server Runtime (MCP protocol)
 - The Agent connects to the MCP Server through the Gateway with OAuth2 authentication
 - The MCP Server exposes tools via FastMCP that the Agent discovers at runtime
@@ -659,13 +734,20 @@ The CFN generator supports both built-in templates (all 7) and free-form diagram
 |   |   |   +-- catalog_models.py         # Tool catalog and flow submission models
 |   |   |   +-- tool_generation_models.py # AI Tool Generator request/response models
 |   |   +-- routers/
-|   |   |   +-- workflows.py              # Workflow CRUD + import/export
+|   |   |   +-- workflows.py              # Workflow CRUD + import/export (owner-scoped)
+|   |   |   +-- flows.py                  # Flow CRUD (owner-scoped)
+|   |   |   +-- observability.py          # Credential bootstrap + GET /platform-defaults
 |   |   +-- services/
 |   |   |   +-- config.py                 # AppConfig -- SSM Parameter Store / env var loader
+|   |   |   +-- auth.py                   # JWT sub extraction + assert_owner tenant guard
+|   |   |   +-- _otel_platform.py         # Module-load OTel SDK bootstrap (imported first by every Lambda handler)
+|   |   |   +-- observability.py          # build_otel_env_vars + get_platform_observability_defaults
 |   |   |   +-- dynamodb_storage.py       # DynamoDB workflow storage adapter
+|   |   |   +-- flow_storage.py           # DynamoDB flow storage adapter
 |   |   |   +-- deployment_state_store.py # DynamoDB deployment state adapter
+|   |   |   +-- deployment.py             # End-to-end deploy orchestration (direct + SFN paths)
 |   |   |   +-- code_generator.py         # Agent code generation (Strands Agents, 13 providers, multi-agent)
-|   |   |   +-- runtime_deployer.py       # AgentCore runtime configure/launch/destroy
+|   |   |   +-- runtime_deployer.py       # AgentCore runtime configure/launch/destroy + transient-error retry
 |   |   |   +-- gateway_deployer.py       # Gateway deploy, Cognito OAuth, JWT auth, custom tool Lambdas, cleanup
 |   |   |   +-- tool_catalog_store.py     # DynamoDB tool catalog storage
 |   |   |   +-- flow_submission_store.py  # DynamoDB flow submission storage
@@ -759,6 +841,23 @@ The CFN generator supports both built-in templates (all 7) and free-form diagram
 | `DELETE` | `/api/runtime/{id}` | Delete runtime + gateway + Cognito + Lambda (full cleanup) |
 | `POST` | `/api/generate-tool` | AI Tool Generator -- generate Lambda code from natural language via Claude Sonnet |
 | `POST` | `/api/generate-cfn-template` | Generate downloadable CloudFormation stack (template YAML + deploy scripts + code artifacts) |
+
+### Flows
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/flows` | Create flow |
+| `GET` | `/api/flows` | List caller's flows |
+| `GET` | `/api/flows/{flow_id}` | Get flow |
+| `PUT` | `/api/flows/{flow_id}` | Update flow |
+| `DELETE` | `/api/flows/{flow_id}` | Delete flow |
+
+### Observability
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/observability/platform-defaults` | Returns `{enabled, endpoint, sample_rate}` so the UI can render the Observability node read-only when platform OTEL is configured. Never returns the secret ARN. |
+| `POST` | `/api/observability/credentials` | Stores OTLP auth credentials in Secrets Manager and returns the secret ARN. |
 
 ## Running Tests
 
@@ -869,7 +968,7 @@ Policy --> Runtime, Gateway
 
 ## Local Development
 
-For contributors who want to run the platform locally without deploying to AWS. The backend falls back to in-memory storage when `DYNAMODB_TABLE_NAME` is not set.
+For contributors who want to run the platform locally without deploying to AWS. The backend falls back to in-memory storage when `DYNAMODB_TABLE_NAME` is not set **and** the process is not running inside Lambda (detected via `AWS_LAMBDA_FUNCTION_NAME`). Inside Lambda the missing table env var raises `RuntimeError` at module load, so a misconfigured deploy fails to initialize rather than silently dropping writes.
 
 ```bash
 # Backend

@@ -37,6 +37,7 @@ from app.models import (
 )
 from app.models.enums import StrandsModelProvider
 from app.services import runtime_deployer
+from app.services.observability import build_otel_env_vars, get_platform_observability_defaults
 from app.services.runtime_deployer import (
     upload_code_to_s3,
     create_agent_runtime,
@@ -693,6 +694,7 @@ class WorkflowExecutor:
         policy_config: Optional[dict] = None,
         guardrails_config: Optional[dict] = None,
         knowledge_base_config: Optional[dict] = None,
+        observability_config: Optional[dict] = None,
     ) -> DeploymentResult:
         """Deploy workflow to AWS AgentCore.
 
@@ -769,9 +771,11 @@ class WorkflowExecutor:
                 )
                 logger.info("Generated MCP server code (%d bytes)", len(mcp_code))
 
-                # Upload MCP server code to S3
+                # Upload MCP server code to S3 with stable prefix keyed on
+                # runtime name (Bug 61) — AgentCore IAM cache is keyed on
+                # (role, S3 prefix) so per-deploy prefixes hit a 17-20 min race.
                 bucket = os.environ.get("ARTIFACTS_BUCKET_NAME", "")
-                mcp_s3_key = f"deployments/{deployment_id}/mcp-server-code.zip"
+                mcp_s3_key = f"deployments/by-name/{runtime_deployer.sanitize_runtime_name(mcp_name)}/mcp-server-code.zip"
                 if bucket:
                     s3_client = boto3.client("s3", region_name=self.region)
                     # Use strands-mcp.zip bundle (includes mcp package with FastMCP)
@@ -1316,6 +1320,17 @@ class WorkflowExecutor:
                     if hasattr(runtime_config.model_provider, "value")
                     else "bedrock",
                 )
+                # OTEL: enabled when ANY of:
+                #   - platform-level OTEL defaults are configured (Reading A)
+                #   - per-canvas Observability node is wired
+                #   - observability_config supplied directly
+                #   - legacy enable_otel flag set
+                _obs_enabled = bool(
+                    get_platform_observability_defaults()
+                    or observability_config
+                    or "observability" in (connected_tools or [])
+                    or getattr(runtime_config, "enable_otel", False)
+                )
                 agent_code = cg_generate_agent_code(
                     config=cg_config,
                     template_id=template_id,
@@ -1323,6 +1338,7 @@ class WorkflowExecutor:
                     tools=connected_tools,
                     gateway_tools=gateway_tools,
                     custom_tools=custom_tools,
+                    observability_enabled=_obs_enabled,
                 )
             else:
                 # Use unified generator with ALL connected components
@@ -1333,6 +1349,14 @@ class WorkflowExecutor:
                     memory_id=memory_id,
                     region=self.region,
                 )
+                if (
+                    get_platform_observability_defaults()
+                    or observability_config
+                    or "observability" in (connected_tools or [])
+                    or getattr(runtime_config, "enable_otel", False)
+                ):
+                    from app.services.code_generator import _inject_otel
+                    agent_code = _inject_otel(agent_code)
 
             # Write agent code to temp dir
             agent_path = Path(work_dir) / "agent.py"
@@ -1342,8 +1366,11 @@ class WorkflowExecutor:
             # ------------------------------------------------------------------
             # Phase 3: Upload code + bundled deps to S3
             # ------------------------------------------------------------------
+            # Stable prefix keyed on runtime name (Bug 61) — AgentCore IAM
+            # cache is keyed on (role, S3 prefix). Reusing the same prefix
+            # across redeploys means the cache populates once per agent.
             bucket = os.environ.get("ARTIFACTS_BUCKET_NAME", "")
-            s3_key = f"deployments/{deployment_id}/code.zip"
+            s3_key = f"deployments/by-name/{runtime_deployer.sanitize_runtime_name(runtime_config.name)}/code.zip"
 
             from app.services.code_generator import generate_requirements as cg_gen_reqs
             from app.models.deployment_models import RuntimeConfig as ReqsConfig
@@ -1400,12 +1427,21 @@ class WorkflowExecutor:
             account_id = sts.get_caller_identity()["Account"]
 
             iam_client = boto3.client("iam")
+            # Platform-level OTEL secret (when configured) takes precedence
+            # over per-canvas, matching build_otel_env_vars's lock semantics.
+            _platform = get_platform_observability_defaults()
+            if _platform and _platform.get("auth_header_secret_arn"):
+                _otel_secret = _platform["auth_header_secret_arn"]
+            else:
+                _otel_secret = (observability_config or {}).get("auth_header_secret_arn") \
+                    or (observability_config or {}).get("authHeaderSecretArn")
             role_arn = create_runtime_iam_role(
                 iam_client,
                 f"{runtime_config.name}-role",
                 account_id,
                 self.region,
                 connected_tools,
+                otel_secret_arn=_otel_secret,
             )
 
             agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=self.region)
@@ -1438,9 +1474,14 @@ class WorkflowExecutor:
                 env_vars["GUARDRAIL_ID"] = guardrails_result["guardrail_id"]
                 env_vars["GUARDRAIL_VERSION"] = guardrails_result.get("guardrail_version", "DRAFT")
 
-            if runtime_config.enable_otel:
-                env_vars["OTEL_EXPORTER_OTLP_ENDPOINT"] = f"https://otel.{self.region}.amazonaws.com"
-                env_vars["OTEL_SERVICE_NAME"] = runtime_config.name
+            otel_env = build_otel_env_vars(
+                observability_config,
+                runtime_name=runtime_config.name,
+                deployment_id=deployment_id,
+                enable_otel_legacy=bool(getattr(runtime_config, "enable_otel", False)),
+                platform_defaults=get_platform_observability_defaults(),
+            )
+            env_vars.update(otel_env)
 
             runtime_result = create_agent_runtime(
                 agentcore_ctrl,

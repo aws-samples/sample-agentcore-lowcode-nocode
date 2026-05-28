@@ -115,11 +115,12 @@ class FlowStorage:
         """Initialize empty storage."""
         self._flows: dict[str, Flow] = {}
 
-    def create(self, name: str) -> Flow:
+    def create(self, name: str, owner_sub: Optional[str] = None) -> Flow:
         """Create a new flow with an empty workflow.
 
         Args:
             name: The flow name
+            owner_sub: Cognito sub of the creating user (tenant isolation)
 
         Returns:
             The created Flow with generated ID and timestamps
@@ -138,6 +139,7 @@ class FlowStorage:
             deployment_status=DeploymentStatus.NOT_DEPLOYED,
             created_at=now,
             updated_at=now,
+            owner_sub=owner_sub,
         )
 
         self._flows[flow_id] = flow
@@ -213,6 +215,18 @@ class FlowStorage:
             reverse=True,
         )
 
+    def list_by_owner(self, owner_sub: str) -> list[Flow]:
+        """List flows owned by ``owner_sub`` (strict equality).
+
+        Tenant-isolation (Critic Finding 3): legacy / un-owned rows are
+        excluded — they have no owner so cannot match any caller.
+        """
+        return sorted(
+            (f for f in self._flows.values() if getattr(f, "owner_sub", None) == owner_sub),
+            key=lambda c: c.updated_at,
+            reverse=True,
+        )
+
     def clear(self) -> None:
         """Clear all flows (for testing)."""
         self._flows.clear()
@@ -268,7 +282,7 @@ class DynamoDBFlowStorage:
             region,
         )
 
-    def create(self, name: str) -> Flow:
+    def create(self, name: str, owner_sub: Optional[str] = None) -> Flow:
         """Create a new flow in DynamoDB.
 
         Generates a UUID, creates a Flow with an empty workflow,
@@ -276,6 +290,7 @@ class DynamoDBFlowStorage:
 
         Args:
             name: The flow name
+            owner_sub: Cognito sub of the creating user (tenant isolation)
 
         Returns:
             The created Flow with generated ID and timestamps
@@ -291,6 +306,7 @@ class DynamoDBFlowStorage:
             deployment_status=DeploymentStatus.NOT_DEPLOYED,
             created_at=now,
             updated_at=now,
+            owner_sub=owner_sub,
         )
 
         item = _serialize_flow(flow)
@@ -387,6 +403,46 @@ class DynamoDBFlowStorage:
             key=lambda c: c.updated_at,
             reverse=True,
         )
+
+    def list_by_owner(self, owner_sub: str) -> list[Flow]:
+        """List flows owned by ``owner_sub`` (strict equality).
+
+        Tenant-isolation (Critic Finding 3): pushes the owner filter to
+        DynamoDB via a FilterExpression so non-matching rows never leave
+        the database — fewer bytes on the wire AND the in-Python loop
+        never sees other tenants' rows even if a serialization bug landed.
+
+        Note: this is still a Scan, not a Query. Adding a GSI on
+        ``owner_sub`` is tracked under Critic Finding 9 / a separate
+        infra-change PR; we explicitly do not introduce that change here
+        to keep this fix minimal in scope.
+        """
+        from boto3.dynamodb.conditions import Attr
+
+        items: list[dict] = []
+        scan_kwargs = {"FilterExpression": Attr("owner_sub").eq(owner_sub)}
+        response = self._table.scan(**scan_kwargs)
+        items.extend(response.get("Items", []))
+        while "LastEvaluatedKey" in response:
+            response = self._table.scan(
+                ExclusiveStartKey=response["LastEvaluatedKey"], **scan_kwargs
+            )
+            items.extend(response.get("Items", []))
+
+        flows = []
+        for item in items:
+            try:
+                flow = _deserialize_flow(item)
+            except Exception as e:
+                logger.warning("Failed to deserialize flow item: %s", e)
+                continue
+            # Defence-in-depth: re-check after deserialization in case a
+            # rogue row sneaks past the FilterExpression (legacy items
+            # missing the attribute are correctly excluded by Attr.eq).
+            if getattr(flow, "owner_sub", None) == owner_sub:
+                flows.append(flow)
+
+        return sorted(flows, key=lambda c: c.updated_at, reverse=True)
 
     def clear(self) -> None:
         """Clear all flows from DynamoDB (for testing).

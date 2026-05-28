@@ -41,12 +41,12 @@ from app.models import RuntimeConfiguration, ModelConfiguration, ModelProvider
 # Config
 # ---------------------------------------------------------------------------
 REGION = os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1"))
-BUCKET = os.environ.get(
-    "ARTIFACTS_BUCKET_NAME",
-    "agentcore-workflow-dev-artifacts-166827918465",
-)
+# Resolved lazily inside main() so this module imports cleanly under pytest
+# collection even when ARTIFACTS_BUCKET_NAME isn't set (the file is an
+# end-to-end driver script, not a unit test).
+BUCKET = os.environ.get("ARTIFACTS_BUCKET_NAME", "")
 BUNDLE_KEY = "agentcore-deps/strands-mcp.zip"
-MODEL_ID = "us.anthropic.claude-sonnet-4-20250514-v1:0"
+MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 TEST_PROMPT = "What is 2 + 2? Answer in one sentence."
 TIMEOUT_READY = 300  # seconds to wait for READY
 RUN_ID = uuid.uuid4().hex[:6]
@@ -333,6 +333,11 @@ def build_patterns() -> list[dict]:
 
 
 def main():
+    if not BUCKET:
+        raise RuntimeError(
+            "ARTIFACTS_BUCKET_NAME env var must be set to the deployed "
+            "artifacts bucket (e.g. agentcore-workflow-dev-artifacts-<account>)."
+        )
     log(f"=== E2E Live Invocation Test (run={RUN_ID}, region={REGION}) ===")
     log(f"Bucket: {BUCKET}")
     log(f"Model: {MODEL_ID}")

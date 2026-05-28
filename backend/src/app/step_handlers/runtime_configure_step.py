@@ -3,6 +3,9 @@
 Requirements: 3.5
 """
 
+# Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
+import app.services._otel_platform  # noqa: F401
+
 import logging
 import os
 import re
@@ -15,6 +18,7 @@ from app.models.deployment_models import (
     RuntimeConfig,
 )
 from app.services.deployment_state_store import DeploymentStateStore
+from app.services.observability import build_otel_env_vars, get_platform_observability_defaults
 from app.services.runtime_deployer import create_agent_runtime, sanitize_runtime_name
 
 logger = logging.getLogger(__name__)
@@ -94,6 +98,14 @@ def handler(event: dict, context) -> dict:
             env_vars["GATEWAY_URL"] = gateway_result["gateway_url"]
         if memory_result.get("memory_id"):
             env_vars["MEMORY_ID"] = memory_result["memory_id"]
+
+        # Inject knowledge base id so the agent's retrieve_from_kb tool can
+        # call bedrock-agent-runtime:Retrieve. See tasks/lessons.md Bug 87.
+        kb_result = event.get("knowledge_base_result") or {}
+        if kb_result.get("knowledge_base_id"):
+            env_vars["KB_ID"] = kb_result["knowledge_base_id"]
+        elif kb_result.get("kb_id"):
+            env_vars["KB_ID"] = kb_result["kb_id"]
         client_info = gateway_result.get("client_info") or {}
         idp_provider = client_info.get("provider", "cognito")
 
@@ -118,6 +130,21 @@ def handler(event: dict, context) -> dict:
                 env_vars["OAUTH_TOKEN_ENDPOINT"] = client_info["token_endpoint"]
             if client_info.get("scope"):
                 env_vars["OAUTH_SCOPE"] = client_info["scope"]
+
+        # Inject OTLP observability env vars. Single source of truth shared
+        # with the direct-deploy and CFN paths. When platform-level OTEL is
+        # configured (SSM /agentcore-workflow/{env}/otel/*), per-canvas values
+        # for endpoint/secret/sample are dropped and platform values win.
+        otel_env = build_otel_env_vars(
+            event.get("observability_config") or (
+                config.observability.model_dump() if getattr(config, "observability", None) else None
+            ),
+            runtime_name=runtime_name,
+            deployment_id=deployment_id,
+            enable_otel_legacy=bool(getattr(config, "enable_otel", False)),
+            platform_defaults=get_platform_observability_defaults(),
+        )
+        env_vars.update(otel_env)
 
         runtime_result = create_agent_runtime(
             agentcore_ctrl=agentcore_ctrl,

@@ -31,9 +31,12 @@ from app.services.runtime_deployer import (
 from app.models import RuntimeConfiguration, ModelConfiguration, ModelProvider
 
 REGION = os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1"))
-BUCKET = os.environ.get("ARTIFACTS_BUCKET_NAME", "agentcore-workflow-dev-artifacts-166827918465")
+# Resolved lazily inside main() so this module imports cleanly under pytest
+# collection even when ARTIFACTS_BUCKET_NAME isn't set (the file is an
+# end-to-end driver script, not a unit test).
+BUCKET = os.environ.get("ARTIFACTS_BUCKET_NAME", "")
 BUNDLE_KEY = "agentcore-deps/strands-mcp.zip"
-MODEL_ID = "us.anthropic.claude-sonnet-4-20250514-v1:0"
+MODEL_ID = "us.anthropic.claude-sonnet-4-5-20250929-v1:0"
 RUN_ID = uuid.uuid4().hex[:6]
 
 
@@ -42,6 +45,11 @@ def log(msg):
 
 
 def main():
+    if not BUCKET:
+        raise RuntimeError(
+            "ARTIFACTS_BUCKET_NAME env var must be set to the deployed "
+            "artifacts bucket (e.g. agentcore-workflow-dev-artifacts-<account>)."
+        )
     log(f"=== E2E Gateway + Memory Test (run={RUN_ID}, region={REGION}) ===")
 
     s3_client = boto3.client("s3", region_name=REGION)

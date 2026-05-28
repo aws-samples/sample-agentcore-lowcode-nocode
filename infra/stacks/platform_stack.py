@@ -33,6 +33,7 @@ from aws_cdk import aws_stepfunctions as sfn
 from aws_cdk import aws_stepfunctions_tasks as sfn_tasks
 from aws_cdk import aws_wafv2 as wafv2
 from aws_cdk import custom_resources as cr
+import cdk_nag
 from constructs import Construct
 
 
@@ -46,6 +47,10 @@ class PlatformStack(cdk.Stack):
         *,
         environment_name: str,
         project_name: str,
+        otel_endpoint: str = "",
+        otel_auth_secret_arn: str = "",
+        otel_sample_rate: str = "1.0",
+        otel_service_name_prefix: str = "",
         **kwargs,
     ) -> None:
         super().__init__(scope, construct_id, **kwargs)
@@ -55,6 +60,23 @@ class PlatformStack(cdk.Stack):
 
         self._env = environment_name
         self._project = project_name
+        # Audit issue #9: gate RemovalPolicy.DESTROY on environment so prod-like
+        # envs don't lose data on teardown. dev/test/sandbox/preview environments
+        # use DESTROY; everything else uses RETAIN. Override via env var
+        # AGENTCORE_ALLOW_DESTROY=true.
+        _destroy_envs = {"dev", "test", "sandbox", "preview", "ephemeral"}
+        _allow_destroy = (environment_name or "").lower() in _destroy_envs or os.environ.get(
+            "AGENTCORE_ALLOW_DESTROY", "false"
+        ).lower() == "true"
+        self._removal_policy = RemovalPolicy.DESTROY if _allow_destroy else RemovalPolicy.RETAIN
+        self._allow_destroy = _allow_destroy
+        # Platform OTEL defaults — feature is enabled iff both endpoint and
+        # secret ARN are provided. Lambdas + agents inherit these.
+        self._otel_endpoint = otel_endpoint
+        self._otel_auth_secret_arn = otel_auth_secret_arn
+        self._otel_sample_rate = otel_sample_rate or "1.0"
+        self._otel_service_name_prefix = otel_service_name_prefix or project_name
+        self._otel_enabled = bool(otel_endpoint and otel_auth_secret_arn)
 
         # --- Storage ---
         self.workflows_table = self._create_workflows_table()
@@ -66,6 +88,13 @@ class PlatformStack(cdk.Stack):
 
         # --- SSM Parameters ---
         self._create_ssm_parameters()
+
+        # --- Shared AgentCore runtime execution role ---
+        # Created once at stack-deploy time so AgentCore's IAM cache has
+        # fully propagated by the time any user-deploy runs. Eliminates the
+        # 17-20 min IAM-propagation race that per-deploy roles hit.
+        # See tasks/lessons.md Bug 60.
+        self.shared_runtime_role = self._create_shared_runtime_role()
 
         # --- Lambda Functions ---
         self.backend_code = self._get_backend_code()
@@ -85,6 +114,12 @@ class PlatformStack(cdk.Stack):
 
         # --- S3 + CloudFront + WAF ---
         self.web_acl = self._create_waf_web_acl()
+        # NOTE: We previously attempted a regional WAF on the API Gateway stage
+        # to prevent direct execute-api.amazonaws.com bypass of the CloudFront
+        # WAF, but WAFv2 only supports REST API Gateway (v1), NOT HTTP API
+        # Gateway (v2) which this stack uses. Tracked as a known gap; mitigated
+        # by API Gateway throttling already configured on the default stage.
+        # See tasks/lessons.md Bug 41 (revised).
         self.bucket = self._create_s3_bucket()
         self.distribution = self._create_cloudfront_distribution()
 
@@ -99,6 +134,9 @@ class PlatformStack(cdk.Stack):
 
         # --- Stack Outputs ---
         self._create_stack_outputs()
+
+        # --- CDK-NAG suppressions (per-construct, audit issue #4) ---
+        self._apply_nag_suppressions()
 
     # ------------------------------------------------------------------
     # DynamoDB Tables
@@ -118,7 +156,8 @@ class PlatformStack(cdk.Stack):
                 type=dynamodb.AttributeType.STRING,
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.DESTROY,
+            # Audit #9: gated on env so prod doesn't lose data on teardown.
+            removal_policy=self._removal_policy,
             encryption=dynamodb.TableEncryption.AWS_MANAGED,
             point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
                 point_in_time_recovery_enabled=True,
@@ -139,7 +178,7 @@ class PlatformStack(cdk.Stack):
                 type=dynamodb.AttributeType.STRING,
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.DESTROY,
+            removal_policy=self._removal_policy,
             time_to_live_attribute="ttl",
             encryption=dynamodb.TableEncryption.AWS_MANAGED,
             point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
@@ -160,6 +199,16 @@ class PlatformStack(cdk.Stack):
                 type=dynamodb.AttributeType.STRING,
             ),
         )
+        # Audit issue #7: deployment_handler._scan_for_runtime previously did
+        # a full O(N) Scan on every test/delete. Adding a runtime_id GSI lets
+        # the handler use Query instead — O(1) on the GSI partition key.
+        table.add_global_secondary_index(
+            index_name="runtime_id-index",
+            partition_key=dynamodb.Attribute(
+                name="runtime_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+        )
         return table
 
     def _create_flows_table(self) -> dynamodb.Table:
@@ -176,7 +225,7 @@ class PlatformStack(cdk.Stack):
                 type=dynamodb.AttributeType.STRING,
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
-            removal_policy=RemovalPolicy.DESTROY,
+            removal_policy=self._removal_policy,
             encryption=dynamodb.TableEncryption.AWS_MANAGED,
             point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
                 point_in_time_recovery_enabled=True,
@@ -234,6 +283,38 @@ class PlatformStack(cdk.Stack):
             description="DynamoDB table name for flow persistence",
         )
 
+        # Platform OTEL defaults — only written when the feature is enabled.
+        # Backend reads these via services.observability.get_platform_observability_defaults().
+        if self._otel_enabled:
+            ssm.StringParameter(
+                self,
+                "OtelEndpointParam",
+                parameter_name=f"{prefix}/otel/endpoint",
+                string_value=self._otel_endpoint,
+                description="Platform-default OTLP endpoint for all deployed agents",
+            )
+            ssm.StringParameter(
+                self,
+                "OtelAuthSecretArnParam",
+                parameter_name=f"{prefix}/otel/auth-secret-arn",
+                string_value=self._otel_auth_secret_arn,
+                description="Platform-default OTLP auth header Secrets Manager ARN",
+            )
+            ssm.StringParameter(
+                self,
+                "OtelSampleRateParam",
+                parameter_name=f"{prefix}/otel/sample-rate",
+                string_value=self._otel_sample_rate,
+                description="Platform-default OTLP trace sample rate (0.0-1.0)",
+            )
+            ssm.StringParameter(
+                self,
+                "OtelServiceNamePrefixParam",
+                parameter_name=f"{prefix}/otel/service-name-prefix",
+                string_value=self._otel_service_name_prefix,
+                description="Platform-default OTEL service.name prefix",
+            )
+
     def _create_runtime_ssm_parameters(self) -> None:
         """Create SSM parameters that depend on runtime resources (API GW URL)."""
         prefix = f"/agentcore-workflow/{self._env}"
@@ -274,7 +355,10 @@ class PlatformStack(cdk.Stack):
         )
 
     # ------------------------------------------------------------------
-    # Lambda Functions
+    # S3 (Artifacts Bucket + AgentCore Deps Upload)
+    # Audit #12: section banner — _create_artifacts_bucket and
+    # _upload_agentcore_deps create S3 resources, distinct from the
+    # "Lambda Functions" group below at _create_shared_runtime_role.
     # ------------------------------------------------------------------
 
     def _create_artifacts_bucket(self) -> s3.Bucket:
@@ -285,8 +369,8 @@ class PlatformStack(cdk.Stack):
             bucket_name=f"{self._project}-{self._env}-artifacts-{self.region}-{self.account}",
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
-            removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_objects=True,
+            removal_policy=self._removal_policy,
+            auto_delete_objects=self._allow_destroy,
             encryption=s3.BucketEncryption.S3_MANAGED,
             server_access_logs_bucket=self.logging_bucket,
             server_access_logs_prefix="s3-artifacts/",
@@ -309,7 +393,7 @@ class PlatformStack(cdk.Stack):
         if not os.path.isdir(deps_path):
             return
 
-        s3_deployment.BucketDeployment(
+        self.agentcore_deps_deployment = s3_deployment.BucketDeployment(
             self,
             "AgentCoreDepsDeployment",
             sources=[s3_deployment.Source.asset(deps_path)],
@@ -318,6 +402,169 @@ class PlatformStack(cdk.Stack):
             memory_limit=512,
             ephemeral_storage_size=Size.mebibytes(1024),
         )
+
+    # ------------------------------------------------------------------
+    # Platform OTEL — env vars + IAM for every platform Lambda.
+    # ------------------------------------------------------------------
+    # We deliberately do NOT use the AWS-managed ADOT Python Lambda layer.
+    # Verified live on 2026-05-15 (tasks/lessons.md Bug 22): the ADOT
+    # exec-wrapper at /opt/otel-instrument calls Python __import__() on the
+    # handler string, which fails for slash-form handlers like
+    # `src/app/lambda_handler.handler` used here. The ADOT layer also bundles
+    # an older `typing_extensions` that shadows /var/task/lib/typing_extensions/
+    # and breaks pydantic_core import.
+    #
+    # Instead, services/_otel_platform.py manually builds an OTLP exporter
+    # at module import time using the SDK packages bundled by
+    # requirements-lambda.txt. Each handler module imports it FIRST.
+
+    def _platform_otel_env(self) -> dict[str, str]:
+        """Standard OTEL env vars for platform Lambdas.
+
+        Empty dict when platform OTEL is not configured — caller can blindly
+        merge into the Lambda's environment without conditionals.
+        """
+        if not self._otel_enabled:
+            return {}
+        return {
+            "OTEL_EXPORTER_OTLP_ENDPOINT": self._otel_endpoint,
+            "OTEL_EXPORTER_OTLP_PROTOCOL": "http/protobuf",
+            "OTEL_TRACES_SAMPLER": "parentbased_traceidratio",
+            "OTEL_TRACES_SAMPLER_ARG": self._otel_sample_rate,
+            "OTEL_RESOURCE_ATTRIBUTES": (
+                f"service.namespace=agentcore-platform,"
+                f"deployment.environment={self._env}"
+            ),
+            "OTEL_SEMCONV_STABILITY_OPT_IN": "gen_ai_latest_experimental",
+            # Tighten span export so a slow Langfuse endpoint doesn't burn 10s
+            # of Lambda CPU per failed export. Live test 2026-05-16 saw repeated
+            # 10s read timeouts; tasks/lessons.md Bug 30.
+            "OTEL_EXPORTER_OTLP_TIMEOUT": "2000",
+            "OTEL_BSP_SCHEDULE_DELAY": "1000",
+            "OTEL_BSP_EXPORT_TIMEOUT": "5000",
+            # Resolved to OTEL_EXPORTER_OTLP_HEADERS at module import by
+            # services/_otel_platform.py.
+            "OTEL_AUTH_SECRET_ARN": self._otel_auth_secret_arn,
+        }
+
+    def _apply_platform_otel(
+        self, fn: _lambda.Function, fn_purpose: str
+    ) -> None:
+        """Add OTEL env vars + scoped Secrets Manager perms to a Lambda.
+
+        Idempotent and no-op when platform OTEL is not configured (so callers
+        don't have to gate on self._otel_enabled). When configured, the Lambda
+        will:
+          - Receive the OTLP endpoint + auth-secret ARN as env vars
+          - Resolve the auth-header secret at module import (via _otel_platform.py)
+          - Emit spans tagged service.name={fn_purpose}, service.namespace=agentcore-platform
+        """
+        if not self._otel_enabled:
+            return
+
+        for k, v in self._platform_otel_env().items():
+            fn.add_environment(k, v)
+        # Per-Lambda service.name so each shows up distinctly in Langfuse.
+        fn.add_environment("OTEL_SERVICE_NAME", f"{self._otel_service_name_prefix}-{fn_purpose}")
+
+        # Scoped GetSecretValue on the platform OTEL auth secret only.
+        fn.role.add_to_principal_policy(
+            iam.PolicyStatement(
+                sid="PlatformOtelAuthSecretRead",
+                actions=["secretsmanager:GetSecretValue"],
+                resources=[self._otel_auth_secret_arn],
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # IAM Roles + Lambda Functions
+    # Audit #12: section banner — shared runtime role, workflow Lambda,
+    # deployment Lambda, per-step IAM roles (_create_step_role), and per-step
+    # Lambdas (_create_step_lambdas) all live below this banner.
+    # ------------------------------------------------------------------
+
+    def _create_shared_runtime_role(self) -> iam.Role:
+        """Create ONE stable IAM execution role shared by every AgentCore runtime.
+
+        Why: AgentCore's service-side IAM cache for fresh roles can take 17-20
+        minutes to propagate after put_role_policy in this account. Per-deploy
+        roles fail with `ValidationException: Access denied when trying to
+        retrieve zip file from S3` for that entire window. Creating one stable
+        role at CDK stack init means propagation happens during stack creation,
+        not at per-deploy time. See tasks/lessons.md Bug 60.
+
+        Trade-off: every runtime in this stack shares the same role. Per-runtime
+        least-privilege is sacrificed in exchange for a working deploy pipeline.
+        Acceptable for a sample / demo platform; production deployments that
+        need strict per-tenant IAM should override `RUNTIME_EXEC_ROLE_ARN` with
+        a pre-existing role per agent.
+        """
+        role = iam.Role(
+            self,
+            "SharedRuntimeExecRole",
+            role_name=f"AgentCoreRuntime-{self._project}-{self._env}-shared",
+            assumed_by=iam.ServicePrincipal("bedrock-agentcore.amazonaws.com"),
+            description=(
+                "Shared execution role used by every AgentCore runtime "
+                "deployed by this stack. Pre-created so AgentCore's IAM "
+                "cache has propagated by user-deploy time."
+            ),
+        )
+        # Bedrock model access (Strands needs both InvokeModel + Stream)
+        role.add_to_policy(iam.PolicyStatement(
+            actions=[
+                "bedrock:InvokeModel",
+                "bedrock:InvokeModelWithResponseStream",
+                "bedrock:Converse",
+                "bedrock:ConverseStream",
+            ],
+            resources=["*"],
+        ))
+        # Read the agent code zip from the artifacts bucket
+        self.artifacts_bucket.grant_read(role)
+        # CloudWatch Logs (auto-instrumented by AgentCore Runtime)
+        role.add_to_policy(iam.PolicyStatement(
+            actions=[
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+            ],
+            resources=["*"],
+        ))
+        # All AgentCore runtime tool integrations (browser, code interpreter,
+        # gateway, memory, guardrails, evaluation, policy). Wildcards because
+        # tools are dynamically connected per-runtime; restricting per-tool
+        # would require separate roles, which defeats the IAM-race fix.
+        role.add_to_policy(iam.PolicyStatement(
+            actions=[
+                "bedrock-agentcore:*Browser*",
+                "bedrock-agentcore:*CodeInterpreter*",
+                "bedrock-agentcore:InvokeGateway",
+                "bedrock-agentcore:ListGateways",
+                "bedrock-agentcore:GetGateway",
+                "bedrock-agentcore:*Memory*",
+                "bedrock-agentcore:CreateEvent",
+                "bedrock-agentcore:GetLastKTurns",
+                "bedrock-agentcore:RetrieveMemories",
+                "bedrock-agentcore:ListSessions",
+                "bedrock-agentcore:ListActors",
+                "bedrock-agentcore:ListEvents",
+                "bedrock:ApplyGuardrail",
+                "bedrock:GetGuardrail",
+                # Knowledge Base retrieve (called by retrieve_from_kb tool
+                # in agents that have a KB connected). See lessons Bug 87.
+                "bedrock:Retrieve",
+                "bedrock:RetrieveAndGenerate",
+            ],
+            resources=["*"],
+        ))
+        # Optional OTEL auth-header secret (when platform OTEL is configured).
+        if self._otel_enabled:
+            role.add_to_policy(iam.PolicyStatement(
+                actions=["secretsmanager:GetSecretValue"],
+                resources=[self._otel_auth_secret_arn],
+            ))
+        return role
 
     def _create_workflow_lambda(self) -> _lambda.Function:
         """Create Workflow Lambda (FastAPI + Mangum) for CRUD operations.
@@ -345,6 +592,22 @@ class PlatformStack(cdk.Stack):
                     "ssm:GetParametersByPath",
                 ],
                 resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter/agentcore-workflow/{self._env}/*"],
+            )
+        )
+        # Secrets Manager for OTEL auth header storage (POST /api/observability/credentials).
+        # The router always names secrets `agentcore-otel/{provider}/{uuid}`.
+        # CreateSecret historically required `*` because IAM Resource matching for
+        # CreateSecret pre-2023 didn't support name patterns, but modern IAM does
+        # via the secret-ARN path prefix. See tasks/lessons.md Bug 40.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "secretsmanager:CreateSecret",
+                    "secretsmanager:TagResource",
+                ],
+                resources=[
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:agentcore-otel/*",
+                ],
             )
         )
 
@@ -375,6 +638,7 @@ class PlatformStack(cdk.Stack):
                 removal_policy=RemovalPolicy.DESTROY,
             ),
         )
+        self._apply_platform_otel(fn, "workflow")
         return fn
 
     def _create_deployment_lambda(self) -> _lambda.Function:
@@ -404,15 +668,71 @@ class PlatformStack(cdk.Stack):
                 resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter/agentcore-workflow/{self._env}/*"],
             )
         )
-        # bedrock-agentcore for test-runtime invocation and runtime deletion
-        # Wildcards required — AgentCore IAM action prefixes are not stable.
+        # bedrock-agentcore for test-runtime invocation and runtime deletion.
+        # IMPORTANT: AgentCore uses ONE IAM action prefix `bedrock-agentcore:`
+        # for both control-plane (CreateAgentRuntime, etc) and data-plane
+        # (InvokeAgentRuntime). The boto3 service name `bedrock-agentcore-control`
+        # is misleading — see tasks/lessons.md Bug 43.
+        # Also, observed live 2026-05-16: AgentCore does NOT honor
+        # `bedrock-agentcore:*` wildcard authorization — explicit per-action
+        # grants are required even though `iam:simulate-principal-policy`
+        # claims `*` allows everything. See tasks/lessons.md Bug 47.
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
                     "bedrock:InvokeModel",
                     "bedrock:InvokeModelWithResponseStream",
-                    "bedrock-agentcore:*",
-                    "bedrock-agentcore-control:*",
+                    # KB cleanup on runtime delete (Bug 90).
+                    "bedrock:GetKnowledgeBase",
+                    "bedrock:ListKnowledgeBases",
+                    "bedrock:DeleteKnowledgeBase",
+                    "bedrock:DeleteDataSource",
+                    "bedrock:GetDataSource",
+                    "bedrock:ListDataSources",
+                    # Explicit AgentCore actions used by the deployment Lambda:
+                    # /api/test-runtime invokes; /api/runtime/{id} DELETE
+                    # cascades through Get/Delete on runtime + endpoint +
+                    # gateway + memory + policy resources.
+                    "bedrock-agentcore:InvokeAgentRuntime",
+                    "bedrock-agentcore:CreateAgentRuntime",
+                    "bedrock-agentcore:GetAgentRuntime",
+                    "bedrock-agentcore:UpdateAgentRuntime",
+                    "bedrock-agentcore:DeleteAgentRuntime",
+                    "bedrock-agentcore:ListAgentRuntimes",
+                    "bedrock-agentcore:CreateAgentRuntimeEndpoint",
+                    "bedrock-agentcore:GetAgentRuntimeEndpoint",
+                    "bedrock-agentcore:DeleteAgentRuntimeEndpoint",
+                    "bedrock-agentcore:UpdateAgentRuntimeEndpoint",
+                    "bedrock-agentcore:ListAgentRuntimeEndpoints",
+                    "bedrock-agentcore:CreateGateway",
+                    "bedrock-agentcore:GetGateway",
+                    "bedrock-agentcore:UpdateGateway",
+                    "bedrock-agentcore:DeleteGateway",
+                    "bedrock-agentcore:ListGateways",
+                    "bedrock-agentcore:CreateGatewayTarget",
+                    "bedrock-agentcore:DeleteGatewayTarget",
+                    "bedrock-agentcore:ListGatewayTargets",
+                    "bedrock-agentcore:CreateOauth2CredentialProvider",
+                    "bedrock-agentcore:DeleteOauth2CredentialProvider",
+                    "bedrock-agentcore:ListOauth2CredentialProviders",
+                    "bedrock-agentcore:CreateMemory",
+                    "bedrock-agentcore:GetMemory",
+                    "bedrock-agentcore:DeleteMemory",
+                    "bedrock-agentcore:ListMemories",
+                    "bedrock-agentcore:CreatePolicyEngine",
+                    "bedrock-agentcore:GetPolicyEngine",
+                    "bedrock-agentcore:DeletePolicyEngine",
+                    "bedrock-agentcore:ListPolicyEngines",
+                    "bedrock-agentcore:CreatePolicy",
+                    "bedrock-agentcore:DeletePolicy",
+                    "bedrock-agentcore:ListPolicies",
+                    # AgentCore's DeleteAgentRuntime cascades into deleting
+                    # the runtime's auto-created workload-identity record;
+                    # the caller principal must hold this verb too. Verified
+                    # live 2026-05-16 — see tasks/lessons.md Bug 53.
+                    "bedrock-agentcore:GetWorkloadIdentity",
+                    "bedrock-agentcore:DeleteWorkloadIdentity",
+                    "bedrock-agentcore:ListWorkloadIdentities",
                 ],
                 resources=["*"],
             )
@@ -435,7 +755,10 @@ class PlatformStack(cdk.Stack):
                 resources=["*"],
             )
         )
-        # Tool tester + custom tool cleanup: create/invoke/delete Lambdas + IAM roles
+        # Tool tester + custom tool cleanup: create/invoke/delete Lambdas + IAM roles.
+        # Also covers runtime_deployer.destroy_runtime which deletes the runtime's
+        # execution role (Bug 27 fix — previously the API delete path leaked
+        # AgentCoreRuntime-* roles).
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
@@ -446,6 +769,8 @@ class PlatformStack(cdk.Stack):
                     "iam:DetachRolePolicy",
                     "iam:DeleteRole",
                     "iam:ListAttachedRolePolicies",
+                    "iam:ListRolePolicies",
+                    "iam:DeleteRolePolicy",
                 ],
                 resources=[f"arn:aws:iam::{self.account}:role/AgentCore*"],
             )
@@ -483,8 +808,11 @@ class PlatformStack(cdk.Stack):
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
                 "POWERTOOLS_SERVICE_NAME": "deployment",
-                "TOOL_GENERATOR_MODEL_ID": f"{'eu' if self.region.startswith('eu-') else 'ap' if self.region.startswith('ap-') else 'us'}.anthropic.claude-sonnet-4-20250514-v1:0",
+                "TOOL_GENERATOR_MODEL_ID": f"{'eu' if self.region.startswith('eu-') else 'ap' if self.region.startswith('ap-') else 'us'}.anthropic.claude-sonnet-4-5-20250929-v1:0",
                 "PYTHONPATH": "/var/task/src:/var/task:/var/task/lib",
+                # Needed by destroy_runtime to skip cascade-deletion of the
+                # stack-managed shared runtime role (Bug 62).
+                "SHARED_RUNTIME_ROLE_ARN": self.shared_runtime_role.role_arn,
             },
             log_group=logs.LogGroup(
                 self,
@@ -494,10 +822,36 @@ class PlatformStack(cdk.Stack):
                 removal_policy=RemovalPolicy.DESTROY,
             ),
         )
+        self._apply_platform_otel(fn, "deployment")
+        # Allow the Deployment Lambda to invoke ITSELF. The handler kicks off
+        # async tool generation/test jobs by self-invoking with a job_id sentinel
+        # in the event payload. Without this, every multi-turn /api/generate-tool
+        # and every /api/test-tool returned plaintext "Internal Server Error" 500.
+        # See tasks/lessons.md Bug 33.
+        # Note: building the ARN from a literal function_name (not the Function
+        # object's .function_arn attribute) — using the attribute creates a
+        # circular dependency since the role policy would reference the same
+        # function it's attached to. The function_name is a static string here.
+        fn.role.add_to_principal_policy(
+            iam.PolicyStatement(
+                sid="DeploymentLambdaSelfInvoke",
+                actions=["lambda:InvokeFunction"],
+                resources=[
+                    f"arn:aws:lambda:{self.region}:{self.account}:function:"
+                    f"{self._project}-{self._env}-deployment"
+                ],
+            )
+        )
         return fn
 
     def _create_step_role(self, step_name: str) -> iam.Role:
-        """Create a dedicated IAM role for a step Lambda (1:1 relationship)."""
+        """Create a dedicated IAM role for a step Lambda (1:1 relationship).
+
+        Per-step least-privilege. Previously every step Lambda shared an
+        identical kitchen-sink policy with iam:CreateRole + lambda:CreateFunction
+        + secretsmanager:* on `*` — meaning RCE in any step Lambda became full
+        account compromise. Verified live 2026-05-16; tasks/lessons.md Bug 36.
+        """
         role = iam.Role(
             self,
             f"Step{step_name.title().replace('_', '')}Role",
@@ -506,69 +860,287 @@ class PlatformStack(cdk.Stack):
                 iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole"),
             ],
         )
+        # ── Common: every step needs to update its DDB row + read SSM config ─
         self.deployments_table.grant_read_write_data(role)
         self.workflows_table.grant_read_data(role)
-        self.artifacts_bucket.grant_read_write(role)
         role.add_to_policy(iam.PolicyStatement(
             actions=["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
             resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter/agentcore-workflow/{self._env}/*"],
         ))
-        role.add_to_policy(iam.PolicyStatement(
-            actions=[
-                "iam:CreateRole", "iam:AttachRolePolicy", "iam:PutRolePolicy", "iam:GetRole",
-                "iam:PassRole", "iam:DeleteRole", "iam:DetachRolePolicy", "iam:DeleteRolePolicy",
-                "iam:ListAttachedRolePolicies", "iam:ListRolePolicies",
-            ],
-            resources=[f"arn:aws:iam::{self.account}:role/AgentCore*"],
-        ))
-        role.add_to_policy(iam.PolicyStatement(
-            actions=["iam:CreateServiceLinkedRole"],
-            resources=[f"arn:aws:iam::{self.account}:role/aws-service-role/*"],
-        ))
-        role.add_to_policy(iam.PolicyStatement(
-            actions=[
-                "lambda:CreateFunction", "lambda:UpdateFunctionCode", "lambda:UpdateFunctionConfiguration",
-                "lambda:DeleteFunction", "lambda:GetFunction", "lambda:InvokeFunction",
-                "lambda:AddPermission", "lambda:RemovePermission",
-            ],
-            resources=[f"arn:aws:lambda:{self.region}:{self.account}:function:*"],
-        ))
-        # CreateUserPool does not support resource-level permissions
-        role.add_to_policy(iam.PolicyStatement(
-            actions=["cognito-idp:CreateUserPool"],
-            resources=["*"],
-        ))
-        role.add_to_policy(iam.PolicyStatement(
-            actions=[
-                "cognito-idp:DeleteUserPool", "cognito-idp:CreateUserPoolClient",
-                "cognito-idp:DescribeUserPool", "cognito-idp:AdminCreateUser", "cognito-idp:AdminSetUserPassword",
-                "cognito-idp:AdminInitiateAuth", "cognito-idp:CreateResourceServer",
-                "cognito-idp:CreateUserPoolDomain", "cognito-idp:DeleteUserPoolClient",
-                "cognito-idp:DeleteUserPoolDomain",
-            ],
-            resources=[f"arn:aws:cognito-idp:{self.region}:{self.account}:userpool/*"],
-        ))
-        role.add_to_policy(iam.PolicyStatement(
-            actions=[
-                "bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream",
-                "bedrock:CreateKnowledgeBase", "bedrock:GetKnowledgeBase", "bedrock:ListKnowledgeBases",
-                "bedrock:DeleteKnowledgeBase", "bedrock:CreateDataSource", "bedrock:DeleteDataSource",
-                "bedrock:StartIngestionJob", "bedrock:GetIngestionJob", "bedrock:ListFoundationModels",
-                "bedrock:Retrieve", "bedrock:RetrieveAndGenerate",
-                # Guardrails API actions
-                "bedrock:CreateGuardrail", "bedrock:GetGuardrail", "bedrock:ListGuardrails",
-                "bedrock:UpdateGuardrail", "bedrock:DeleteGuardrail", "bedrock:CreateGuardrailVersion",
-                "bedrock-agentcore:*", "bedrock-agentcore-control:*",
-            ],
-            resources=["*"],
-        ))
-        role.add_to_policy(iam.PolicyStatement(actions=["cloudwatch:PutMetricData"], resources=["*"]))
         role.add_to_policy(iam.PolicyStatement(actions=["sts:GetCallerIdentity"], resources=["*"]))
-        role.add_to_policy(iam.PolicyStatement(
-            actions=["secretsmanager:CreateSecret", "secretsmanager:DeleteSecret",
-                     "secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"],
-            resources=["*"],
-        ))
+        role.add_to_policy(iam.PolicyStatement(actions=["cloudwatch:PutMetricData"], resources=["*"]))
+
+        # ── Per-step grants ──────────────────────────────────────────────────
+        # Every step that writes to S3 (codegen, gateway, knowledge_base,
+        # mcp_server) gets bucket access. runtime_configure / runtime_launch
+        # only need read because AgentCore's CreateAgentRuntime does a
+        # pre-flight S3 check on the CALLING principal's identity — not just
+        # the passed roleArn. Without s3:GetObject, the call fails with
+        # `ValidationException: Access denied when trying to retrieve zip
+        # file from S3` even though the shared runtime exec role can read it.
+        # Verified live 2026-05-18: same role+bucket+key, direct boto3 from
+        # an S3-permitted user succeeds; from the step Lambda fails. See
+        # tasks/lessons.md Bug 66.
+        s3_writers = {"codegen", "gateway", "knowledge_base", "mcp_server"}
+        s3_readers = {"runtime_configure", "runtime_launch"}
+        if step_name in s3_writers:
+            self.artifacts_bucket.grant_read_write(role)
+        elif step_name in s3_readers:
+            self.artifacts_bucket.grant_read(role)
+
+        # iam_step: creates and tags the runtime's execution role.
+        # mcp_server / gateway / knowledge_base / memory also create paired
+        # IAM roles for their own dynamically-created Lambdas / AgentCore
+        # resources. (memory creates AgentCoreMemory-* role for the memory
+        # resource — see tasks/lessons.md Bug 45.)
+        if step_name in {"iam", "mcp_server", "gateway", "knowledge_base", "memory"}:
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "iam:CreateRole", "iam:AttachRolePolicy", "iam:PutRolePolicy", "iam:GetRole",
+                    "iam:PassRole", "iam:DeleteRole", "iam:DetachRolePolicy", "iam:DeleteRolePolicy",
+                    "iam:ListAttachedRolePolicies", "iam:ListRolePolicies",
+                    "iam:TagRole",
+                ],
+                resources=[f"arn:aws:iam::{self.account}:role/AgentCore*"],
+            ))
+            role.add_to_policy(iam.PolicyStatement(
+                actions=["iam:CreateServiceLinkedRole"],
+                resources=[f"arn:aws:iam::{self.account}:role/aws-service-role/*"],
+            ))
+
+        # runtime_configure / runtime_launch / mcp_server PASS the runtime's
+        # IAM role to AgentCore via CreateAgentRuntime / CreateAgentRuntimeEndpoint.
+        # iam:PassRole is required at the calling principal — see tasks/lessons.md
+        # Bug 49. Resource includes the shared runtime role (Bug 60) and the
+        # legacy per-deploy AgentCoreRuntime-* / AgentCoreMemory-* patterns
+        # so cleanup of older deployments still works.
+        if step_name in {"runtime_configure", "runtime_launch", "mcp_server"}:
+            role.add_to_policy(iam.PolicyStatement(
+                actions=["iam:PassRole"],
+                resources=[
+                    f"arn:aws:iam::{self.account}:role/AgentCoreRuntime-{self._project}-{self._env}-shared",
+                    f"arn:aws:iam::{self.account}:role/AgentCoreRuntime-*",
+                    f"arn:aws:iam::{self.account}:role/AgentCoreMemory-*",
+                    f"arn:aws:iam::{self.account}:role/AgentCoreMCP-*",
+                ],
+            ))
+
+        # policy step calls update_gateway(roleArn=...) when binding the
+        # PolicyEngine — re-passing the gateway's existing role triggers
+        # iam:PassRole on the calling principal. See tasks/lessons.md Bug 76.
+        if step_name == "policy":
+            role.add_to_policy(iam.PolicyStatement(
+                actions=["iam:PassRole"],
+                resources=[f"arn:aws:iam::{self.account}:role/AgentCoreGateway-*"],
+                conditions={"StringEquals": {"iam:PassedToService": "bedrock-agentcore.amazonaws.com"}},
+            ))
+
+        # gateway / mcp_server / codegen / knowledge_base create user Lambdas
+        # (custom tools, MCP servers, KB transformer Lambdas).
+        if step_name in {"gateway", "mcp_server", "codegen", "knowledge_base"}:
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "lambda:CreateFunction", "lambda:UpdateFunctionCode",
+                    "lambda:UpdateFunctionConfiguration",
+                    "lambda:DeleteFunction", "lambda:GetFunction", "lambda:InvokeFunction",
+                    "lambda:AddPermission", "lambda:RemovePermission",
+                ],
+                resources=[f"arn:aws:lambda:{self.region}:{self.account}:function:AgentCore*"],
+            ))
+
+        # gateway AND mcp_server both create a Cognito user pool — gateway
+        # for OAuth2 client_credentials between caller and gateway,
+        # mcp_server for the gateway-to-MCP-server-runtime auth bridge.
+        # See tasks/lessons.md Bug 77.
+        if step_name in {"gateway", "mcp_server"}:
+            # CreateUserPool does not support resource-level permissions
+            role.add_to_policy(iam.PolicyStatement(
+                actions=["cognito-idp:CreateUserPool"],
+                resources=["*"],
+            ))
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "cognito-idp:DeleteUserPool", "cognito-idp:CreateUserPoolClient",
+                    "cognito-idp:DescribeUserPool", "cognito-idp:AdminCreateUser",
+                    "cognito-idp:AdminSetUserPassword", "cognito-idp:AdminInitiateAuth",
+                    "cognito-idp:CreateResourceServer", "cognito-idp:CreateUserPoolDomain",
+                    "cognito-idp:DeleteUserPoolClient", "cognito-idp:DeleteUserPoolDomain",
+                ],
+                resources=[f"arn:aws:cognito-idp:{self.region}:{self.account}:userpool/*"],
+            ))
+            # gateway also stores the OAuth2 client_secret in Secrets Manager.
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "secretsmanager:CreateSecret", "secretsmanager:DeleteSecret",
+                    "secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue",
+                    "secretsmanager:TagResource",
+                ],
+                resources=[
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:AgentCore*",
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:agentcore-*",
+                    # CreateOauth2CredentialProvider writes its client_secret
+                    # under the bedrock-agentcore-identity!default/oauth2/<n>
+                    # Secrets Manager namespace, not the platform's prefix.
+                    # See tasks/lessons.md Bug 83.
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:bedrock-agentcore-*",
+                ],
+            ))
+
+        # codegen reads bedrock:Converse to render system prompts that
+        # describe a tool's purpose (used by the customer-support template).
+        if step_name == "codegen":
+            role.add_to_policy(iam.PolicyStatement(
+                actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                resources=["*"],
+            ))
+
+        # knowledge_base creates KBs / data sources / ingestion jobs.
+        if step_name == "knowledge_base":
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "bedrock:CreateKnowledgeBase", "bedrock:GetKnowledgeBase",
+                    "bedrock:ListKnowledgeBases", "bedrock:DeleteKnowledgeBase",
+                    "bedrock:CreateDataSource", "bedrock:DeleteDataSource",
+                    "bedrock:StartIngestionJob", "bedrock:GetIngestionJob",
+                    "bedrock:ListFoundationModels",
+                    "bedrock:Retrieve", "bedrock:RetrieveAndGenerate",
+                ],
+                resources=["*"],
+            ))
+            # KB step auto-creates the S3 Vectors index on user-supplied
+            # buckets when missing (Bug 88). Needs list/create permissions
+            # on the s3vectors service.
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "s3vectors:ListIndexes",
+                    "s3vectors:CreateIndex",
+                    "s3vectors:GetIndex",
+                    "s3vectors:DescribeIndex",
+                    "s3vectors:CreateVectorBucket",
+                    "s3vectors:DescribeVectorBucket",
+                    "s3vectors:GetVectorBucket",
+                    "s3vectors:ListVectorBuckets",
+                ],
+                resources=["*"],
+            ))
+
+        # guardrails creates Bedrock Guardrails.
+        if step_name == "guardrails":
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "bedrock:CreateGuardrail", "bedrock:GetGuardrail",
+                    "bedrock:ListGuardrails", "bedrock:UpdateGuardrail",
+                    "bedrock:DeleteGuardrail", "bedrock:CreateGuardrailVersion",
+                ],
+                resources=["*"],
+            ))
+
+        # AgentCore control-plane verbs are split across many steps.
+        agentcore_steps = {
+            "mcp_server": [
+                "bedrock-agentcore:CreateAgentRuntime",
+                "bedrock-agentcore:GetAgentRuntime",
+                "bedrock-agentcore:UpdateAgentRuntime",
+                "bedrock-agentcore:ListAgentRuntimes",
+                "bedrock-agentcore:CreateAgentRuntimeEndpoint",
+                "bedrock-agentcore:CreateWorkloadIdentity",
+                "bedrock-agentcore:DeleteWorkloadIdentity",
+            ],
+            "gateway": [
+                "bedrock-agentcore:CreateGateway",
+                "bedrock-agentcore:GetGateway",
+                "bedrock-agentcore:UpdateGateway",
+                "bedrock-agentcore:ListGateways",
+                "bedrock-agentcore:CreateGatewayTarget",
+                "bedrock-agentcore:DeleteGatewayTarget",
+                "bedrock-agentcore:ListGatewayTargets",
+                "bedrock-agentcore:CreateOauth2CredentialProvider",
+                "bedrock-agentcore:DeleteOauth2CredentialProvider",
+                "bedrock-agentcore:ListOauth2CredentialProviders",
+                # CreateOauth2CredentialProvider transparently provisions a
+                # token vault under the account's identity directory if one
+                # doesn't exist. Without these, mcp-server-gateway-target
+                # deploys fail with "not authorized to perform:
+                # bedrock-agentcore:CreateTokenVault on resource:
+                # token-vault/default". See tasks/lessons.md Bug 79.
+                "bedrock-agentcore:CreateTokenVault",
+                "bedrock-agentcore:GetTokenVault",
+                "bedrock-agentcore:ListTokenVaults",
+                # CreateGateway transparently creates a workload-identity
+                # record under the gateway's identity directory. Without this
+                # action, the gateway lands in FAILED status with
+                # "Failed to create gateway dependencies: ... not authorized
+                # to perform: bedrock-agentcore:CreateWorkloadIdentity ..."
+                # Verified live 2026-05-18 — see tasks/lessons.md Bug 65.
+                "bedrock-agentcore:CreateWorkloadIdentity",
+                "bedrock-agentcore:GetWorkloadIdentity",
+                "bedrock-agentcore:DeleteWorkloadIdentity",
+                "bedrock-agentcore:ListWorkloadIdentities",
+            ],
+            "memory": [
+                "bedrock-agentcore:CreateMemory",
+                "bedrock-agentcore:GetMemory",
+                "bedrock-agentcore:DeleteMemory",
+                "bedrock-agentcore:ListMemories",
+            ],
+            "policy": [
+                "bedrock-agentcore:CreatePolicyEngine",
+                "bedrock-agentcore:GetPolicyEngine",
+                "bedrock-agentcore:DeletePolicyEngine",
+                "bedrock-agentcore:ListPolicyEngines",
+                "bedrock-agentcore:CreatePolicy",
+                "bedrock-agentcore:DeletePolicy",
+                "bedrock-agentcore:ListPolicies",
+                "bedrock-agentcore:UpdatePolicy",
+                # CreatePolicy implicitly requires ManageAdminPolicy
+                # (undocumented). See tasks/lessons.md Bug 93.
+                "bedrock-agentcore:ManageAdminPolicy",
+                # The policy step reads the gateway it's about to attach the
+                # engine to (and updates it). Without GetGateway, the bind
+                # call fails with AccessDenied. See tasks/lessons.md Bug 70.
+                "bedrock-agentcore:GetGateway",
+                "bedrock-agentcore:UpdateGateway",
+            ],
+            "evaluation": [
+                "bedrock-agentcore:Evaluate",
+                "bedrock-agentcore:CreateOnlineEvaluationConfig",
+                "bedrock-agentcore:GetOnlineEvaluationConfig",
+                "bedrock-agentcore:ListOnlineEvaluationConfigs",
+                "logs:StartQuery", "logs:GetQueryResults",
+            ],
+            "runtime_configure": [
+                # CreateAgentRuntime auto-creates a default endpoint AND a
+                # workload-identity record; the caller IAM principal must
+                # hold all three action sets — see tasks/lessons.md Bug 46/53.
+                "bedrock-agentcore:CreateAgentRuntime",
+                "bedrock-agentcore:GetAgentRuntime",
+                "bedrock-agentcore:UpdateAgentRuntime",
+                "bedrock-agentcore:ListAgentRuntimes",
+                "bedrock-agentcore:DeleteAgentRuntime",
+                "bedrock-agentcore:CreateAgentRuntimeEndpoint",
+                "bedrock-agentcore:GetAgentRuntimeEndpoint",
+                "bedrock-agentcore:DeleteAgentRuntimeEndpoint",
+                "bedrock-agentcore:ListAgentRuntimeEndpoints",
+                "bedrock-agentcore:UpdateAgentRuntimeEndpoint",
+                "bedrock-agentcore:CreateWorkloadIdentity",
+                "bedrock-agentcore:GetWorkloadIdentity",
+                "bedrock-agentcore:DeleteWorkloadIdentity",
+                "bedrock-agentcore:ListWorkloadIdentities",
+            ],
+            "runtime_launch": [
+                "bedrock-agentcore:GetAgentRuntime",
+                "bedrock-agentcore:CreateAgentRuntimeEndpoint",
+                "bedrock-agentcore:GetAgentRuntimeEndpoint",
+                "bedrock-agentcore:ListAgentRuntimeEndpoints",
+                "bedrock-agentcore:UpdateAgentRuntimeEndpoint",
+                "bedrock-agentcore:DeleteAgentRuntimeEndpoint",
+            ],
+        }
+        if step_name in agentcore_steps:
+            role.add_to_policy(iam.PolicyStatement(
+                actions=agentcore_steps[step_name],
+                resources=["*"],
+            ))
         return role
 
     def _create_step_lambdas(self) -> dict[str, _lambda.Function]:
@@ -605,7 +1177,11 @@ class PlatformStack(cdk.Stack):
             "runtime_configure": {
                 "handler": "src/app/step_handlers/runtime_configure_step.handler",
                 "memory": 512,
-                "timeout": 60,
+                # 240s budget: Bug 52's IAM-race retry can spend up to 75s
+                # waiting for AgentCore's IAM cache to populate after
+                # put_role_policy. Plus the create call itself can be slow.
+                # 60s caused 100% deploy regression. See lessons Bug 54.
+                "timeout": 240,
             },
             "runtime_launch": {
                 "handler": "src/app/step_handlers/runtime_launch_step.handler",
@@ -671,6 +1247,9 @@ class PlatformStack(cdk.Stack):
                     "ENVIRONMENT": self._env,
                     "APP_AWS_REGION": self.region,
                     "PYTHONPATH": "/var/task/src:/var/task:/var/task/lib",
+                    # Shared runtime execution role — pre-created at stack
+                    # init to avoid the per-deploy IAM-propagation race.
+                    "SHARED_RUNTIME_ROLE_ARN": self.shared_runtime_role.role_arn,
                 },
                 log_group=logs.LogGroup(
                     self,
@@ -680,6 +1259,7 @@ class PlatformStack(cdk.Stack):
                     removal_policy=RemovalPolicy.DESTROY,
                 ),
             )
+            self._apply_platform_otel(fn, f"step-{step_name.replace('_', '-')}")
             lambdas[step_name] = fn
 
         return lambdas
@@ -751,7 +1331,10 @@ class PlatformStack(cdk.Stack):
         iam_step = self._create_step_task(
             "CreateIAMRole",
             self.step_lambdas["iam"],
-            timeout_seconds=60,
+            # 90s budget: create_runtime_iam_role does put_role_policy + 15s
+            # IAM-propagation sleep + per-tool inline policy attachments. 60s
+            # was tight on cold starts.
+            timeout_seconds=90,
             result_path="$",
         )
         iam_step.add_retry(**self._retry_kwargs())
@@ -796,7 +1379,12 @@ class PlatformStack(cdk.Stack):
         runtime_configure = self._create_step_task(
             "ConfigureRuntime",
             self.step_lambdas["runtime_configure"],
-            timeout_seconds=60,
+            # Match the underlying Lambda timeout (240s — bumped for Bug 54).
+            # The IAM-propagation retry loop inside `create_agent_runtime` can
+            # legitimately spend up to 75s waiting for AgentCore's IAM cache.
+            # See tasks/lessons.md Bug 56 — SFN task TimeoutSeconds is the
+            # outer cap and must match the Lambda's.
+            timeout_seconds=240,
             result_path="$",
         )
         runtime_configure.add_retry(**self._retry_kwargs())
@@ -1011,17 +1599,22 @@ class PlatformStack(cdk.Stack):
                     "<p>You will be prompted to set a new password on first sign-in.</p>"
                 ),
             ),
-            removal_policy=RemovalPolicy.DESTROY,
+            removal_policy=self._removal_policy,
         )
 
         client = pool.add_client(
             "FrontendClient",
             user_pool_client_name=f"{self._project}-{self._env}-frontend",
             generate_secret=False,
+            # Drop USER_PASSWORD_AUTH (sends plaintext password) — keep SRP only.
+            # See tasks/lessons.md Bug 38 (Cognito hardening from security audit).
             auth_flows=cognito.AuthFlow(
-                user_password=True,
+                user_password=False,
                 user_srp=True,
             ),
+            # Suppress username enumeration (response is the same regardless of
+            # whether the user exists or the password is wrong).
+            prevent_user_existence_errors=True,
             access_token_validity=Duration.hours(1),
             id_token_validity=Duration.hours(1),
             refresh_token_validity=Duration.days(7),
@@ -1250,6 +1843,25 @@ class PlatformStack(cdk.Stack):
             authorizer=jwt_authorizer,
         )
 
+        # --- Observability credential storage route ---
+        # Routes to workflow_lambda because main.py (workflow Lambda) is the only
+        # FastAPI app that mounts the observability_router (deployment_handler is
+        # a separate FastAPI app without it).
+        api.add_routes(
+            path="/api/observability/credentials",
+            methods=[apigwv2.HttpMethod.POST],
+            integration=workflow_integration,
+            authorizer=jwt_authorizer,
+        )
+        # --- Platform-defaults read route (UI uses this to show platform-managed
+        # OTEL settings as read-only).
+        api.add_routes(
+            path="/api/observability/platform-defaults",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=workflow_integration,
+            authorizer=jwt_authorizer,
+        )
+
         # --- Health check route ---
         api.add_routes(
             path="/health",
@@ -1297,8 +1909,8 @@ class PlatformStack(cdk.Stack):
             bucket_name=f"{self._project}-{self._env}-logs-{self.region}-{self.account}",
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
-            removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_objects=True,
+            removal_policy=self._removal_policy,
+            auto_delete_objects=self._allow_destroy,
             encryption=s3.BucketEncryption.S3_MANAGED,
             object_ownership=s3.ObjectOwnership.OBJECT_WRITER,
             lifecycle_rules=[
@@ -1317,8 +1929,8 @@ class PlatformStack(cdk.Stack):
             bucket_name=f"{self._project}-{self._env}-frontend-{self.region}-{self.account}",
             block_public_access=s3.BlockPublicAccess.BLOCK_ALL,
             enforce_ssl=True,
-            removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_objects=True,
+            removal_policy=self._removal_policy,
+            auto_delete_objects=self._allow_destroy,
             encryption=s3.BucketEncryption.S3_MANAGED,
             server_access_logs_bucket=self.logging_bucket,
             server_access_logs_prefix="s3-frontend/",
@@ -1329,8 +1941,64 @@ class PlatformStack(cdk.Stack):
             ],
         )
 
+    def _build_waf_rules(self, name_prefix: str) -> list:
+        """Common WAF rule set used by both the CloudFront ACL and the
+        regional API Gateway ACL. Includes Common + KnownBadInputs managed
+        rule sets plus an IP-based rate limit. See tasks/lessons.md Bug 41.
+        """
+        return [
+            wafv2.CfnWebACL.RuleProperty(
+                name="AWSManagedRulesCommonRuleSet",
+                priority=1,
+                override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
+                statement=wafv2.CfnWebACL.StatementProperty(
+                    managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
+                        vendor_name="AWS",
+                        name="AWSManagedRulesCommonRuleSet",
+                    ),
+                ),
+                visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
+                    cloud_watch_metrics_enabled=True,
+                    metric_name=f"{name_prefix}-common-rules",
+                    sampled_requests_enabled=True,
+                ),
+            ),
+            wafv2.CfnWebACL.RuleProperty(
+                name="AWSManagedRulesKnownBadInputsRuleSet",
+                priority=2,
+                override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
+                statement=wafv2.CfnWebACL.StatementProperty(
+                    managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
+                        vendor_name="AWS",
+                        name="AWSManagedRulesKnownBadInputsRuleSet",
+                    ),
+                ),
+                visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
+                    cloud_watch_metrics_enabled=True,
+                    metric_name=f"{name_prefix}-known-bad-inputs",
+                    sampled_requests_enabled=True,
+                ),
+            ),
+            wafv2.CfnWebACL.RuleProperty(
+                name="RateLimitRule",
+                priority=3,
+                action=wafv2.CfnWebACL.RuleActionProperty(block={}),
+                statement=wafv2.CfnWebACL.StatementProperty(
+                    rate_based_statement=wafv2.CfnWebACL.RateBasedStatementProperty(
+                        limit=2000,
+                        aggregate_key_type="IP",
+                    ),
+                ),
+                visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
+                    cloud_watch_metrics_enabled=True,
+                    metric_name=f"{name_prefix}-rate-limit",
+                    sampled_requests_enabled=True,
+                ),
+            ),
+        ]
+
     def _create_waf_web_acl(self) -> wafv2.CfnWebACL:
-        """Create WAFv2 WebACL for CloudFront with managed rules + rate limiting."""
+        """Create WAFv2 WebACL for CloudFront."""
         return wafv2.CfnWebACL(
             self,
             "CloudFrontWebACL",
@@ -1342,41 +2010,12 @@ class PlatformStack(cdk.Stack):
                 metric_name=f"{self._project}-{self._env}-waf",
                 sampled_requests_enabled=True,
             ),
-            rules=[
-                wafv2.CfnWebACL.RuleProperty(
-                    name="AWSManagedRulesCommonRuleSet",
-                    priority=1,
-                    override_action=wafv2.CfnWebACL.OverrideActionProperty(none={}),
-                    statement=wafv2.CfnWebACL.StatementProperty(
-                        managed_rule_group_statement=wafv2.CfnWebACL.ManagedRuleGroupStatementProperty(
-                            vendor_name="AWS",
-                            name="AWSManagedRulesCommonRuleSet",
-                        ),
-                    ),
-                    visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
-                        cloud_watch_metrics_enabled=True,
-                        metric_name=f"{self._project}-{self._env}-common-rules",
-                        sampled_requests_enabled=True,
-                    ),
-                ),
-                wafv2.CfnWebACL.RuleProperty(
-                    name="RateLimitRule",
-                    priority=2,
-                    action=wafv2.CfnWebACL.RuleActionProperty(block={}),
-                    statement=wafv2.CfnWebACL.StatementProperty(
-                        rate_based_statement=wafv2.CfnWebACL.RateBasedStatementProperty(
-                            limit=2000,
-                            aggregate_key_type="IP",
-                        ),
-                    ),
-                    visibility_config=wafv2.CfnWebACL.VisibilityConfigProperty(
-                        cloud_watch_metrics_enabled=True,
-                        metric_name=f"{self._project}-{self._env}-rate-limit",
-                        sampled_requests_enabled=True,
-                    ),
-                ),
-            ],
+            rules=self._build_waf_rules(f"{self._project}-{self._env}"),
         )
+
+    # Removed: _create_api_waf_and_attach. WAFv2 does not support API Gateway
+    # HTTP APIs (only REST APIs); the resource type RESOURCE_ARN was rejected.
+    # See tasks/lessons.md Bug 41 (revised).
 
     def _create_cloudfront_distribution(self) -> cloudfront.Distribution:
         """Create CloudFront distribution with S3 + API Gateway origins.
@@ -1401,6 +2040,7 @@ class PlatformStack(cdk.Stack):
         )
 
         # Security response headers (HSTS, X-Frame-Options, X-Content-Type-Options, etc.)
+        # CSP added 2026-05-16 — see tasks/lessons.md Bug 39 (security audit).
         security_headers = cloudfront.ResponseHeadersPolicy(
             self,
             "SecurityHeadersPolicy",
@@ -1417,11 +2057,41 @@ class PlatformStack(cdk.Stack):
                 strict_transport_security=cloudfront.ResponseHeadersStrictTransportSecurity(
                     access_control_max_age=Duration.seconds(63072000),
                     include_subdomains=True,
+                    preload=True,
                     override=True,
                 ),
                 xss_protection=cloudfront.ResponseHeadersXSSProtection(
                     protection=True,
                     mode_block=True,
+                    override=True,
+                ),
+                content_security_policy=cloudfront.ResponseHeadersContentSecurityPolicy(
+                    # Baseline SPA-friendly CSP. The frontend bundle is served
+                    # from this same CloudFront origin, so 'self' is sufficient
+                    # for scripts and styles. We allow 'unsafe-inline' for styles
+                    # because Tailwind/runtime-injected CSS uses inline rules;
+                    # scripts are NOT inline-allowed. connect-src includes
+                    # CloudFront (same-origin via /api/*) and Cognito for auth.
+                    #
+                    # CSP Level 3 host-source grammar only allows `*` at the
+                    # *start* of the host (e.g. `*.example.com`). A middle
+                    # wildcard like `cognito-idp.*.amazonaws.com` is invalid
+                    # and silently matches nothing in most browsers — Amplify's
+                    # SRP fetch to `cognito-idp.{region}.amazonaws.com` would
+                    # be blocked, surfacing as "A network error has occurred."
+                    # We bake the deploy region into the CSP at synth time.
+                    content_security_policy=(
+                        "default-src 'self'; "
+                        "script-src 'self'; "
+                        "style-src 'self' 'unsafe-inline'; "
+                        "img-src 'self' data: https:; "
+                        "font-src 'self' data:; "
+                        f"connect-src 'self' https://*.amazoncognito.com https://cognito-idp.{self.region}.amazonaws.com; "
+                        "frame-ancestors 'none'; "
+                        "object-src 'none'; "
+                        "base-uri 'self'; "
+                        "form-action 'self'"
+                    ),
                     override=True,
                 ),
             ),
@@ -1512,6 +2182,281 @@ class PlatformStack(cdk.Stack):
                 comparison_operator=cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
                 treat_missing_data=cloudwatch.TreatMissingData.NOT_BREACHING,
             )
+
+    # ------------------------------------------------------------------
+    # CDK-NAG suppressions (audit issue #4)
+    # ------------------------------------------------------------------
+
+    def _apply_nag_suppressions(self) -> None:
+        """Apply CDK-NAG suppressions to specific constructs.
+
+        Per-construct (not stack-wide) so any new wildcard added in an
+        unrelated construct will surface as a fresh nag finding instead of
+        being silently absorbed. Each rule is scoped to the resource that
+        legitimately needs it; reasons match the originals from app.py.
+        """
+
+        def _suppress(node, ids_with_reasons: list[tuple[str, str]]) -> None:
+            cdk_nag.NagSuppressions.add_resource_suppressions(
+                node,
+                [
+                    cdk_nag.NagPackSuppression(id=nid, reason=reason)
+                    for nid, reason in ids_with_reasons
+                ],
+                apply_to_children=True,
+            )
+
+        # ---- IAM4 + IAM5: every Lambda role uses AWSLambdaBasicExecutionRole
+        # and almost all of them have at least one wildcard resource for
+        # dynamically-created Cognito pools, AgentCore runtimes, or Bedrock
+        # model invocations. Suppress per Lambda execution role rather than
+        # stack-wide. apply_to_children=True covers DefaultPolicy attached
+        # by L2 grant_* helpers.
+        iam_reasons = [
+            (
+                "AwsSolutions-IAM4",
+                "AWSLambdaBasicExecutionRole is AWS-recommended for Lambda "
+                "CloudWatch logging",
+            ),
+            (
+                "AwsSolutions-IAM5",
+                "Wildcard resources required for dynamically-created Cognito "
+                "pools, AgentCore runtimes, and Bedrock model invocations",
+            ),
+        ]
+        _suppress(self.workflow_lambda.role, iam_reasons)
+        _suppress(self.deployment_lambda.role, iam_reasons)
+        for fn in self.step_lambdas.values():
+            _suppress(fn.role, iam_reasons)
+        # Shared AgentCore runtime exec role: needs bedrock:* and
+        # bedrock-agentcore:*Browser*/Memory etc on Resource: "*" — see
+        # _create_shared_runtime_role docstring.
+        _suppress(
+            self.shared_runtime_role,
+            [
+                (
+                    "AwsSolutions-IAM5",
+                    "Wildcard resources required for dynamically-created "
+                    "Cognito pools, AgentCore runtimes, and Bedrock model "
+                    "invocations",
+                ),
+            ],
+        )
+        # Step Functions role wraps grant_invoke on every step Lambda; CDK's
+        # grant_* helpers attach a DefaultPolicy whose statements use the
+        # function ARN with a wildcard suffix for versions/aliases.
+        if hasattr(self, "state_machine") and self.state_machine.role is not None:
+            _suppress(self.state_machine.role, iam_reasons)
+
+        # ---- L1: All Lambdas use Python 3.12 deliberately.
+        l1_reasons = [
+            (
+                "AwsSolutions-L1",
+                "Using Python 3.12 for CDK Lambda construct stability",
+            ),
+        ]
+        _suppress(self.workflow_lambda, l1_reasons)
+        _suppress(self.deployment_lambda, l1_reasons)
+        for fn in self.step_lambdas.values():
+            _suppress(fn, l1_reasons)
+
+        # ---- S1: only the access-log bucket itself is exempt — everything
+        # else writes its access logs INTO this bucket.
+        _suppress(
+            self.logging_bucket,
+            [
+                (
+                    "AwsSolutions-S1",
+                    "S3 access logging is hosted by this bucket itself; "
+                    "logging the log bucket would be a circular dependency",
+                ),
+            ],
+        )
+
+        # ---- CloudFront: distribution-only.
+        _suppress(
+            self.distribution,
+            [
+                (
+                    "AwsSolutions-CFR1",
+                    "CloudFront geo restrictions not required — internal "
+                    "development tool",
+                ),
+                (
+                    "AwsSolutions-CFR4",
+                    "Using CloudFront default certificate — custom domain "
+                    "with ACM planned for production",
+                ),
+            ],
+        )
+
+        # ---- API Gateway: APIG1 (access logging) and APIG4 (route auth)
+        # apply only to the HTTP API. /health is intentionally unauthenticated.
+        _suppress(
+            self.api,
+            [
+                (
+                    "AwsSolutions-APIG1",
+                    "API Gateway access logging planned for production — "
+                    "using Lambda CloudWatch logs",
+                ),
+                (
+                    "AwsSolutions-APIG4",
+                    "JWT authorizer on all /api/* routes; /health is "
+                    "intentionally unauthenticated",
+                ),
+            ],
+        )
+
+        # ---- Cognito: COG2/COG4/COG8 only apply to the user pool / clients.
+        _suppress(
+            self.user_pool,
+            [
+                (
+                    "AwsSolutions-COG2",
+                    "MFA enforced at the IdP for FederateOIDC SSO logins; "
+                    "Cognito-native MFA would be redundant for this internal "
+                    "development tool",
+                ),
+                (
+                    "AwsSolutions-COG4",
+                    "Cognito JWT authorizer on all /api/* routes; /health is "
+                    "intentionally unauthenticated",
+                ),
+                (
+                    "AwsSolutions-COG8",
+                    "Cognito Plus tier (advanced security) not required for "
+                    "this internal development tool; upstream IdP provides "
+                    "threat protection",
+                ),
+            ],
+        )
+
+        # ---- Step Functions: SF1 (ALL-level logging) on the state machine.
+        _suppress(
+            self.state_machine,
+            [
+                (
+                    "AwsSolutions-SF1",
+                    "Step Functions logs ERROR-level events; ALL-level "
+                    "logging planned for production",
+                ),
+            ],
+        )
+
+        # ---- BucketDeployment singleton custom resource: CDK creates a
+        # shared Lambda at the stack root (Custom::CDKBucketDeployment*) when
+        # any BucketDeployment is used. Path-scoped suppressions because the
+        # construct lives outside our owned constructs — owned by
+        # aws-cdk-lib's BucketDeployment L2; we cannot tighten its IAM,
+        # runtime version, or managed policy without forking the L2.
+        for child in self.node.find_all():
+            try:
+                node_path = child.node.path  # type: ignore[attr-defined]
+            except Exception:  # pragma: no cover
+                continue
+            if "Custom::CDKBucketDeployment" in node_path:
+                cdk_nag.NagSuppressions.add_resource_suppressions_by_path(
+                    self,
+                    node_path,
+                    [
+                        cdk_nag.NagPackSuppression(
+                            id="AwsSolutions-L1",
+                            reason="BucketDeployment is a CDK-managed L2; runtime version is owned by aws-cdk-lib.",
+                        ),
+                        cdk_nag.NagPackSuppression(
+                            id="AwsSolutions-IAM4",
+                            reason="BucketDeployment uses AWSLambdaBasicExecutionRole — owned by the CDK L2 construct.",
+                            applies_to=[
+                                "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+                            ],
+                        ),
+                        cdk_nag.NagPackSuppression(
+                            id="AwsSolutions-IAM5",
+                            reason="BucketDeployment requires s3:Get*/List*/Abort*/DeleteObject* wildcards on the source CDK assets bucket and the destination artifacts bucket — owned by the CDK L2.",
+                            applies_to=[
+                                "Action::s3:GetBucket*",
+                                "Action::s3:GetObject*",
+                                "Action::s3:List*",
+                                "Action::s3:Abort*",
+                                "Action::s3:DeleteObject*",
+                                "Resource::arn:<AWS::Partition>:s3:::cdk-hnb659fds-assets-<AWS::AccountId>-us-east-1/*",
+                                "Resource::<ArtifactsBucket2AAC5544.Arn>/*",
+                            ],
+                        ),
+                    ],
+                )
+
+        # ---- Cognito user provisioner (only created when COGNITO_USERS env
+        # var is non-empty). Three sub-constructs need scoped suppressions:
+        # (1) our own provisioner Lambda + role (we OWN the code; managed
+        # policy is CDK auto-attach for any lambda_.Function),
+        # (2) CDK's Provider framework which spawns its own framework-onEvent
+        # Lambda we don't control,
+        # (3) CDK's LogRetention helper Lambda used by `log_retention=`.
+        cognito_provisioner_paths = [
+            f"{self.stack_name}/CognitoUserProvisionerFn",
+        ]
+        for p in cognito_provisioner_paths:
+            try:
+                cdk_nag.NagSuppressions.add_resource_suppressions_by_path(
+                    self,
+                    p,
+                    [
+                        cdk_nag.NagPackSuppression(
+                            id="AwsSolutions-L1",
+                            reason="Using Python 3.12 deliberately for CDK Lambda construct stability (matches all other platform Lambdas).",
+                        ),
+                        cdk_nag.NagPackSuppression(
+                            id="AwsSolutions-IAM4",
+                            reason="Lambda execution role auto-attaches AWSLambdaBasicExecutionRole; required for CloudWatch logging.",
+                            applies_to=[
+                                "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+                            ],
+                        ),
+                    ],
+                    apply_to_children=True,
+                )
+            except Exception:  # pragma: no cover
+                pass
+
+        # CDK Provider framework + LogRetention helper — both CDK-managed L2s
+        # we do not own. Path-scoped because the constructs may not exist
+        # (only created when COGNITO_USERS is set).
+        for child in self.node.find_all():
+            try:
+                node_path = child.node.path  # type: ignore[attr-defined]
+            except Exception:  # pragma: no cover
+                continue
+            if "CognitoUserProvisionerProvider" in node_path or "LogRetention" in node_path:
+                try:
+                    cdk_nag.NagSuppressions.add_resource_suppressions_by_path(
+                        self,
+                        node_path,
+                        [
+                            cdk_nag.NagPackSuppression(
+                                id="AwsSolutions-L1",
+                                reason="Provider framework / LogRetention helper Lambda is a CDK-managed L2; runtime version is owned by aws-cdk-lib.",
+                            ),
+                            cdk_nag.NagPackSuppression(
+                                id="AwsSolutions-IAM4",
+                                reason="CDK-managed L2 Lambda uses AWSLambdaBasicExecutionRole — owned by aws-cdk-lib.",
+                                applies_to=[
+                                    "Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+                                ],
+                            ),
+                            cdk_nag.NagPackSuppression(
+                                id="AwsSolutions-IAM5",
+                                reason="CDK Provider framework grants `lambda:InvokeFunction` on the user provisioner Lambda's ARN with version-suffix wildcard, and LogRetention helper requires `logs:PutRetentionPolicy` / `logs:DeleteRetentionPolicy` on `*` to set retention on dynamically-named log groups — both owned by aws-cdk-lib.",
+                                applies_to=[
+                                    "Resource::*",
+                                    "Resource::<CognitoUserProvisionerFn43674288.Arn>:*",
+                                ],
+                            ),
+                        ],
+                    )
+                except Exception:  # pragma: no cover
+                    pass
 
     def _create_stack_outputs(self) -> None:
         """Create CloudFormation stack outputs.

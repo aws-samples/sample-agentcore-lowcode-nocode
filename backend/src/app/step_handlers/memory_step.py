@@ -8,6 +8,9 @@ References:
 - https://github.com/aws/bedrock-agentcore-starter-toolkit (operations/memory/manager.py)
 """
 
+# Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
+import app.services._otel_platform  # noqa: F401
+
 import json
 import logging
 import os
@@ -263,11 +266,28 @@ def handler(event: dict, context) -> dict:
                     safe_name = _re.sub(r"_+", "_", safe_name).strip("_")[:48]
                     if not safe_name or not safe_name[0].isalpha():
                         safe_name = "S" + safe_name
+                    # Default namespace must satisfy AgentCore strategy-specific
+                    # validation rules. See tasks/lessons.md Bugs 98/99.
+                    # - summary: requires {sessionId} substring
+                    # - episodic: reflection namespace `{memoryStrategyId}/actors/{actorId}/`
+                    #   must be prefix-compatible with the user's namespace
+                    # We pick safe defaults per type that satisfy these rules.
+                    if strategy_type == "summary":
+                        default_ns = "/strategies/{memoryStrategyId}/actors/{actorId}/sessions/{sessionId}/"
+                    elif strategy_type == "episodic":
+                        default_ns = "/strategies/{memoryStrategyId}/actors/{actorId}/"
+                    elif strategy_type in ("user_preferences", "user_preference"):
+                        default_ns = "/strategies/{memoryStrategyId}/actors/{actorId}/"
+                    elif strategy_type == "semantic":
+                        default_ns = "/strategies/{memoryStrategyId}/actors/{actorId}/"
+                    else:
+                        default_ns = "/strategies/{memoryStrategyId}/actors/{actorId}/"
+                    namespaces = strategy.get("namespaces") or [default_ns]
                     strategy_config = {
                         api_key: {
                             "name": safe_name,
                             "description": strategy.get("description", f"{strategy_type} strategy"),
-                            "namespaces": strategy.get("namespaces", [f"agent/{{actorId}}/{strategy_type}/"]),
+                            "namespaces": namespaces,
                         }
                     }
                     memory_strategies.append(strategy_config)
@@ -307,14 +327,37 @@ def handler(event: dict, context) -> dict:
             # Wait for memory to be ready
             _wait_for_memory_ready(agentcore_ctrl, memory_id)
 
-        return {
-            **event,
-            "memory_result": {
-                "success": True,
-                "memory_id": memory_id,
-                "memory_name": memory_name,
-            },
+        memory_result = {
+            "success": True,
+            "memory_id": memory_id,
+            "memory_name": memory_name,
         }
+
+        # Persist memory_result to the deployment record IMMEDIATELY so the
+        # DELETE handler can clean it up even if a downstream step fails
+        # before status_update writes the full record. Otherwise the memory
+        # leaks. See tasks/lessons.md Bug 85.
+        try:
+            ddb = boto3.client("dynamodb", region_name=region)
+            ddb.update_item(
+                TableName=os.environ.get("DEPLOYMENT_TABLE_NAME", "DeploymentState"),
+                Key={"deployment_id": {"S": deployment_id}},
+                UpdateExpression="SET memory_result = :mr",
+                ExpressionAttributeValues={
+                    ":mr": {"M": {
+                        "success": {"BOOL": True},
+                        "memory_id": {"S": memory_id},
+                        "memory_name": {"S": memory_name},
+                    }},
+                },
+            )
+            logger.info("Persisted memory_result mid-flight for %s", deployment_id)
+        except Exception as persist_err:
+            # Don't fail the step on a metadata-write race — memory was
+            # successfully created and downstream steps will use it.
+            logger.warning("Failed to persist memory_result mid-flight: %s", persist_err)
+
+        return {**event, "memory_result": memory_result}
 
     except Exception:
         logger.exception("Memory step failed for deployment %s", deployment_id)

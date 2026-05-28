@@ -13,7 +13,7 @@ Requirements: 1.1, 1.2, 1.3, 1.4, 2.1, 3.2, 3.3, 4.2, 4.3, 4.5, 6.2, 6.4, 7.4
 import logging
 import re
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from botocore.exceptions import ClientError
 from pydantic import ValidationError
 
@@ -27,6 +27,7 @@ from app.models import (
     FlowListResponse,
     FlowResponse,
 )
+from app.services.auth import assert_owner, get_caller_sub
 from app.services.flow_storage import get_flow_storage
 
 
@@ -58,14 +59,17 @@ def _validate_flow_id(flow_id: str) -> str:
 
 
 @router.post("", response_model=FlowResponse, status_code=status.HTTP_201_CREATED)
-async def create_flow(request: FlowCreateRequest) -> FlowResponse:
+async def create_flow(
+    request: FlowCreateRequest,
+    caller_sub: str = Depends(get_caller_sub),
+) -> FlowResponse:
     """Create a new flow with an empty workflow.
 
     Requirements: 1.1, 1.2, 1.3, 1.4
     """
     try:
         storage = _get_flow_storage()
-        flow = storage.create(request.name)
+        flow = storage.create(request.name, owner_sub=caller_sub)
         return FlowResponse(
             flow=flow,
             message="Flow created successfully",
@@ -85,13 +89,31 @@ async def create_flow(request: FlowCreateRequest) -> FlowResponse:
 
 
 @router.get("", response_model=FlowListResponse)
-async def list_flows() -> FlowListResponse:
-    """List all flows sorted by updated_at descending.
+async def list_flows(
+    caller_sub: str = Depends(get_caller_sub),
+) -> FlowListResponse:
+    """List flows owned by the caller, sorted by updated_at descending.
 
     Requirements: 2.1
+
+    Tenant-isolation (Critic Finding 3): strict ``owner_sub == caller_sub``.
+    Legacy / un-owned (None) rows are excluded for every caller; back-compat
+    with pre-isolation data requires an explicit backfill, not a wildcard
+    that grants every authenticated user cross-tenant read.
     """
+    storage = _get_flow_storage()
     try:
-        flows = _get_flow_storage().list_all()
+        # Prefer a server-side owner-filtered listing when storage supports it
+        # (DynamoDBFlowStorage exposes ``list_by_owner``); fall back to
+        # in-Python filter on ``list_all`` for the in-memory store / tests.
+        list_by_owner = getattr(storage, "list_by_owner", None)
+        if callable(list_by_owner):
+            flows = list_by_owner(caller_sub)
+        else:
+            flows = [
+                c for c in storage.list_all()
+                if getattr(c, "owner_sub", None) == caller_sub
+            ]
         summaries = [
             FlowSummary(
                 id=c.id,
@@ -116,8 +138,11 @@ async def list_flows() -> FlowListResponse:
 
 
 @router.get("/{flow_id}", response_model=Flow)
-async def get_flow(flow_id: str) -> Flow:
-    """Get a flow by ID with full workflow.
+async def get_flow(
+    flow_id: str,
+    caller_sub: str = Depends(get_caller_sub),
+) -> Flow:
+    """Get a flow by ID with full workflow. Caller must own it.
 
     Requirements: 3.2, 3.3
     """
@@ -129,6 +154,7 @@ async def get_flow(flow_id: str) -> Flow:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Flow '{flow_id}' not found",
             )
+        assert_owner(getattr(flow, "owner_sub", None), caller_sub)
         return flow
     except HTTPException:
         raise
@@ -145,13 +171,24 @@ async def get_flow(flow_id: str) -> Flow:
 
 
 @router.put("/{flow_id}", response_model=FlowResponse)
-async def update_flow(flow_id: str, request: FlowUpdateRequest) -> FlowResponse:
-    """Update an existing flow name and/or workflow.
+async def update_flow(
+    flow_id: str,
+    request: FlowUpdateRequest,
+    caller_sub: str = Depends(get_caller_sub),
+) -> FlowResponse:
+    """Update an existing flow name and/or workflow. Caller must own it.
 
     Requirements: 6.2, 6.4
     """
     flow_id = _validate_flow_id(flow_id)
     try:
+        existing = _get_flow_storage().get(flow_id)
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Flow '{flow_id}' not found",
+            )
+        assert_owner(getattr(existing, "owner_sub", None), caller_sub)
         updated = _get_flow_storage().update(
             flow_id,
             name=request.name,
@@ -181,13 +218,23 @@ async def update_flow(flow_id: str, request: FlowUpdateRequest) -> FlowResponse:
 
 
 @router.delete("/{flow_id}")
-async def delete_flow(flow_id: str) -> dict:
-    """Delete a flow by ID.
+async def delete_flow(
+    flow_id: str,
+    caller_sub: str = Depends(get_caller_sub),
+) -> dict:
+    """Delete a flow by ID. Caller must own it.
 
     Requirements: 4.2, 4.3, 4.5
     """
     flow_id = _validate_flow_id(flow_id)
     try:
+        existing = _get_flow_storage().get(flow_id)
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Flow '{flow_id}' not found",
+            )
+        assert_owner(getattr(existing, "owner_sub", None), caller_sub)
         deleted = _get_flow_storage().delete(flow_id)
         if not deleted:
             raise HTTPException(

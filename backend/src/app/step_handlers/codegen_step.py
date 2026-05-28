@@ -7,6 +7,9 @@ from requirements.txt — ALL dependencies must be pre-bundled in code.zip.
 Requirements: 3.3
 """
 
+# Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
+import app.services._otel_platform  # noqa: F401
+
 import logging
 import os
 from typing import Optional
@@ -92,6 +95,22 @@ def handler(event: dict, context) -> dict:
             if gateway_result.get("client_info"):
                 gateway_config["client_info"] = gateway_result["client_info"]
 
+        # OTEL is enabled when ANY of:
+        #   - platform-level OTEL defaults are configured (Reading A — every
+        #     agent inherits the admin-configured backend, even without an
+        #     Observability node on the canvas)
+        #   - per-canvas Observability node is wired
+        #   - observability_config supplied directly
+        #   - legacy enable_otel flag set
+        from app.services.observability import get_platform_observability_defaults
+        obs_cfg = event.get("observability_config") or {}
+        observability_enabled = bool(
+            get_platform_observability_defaults()
+            or (isinstance(obs_cfg, dict) and obs_cfg.get("enabled", True) and obs_cfg.get("provider"))
+            or "observability" in connected_tools
+            or getattr(config, "enable_otel", False)
+        )
+
         agent_code = generate_agent_code(
             config=config,
             tools=connected_tools,
@@ -99,6 +118,7 @@ def handler(event: dict, context) -> dict:
             template_id=template_id,
             gateway_tools=gateway_tools,
             custom_tools=custom_tools,
+            observability_enabled=observability_enabled,
         )
         requirements_txt = generate_requirements(
             config=config,
@@ -107,11 +127,18 @@ def handler(event: dict, context) -> dict:
             gateway_tools=gateway_tools,
         )
 
-        # Upload to S3
+        # Upload to S3 using a STABLE prefix keyed on the runtime name, not
+        # the per-deploy UUID. Why: AgentCore's IAM cache for the runtime exec
+        # role is keyed on (role, S3 prefix). A fresh prefix per deploy
+        # triggers a 17-20 minute cache-population race on every deploy.
+        # Same prefix across redeploys means AgentCore caches once per agent
+        # and subsequent updates skip the race entirely. See lessons Bug 61.
+        from app.services.runtime_deployer import sanitize_runtime_name
+        runtime_name = sanitize_runtime_name(config.name or f"agent-{deployment_id[:8]}")
         bucket = _get_env("ARTIFACTS_BUCKET_NAME", "")
         region = _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
         entrypoint = config.entrypoint or "agent.py"
-        s3_key = f"deployments/{deployment_id}/code.zip"
+        s3_key = f"deployments/by-name/{runtime_name}/code.zip"
 
         # Select bundle based on generated code: strands-mcp.zip (43MB) only
         # when code imports strands, otherwise base.zip (18MB) to stay within

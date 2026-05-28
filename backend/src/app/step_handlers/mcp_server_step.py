@@ -11,6 +11,9 @@ can create the MCP target with proper OAUTH credential provider.
 Requirements: MCP Server as Gateway Target pattern
 """
 
+# Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
+import app.services._otel_platform  # noqa: F401
+
 import logging
 import os
 import re
@@ -71,8 +74,10 @@ def handler(event: dict, context) -> dict:
         )
         logger.info("Generated MCP server code (%d bytes)", len(mcp_code))
 
-        # 2. Download deps bundle and upload code zip to S3
-        mcp_s3_key = f"deployments/{deployment_id}/mcp-server-code.zip"
+        # 2. Download deps bundle and upload code zip to S3.
+        # Stable prefix keyed on runtime name (Bug 61) — see codegen_step
+        # for rationale (AgentCore IAM cache is keyed on (role, S3 prefix)).
+        mcp_s3_key = f"deployments/by-name/{sanitize_runtime_name(mcp_name)}/mcp-server-code.zip"
         if bucket:
             s3_client = boto3.client("s3", region_name=region)
 
@@ -102,9 +107,12 @@ def handler(event: dict, context) -> dict:
         sts = boto3.client("sts")
         account_id = sts.get_caller_identity()["Account"]
         iam_client = boto3.client("iam")
+        # Role name must start with "AgentCore" so the step Lambda's
+        # iam:CreateRole resource scope (arn:aws:iam::*:role/AgentCore*)
+        # in platform_stack.py matches. See tasks/lessons.md Bug 71.
         mcp_role_arn = create_runtime_iam_role(
             iam_client,
-            f"{sanitize_runtime_name(mcp_name)}-mcp-role",
+            f"AgentCoreMCP-{sanitize_runtime_name(mcp_name)}",
             account_id,
             region,
             [],  # MCP server doesn't need extra tool permissions

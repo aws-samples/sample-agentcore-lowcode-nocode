@@ -3,6 +3,7 @@
  * Each component renders the fields specific to its vector store type.
  */
 
+import { useState } from 'react';
 import { TextField } from '../FormFields';
 import type { KnowledgeBaseToolConfig, KBVectorStoreType } from '../../../types/components';
 import type { ValidationError } from '../ConfigurationModal';
@@ -25,14 +26,60 @@ function getError(errors: ValidationError[], field: string) {
 // S3 Vectors (Managed)
 // ============================================================================
 
-function VectorStoreS3VectorsFields(_props: VectorStoreFieldProps) {
+function VectorStoreS3VectorsFields({ config, updateField, errors }: VectorStoreFieldProps) {
+  // Default to managed mode unless the user already supplied a bucket ARN.
+  const [showAdvanced, setShowAdvanced] = useState<boolean>(
+    Boolean(config.s3VectorsBucketArn || config.s3VectorsIndexArn),
+  );
+
   return (
-    <div className="p-2.5 bg-blue-50 rounded-lg border border-blue-200">
-      <p className="text-xs text-blue-700">
-        Fully managed by AWS Bedrock. No configuration required. Bedrock creates and manages
-        the vector index automatically.
-      </p>
-    </div>
+    <>
+      <div className="p-2.5 bg-blue-50 rounded-lg border border-blue-200">
+        <p className="text-xs text-blue-700">
+          Fully managed by AWS Bedrock by default. Bedrock creates and manages the vector
+          index automatically. To attach an existing S3 Vectors bucket/index, expand
+          Advanced.
+        </p>
+      </div>
+      <button
+        type="button"
+        className="text-xs text-blue-700 underline hover:text-blue-900 self-start"
+        onClick={() => setShowAdvanced((v) => !v)}
+      >
+        {showAdvanced ? 'Hide advanced (custom bucket)' : 'Advanced (custom bucket)'}
+      </button>
+      {showAdvanced && (
+        <>
+          <TextField
+            label="S3 Vectors Bucket ARN"
+            id="kb-s3v-bucket-arn"
+            value={config.s3VectorsBucketArn || ''}
+            onChange={(v) => updateField('s3VectorsBucketArn', v)}
+            placeholder="arn:aws:s3vectors:us-east-1:123456789012:bucket/my-vec-bucket"
+            helpText="Optional. Leave blank for fully-managed mode."
+            error={getError(errors, 's3VectorsBucketArn')}
+          />
+          <TextField
+            label="S3 Vectors Index Name"
+            id="kb-s3v-index-name"
+            value={config.s3VectorsIndexName || ''}
+            onChange={(v) => updateField('s3VectorsIndexName', v)}
+            placeholder="bedrock-knowledge-base-default-index"
+            helpText="Optional. Defaults to bedrock-knowledge-base-default-index."
+            error={getError(errors, 's3VectorsIndexName')}
+          />
+          <TextField
+            label="S3 Vectors Index ARN"
+            id="kb-s3v-index-arn"
+            value={config.s3VectorsIndexArn || ''}
+            onChange={(v) => updateField('s3VectorsIndexArn', v)}
+            placeholder="arn:aws:s3vectors:us-east-1:123456789012:bucket/my-vec-bucket/index/my-index"
+            helpText="Optional. Required only if Bedrock cannot resolve the index by name."
+            error={getError(errors, 's3VectorsIndexArn')}
+          />
+        </>
+      )}
+    </>
   );
 }
 

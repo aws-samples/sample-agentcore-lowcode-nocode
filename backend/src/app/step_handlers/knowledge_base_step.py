@@ -5,6 +5,9 @@ Handles two modes:
 - create_new: Creates KB + data source + starts ingestion
 """
 
+# Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
+import app.services._otel_platform  # noqa: F401
+
 import json
 import logging
 import os
@@ -94,6 +97,43 @@ def _create_kb_role(iam_client, role_name: str, kb_config: dict) -> str:
             "Effect": "Allow",
             "Action": ["aoss:APIAccessAll"],
             "Resource": kb_config.get("opensearchCollectionArn", "*"),
+        })
+
+    # S3 Vectors permissions (Bug 78). The role needs to provision and
+    # interact with the auto-managed vector bucket+index that Bedrock KB
+    # creates on its behalf. Without these, Bedrock validates the role,
+    # finds it can't create/describe the s3vectors resources, and rejects
+    # the KB with `ValidationException: Bedrock Knowledge Base was unable
+    # to assume the given role`.
+    if vector_store_type == "s3_vectors":
+        s3v_arn = kb_config.get("s3VectorsBucketArn", "*")
+        # Some s3vectors verbs (QueryVectors, PutVectors, GetVectors,
+        # DeleteVectors, DescribeIndex, ListIndexes) target the
+        # `<bucket>/index/<idx>` sub-resource, not just the bucket.
+        # Granting only the bucket ARN surfaces as a misleading
+        # "Bedrock KB was unable to assume the given role" error.
+        # See tasks/lessons.md Bug 84.
+        if s3v_arn == "*":
+            s3v_resources = ["*"]
+        else:
+            s3v_resources = [s3v_arn, f"{s3v_arn}/index/*"]
+        statements.append({
+            "Effect": "Allow",
+            "Action": [
+                "s3vectors:CreateVectorBucket",
+                "s3vectors:CreateIndex",
+                "s3vectors:PutVectors",
+                "s3vectors:GetVectors",
+                "s3vectors:ListVectors",
+                "s3vectors:QueryVectors",
+                "s3vectors:DeleteVectors",
+                "s3vectors:DescribeVectorBucket",
+                "s3vectors:DescribeIndex",
+                "s3vectors:GetVectorBucket",
+                "s3vectors:ListIndexes",
+                "s3vectors:ListVectorBuckets",
+            ],
+            "Resource": s3v_resources,
         })
 
     # RDS permissions
@@ -237,8 +277,27 @@ def _build_storage_config(kb_config: dict) -> dict:
             },
         }
 
-    # Default: S3_VECTORS (fully managed)
-    return {"type": "S3_VECTORS"}
+    # Default: S3_VECTORS (fully managed). Bedrock requires either an
+    # explicit s3VectorsConfiguration (vectorBucketArn + indexArn/indexName)
+    # or it can auto-create one if you pass `vectorIndexName` only — but in
+    # practice the API rejects bare {"type":"S3_VECTORS"} with
+    # "ValidationException: storageConfiguration ... is required". See
+    # tasks/lessons.md Bug 73.
+    s3_vec_bucket_arn = kb_config.get("s3VectorsBucketArn", "")
+    s3_vec_index_name = kb_config.get("s3VectorsIndexName") or "bedrock-knowledge-base-default-index"
+    config: dict = {"type": "S3_VECTORS"}
+    if s3_vec_bucket_arn:
+        config["s3VectorsConfiguration"] = {
+            "vectorBucketArn": s3_vec_bucket_arn,
+            "indexName": s3_vec_index_name,
+        }
+        if kb_config.get("s3VectorsIndexArn"):
+            config["s3VectorsConfiguration"]["indexArn"] = kb_config["s3VectorsIndexArn"]
+    else:
+        # Auto-managed mode: provide indexName only, Bedrock will provision
+        # a bucket+index for us.
+        config["s3VectorsConfiguration"] = {"indexName": s3_vec_index_name}
+    return config
 
 
 def _build_data_source_config(kb_config: dict) -> tuple[dict, str | None]:
@@ -258,13 +317,23 @@ def _build_data_source_config(kb_config: dict) -> tuple[dict, str | None]:
         return {"type": "S3", "s3Configuration": s3_config}, None
 
     if data_source_type == "web_crawler":
-        web_url = kb_config.get("webCrawlerUrl", "")
+        # Filter empty seed URLs — Bedrock CreateDataSource rejects
+        # `seedUrls.N.member.url=""` with ValidationException. See
+        # tasks/lessons.md Bug 94. Accept either a string OR a list.
+        raw_urls = kb_config.get("webCrawlerUrls") or kb_config.get("webCrawlerUrl", "")
+        if isinstance(raw_urls, str):
+            url_list = [u.strip() for u in raw_urls.split(",") if u.strip()]
+        else:
+            url_list = [u.strip() for u in raw_urls if isinstance(u, str) and u.strip()]
+        if not url_list:
+            raise ValueError("Web Crawler data source requires at least one non-empty seed URL")
+        seed_urls = [{"url": u} for u in url_list]
         scope = kb_config.get("webCrawlerScope", "HOST_ONLY")
         return {
             "type": "WEB",
             "webConfiguration": {
                 "sourceConfiguration": {
-                    "urlConfiguration": {"seedUrls": [{"url": web_url}]},
+                    "urlConfiguration": {"seedUrls": seed_urls},
                 },
                 "crawlerConfiguration": {
                     "crawlerLimits": {"rateLimit": 10},
@@ -374,7 +443,7 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
         logger.exception("Failed to update step status for KB step")
 
     kb_mode = kb_config.get("kbMode", "existing")
-    foundation_model_id = kb_config.get("foundationModelId", "anthropic.claude-3-5-sonnet-20241022-v2:0")
+    foundation_model_id = kb_config.get("foundationModelId", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
     foundation_model_arn = _build_model_arn(region, foundation_model_id)
 
     bedrock_agent = boto3.client("bedrock-agent", region_name=region)
@@ -418,21 +487,83 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
         if kb_id:
             logger.warning("Found existing KB with name %s: %s (reusing)", kb_name, kb_id)
         else:
+            # If user provided an explicit S3 Vectors bucket, ensure the index
+            # exists before calling CreateKnowledgeBase — Bedrock requires the
+            # index to pre-exist and returns "The specified index could not
+            # be found" otherwise. See tasks/lessons.md Bug 88.
+            if kb_config.get("vectorStoreType", "s3_vectors") == "s3_vectors":
+                vec_arn = kb_config.get("s3VectorsBucketArn", "")
+                vec_idx = kb_config.get("s3VectorsIndexName") or "default-index"
+                if vec_arn:
+                    vec_bucket_name = vec_arn.rsplit("/", 1)[-1]
+                    try:
+                        s3v = boto3.client("s3vectors", region_name=region)
+                        existing = s3v.list_indexes(vectorBucketName=vec_bucket_name).get("indexes", [])
+                        if not any(ix.get("indexName") == vec_idx for ix in existing):
+                            logger.warning("Auto-creating missing S3 Vectors index '%s' on bucket %s", vec_idx, vec_bucket_name)
+                            # Titan Embed Text v2 default = 1024 dims, cosine
+                            s3v.create_index(
+                                vectorBucketName=vec_bucket_name,
+                                indexName=vec_idx,
+                                dataType="float32",
+                                dimension=1024,
+                                distanceMetric="cosine",
+                            )
+                    except Exception as ix_err:
+                        logger.warning("S3 Vectors index pre-check/create skipped: %s", ix_err)
+
             storage_config = _build_storage_config(kb_config)
+            vector_kb_config: dict = {
+                "embeddingModelArn": embedding_model_arn,
+            }
+            # If BDA parsing is configured, attach supplementalDataStorage.
+            # See tasks/lessons.md Bug 95.
+            if kb_config.get("parsingStrategy") == "bedrock_data_automation":
+                bda_supp_uri = kb_config.get("bdaSupplementalS3Uri") or (
+                    f"s3://{_get_env('ARTIFACTS_BUCKET_NAME','')}/kb-supplemental/{kb_name}/"
+                )
+                vector_kb_config["supplementalDataStorageConfiguration"] = {
+                    "supplementalDataStorageLocations": [
+                        {"supplementalDataStorageLocationType": "S3", "s3Location": {"uri": bda_supp_uri}}
+                    ]
+                }
             kb_params = {
                 "name": kb_name,
                 "description": kb_description,
                 "roleArn": role_arn,
                 "knowledgeBaseConfiguration": {
                     "type": "VECTOR",
-                    "vectorKnowledgeBaseConfiguration": {
-                        "embeddingModelArn": embedding_model_arn,
-                    },
+                    "vectorKnowledgeBaseConfiguration": vector_kb_config,
                 },
                 "storageConfiguration": storage_config,
             }
 
-            kb_resp = bedrock_agent.create_knowledge_base(**kb_params)
+            # Bedrock validates that it can assume the KB role at create time.
+            # IAM propagation can lag put_role_policy by 10-60s; surfaced as
+            # `ValidationException: Bedrock Knowledge Base was unable to assume
+            # the given role`. Retry with backoff. See tasks/lessons.md Bug 80.
+            kb_resp = None
+            last_err = None
+            for attempt in range(8):
+                try:
+                    kb_resp = bedrock_agent.create_knowledge_base(**kb_params)
+                    break
+                except Exception as e:
+                    err_str = str(e)
+                    if (
+                        "ValidationException" in err_str
+                        and "unable to assume" in err_str.lower()
+                    ):
+                        last_err = e
+                        logger.warning(
+                            "create_knowledge_base IAM-propagation race (attempt %d/8): %s",
+                            attempt + 1, err_str[:200],
+                        )
+                        time.sleep(10)
+                        continue
+                    raise
+            if kb_resp is None:
+                raise last_err if last_err else RuntimeError("create_knowledge_base failed")
             kb_id = kb_resp["knowledgeBase"]["knowledgeBaseId"]
             logger.warning("Knowledge Base created: %s", kb_id)
 
@@ -459,6 +590,14 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
                 ],
                 "overlapTokens": 60,
             }
+        elif chunking_strategy == "SEMANTIC":
+            # Bedrock requires `semanticChunkingConfiguration` block when
+            # chunkingStrategy=SEMANTIC. See tasks/lessons.md Bug 96.
+            chunking_config["semanticChunkingConfiguration"] = {
+                "maxTokens": kb_config.get("semanticMaxTokens", 300),
+                "bufferSize": kb_config.get("semanticBufferSize", 0),
+                "breakpointPercentileThreshold": kb_config.get("semanticBreakpointPercentile", 95),
+            }
 
         # Build vectorIngestionConfiguration (chunking + parsing + transformation)
         ingestion_config: dict = {"chunkingConfiguration": chunking_config}
@@ -470,8 +609,13 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
                 "parsingStrategy": "BEDROCK_DATA_AUTOMATION",
                 "bedrockDataAutomationConfiguration": {"parsingModality": "MULTIMODAL"},
             }
+            # BDA's intermediate-output bucket is configured on the KB itself
+            # via `supplementalDataStorageConfiguration` at create_knowledge_base
+            # time (see the vector_kb_config block above). create_data_source
+            # rejects unknown keys on vectorIngestionConfiguration, so do not
+            # add anything BDA-related here.
         elif parsing_strategy == "bedrock_foundation_model":
-            parsing_model_id = kb_config.get("parsingModelId", "anthropic.claude-3-5-sonnet-20241022-v2:0")
+            parsing_model_id = kb_config.get("parsingModelId", "us.anthropic.claude-sonnet-4-5-20250929-v1:0")
             fm_config: dict = {
                 "modelArn": _build_model_arn(region, parsing_model_id),
                 "parsingModality": "MULTIMODAL",

@@ -32,12 +32,26 @@ environment_name = get_context_value(app, "environment_name", default="dev")
 aws_region = get_context_value(app, "aws_region", default="us-east-1")
 project_name = get_context_value(app, "project_name", default="agentcore-workflow")
 
+# Optional platform OTEL defaults. When otel_endpoint is provided, every agent
+# the platform deploys (and the platform Lambdas themselves via ADOT) emit
+# OTLP spans to this backend. Per-canvas Observability node config is locked
+# to platform values for endpoint/secret/sampling; only resource_attributes
+# can be added per agent.
+otel_endpoint = get_context_value(app, "otel_endpoint", default="")
+otel_auth_secret_arn = get_context_value(app, "otel_auth_secret_arn", default="")
+otel_sample_rate = get_context_value(app, "otel_sample_rate", default="1.0")
+otel_service_name_prefix = get_context_value(app, "otel_service_name_prefix", default=project_name)
+
 stack = PlatformStack(
     app,
     f"{project_name}-{environment_name}",
     env=cdk.Environment(region=aws_region),
     environment_name=environment_name,
     project_name=project_name,
+    otel_endpoint=otel_endpoint,
+    otel_auth_secret_arn=otel_auth_secret_arn,
+    otel_sample_rate=otel_sample_rate,
+    otel_service_name_prefix=otel_service_name_prefix,
 )
 
 # ---------------------------------------------------------------------------
@@ -45,64 +59,9 @@ stack = PlatformStack(
 # ---------------------------------------------------------------------------
 cdk.Aspects.of(app).add(cdk_nag.AwsSolutionsChecks(verbose=True))
 
-# Suppressions document conscious security trade-offs.
-# Each suppression includes a reason so auditors understand the decision.
-cdk_nag.NagSuppressions.add_stack_suppressions(
-    stack,
-    [
-        cdk_nag.NagPackSuppression(
-            id="AwsSolutions-IAM4",
-            reason="AWSLambdaBasicExecutionRole is AWS-recommended for Lambda CloudWatch logging",
-        ),
-        cdk_nag.NagPackSuppression(
-            id="AwsSolutions-IAM5",
-            reason="Wildcard resources required for dynamically-created Cognito pools, "
-            "AgentCore runtimes, and Bedrock model invocations",
-        ),
-        cdk_nag.NagPackSuppression(
-            id="AwsSolutions-S1",
-            reason="S3 access logging deferred to production hardening phase",
-        ),
-        cdk_nag.NagPackSuppression(
-            id="AwsSolutions-CFR1",
-            reason="CloudFront geo restrictions not required — internal development tool",
-        ),
-        cdk_nag.NagPackSuppression(
-            id="AwsSolutions-CFR4",
-            reason="Using CloudFront default certificate — custom domain with ACM planned for production",
-        ),
-        cdk_nag.NagPackSuppression(
-            id="AwsSolutions-APIG1",
-            reason="API Gateway access logging planned for production — using Lambda CloudWatch logs",
-        ),
-        cdk_nag.NagPackSuppression(
-            id="AwsSolutions-APIG4",
-            reason="JWT authorizer on all /api/* routes; /health is intentionally unauthenticated",
-        ),
-        cdk_nag.NagPackSuppression(
-            id="AwsSolutions-COG2",
-            reason="MFA enforced at the IdP for FederateOIDC SSO logins; Cognito-native MFA "
-            "would be redundant for this internal development tool",
-        ),
-        cdk_nag.NagPackSuppression(
-            id="AwsSolutions-COG4",
-            reason="Cognito JWT authorizer on all /api/* routes; /health is intentionally unauthenticated",
-        ),
-        cdk_nag.NagPackSuppression(
-            id="AwsSolutions-COG8",
-            reason="Cognito Plus tier (advanced security) not required for this internal "
-            "development tool; upstream IdP provides threat protection",
-        ),
-        cdk_nag.NagPackSuppression(
-            id="AwsSolutions-L1",
-            reason="Using Python 3.12 for CDK Lambda construct stability",
-        ),
-        cdk_nag.NagPackSuppression(
-            id="AwsSolutions-SF1",
-            reason="Step Functions logs ERROR-level events; ALL-level logging planned for production",
-        ),
-    ],
-    apply_to_nested_stacks=True,
-)
+# Audit issue #4: suppressions are now applied per-construct inside
+# PlatformStack._apply_nag_suppressions() so each rule is scoped to the
+# specific resource that legitimately needs it. Stack-wide suppressions
+# previously hid any new wildcard added in unrelated constructs.
 
 app.synth()

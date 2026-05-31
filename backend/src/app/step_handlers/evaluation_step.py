@@ -138,6 +138,24 @@ def handler(event: dict, context) -> dict:
                                     "logs:CreateLogGroup",
                                     "logs:PutLogEvents",
                                     "logs:CreateLogStream",
+                                    # AgentCore Online Evaluation reads X-Ray
+                                    # spans (aws/spans index) and CloudWatch
+                                    # Application Signals to extract per-step
+                                    # traces. Without these, CreateOnlineEvaluationConfig
+                                    # returns AccessDeniedException with
+                                    # "Access denied when accessing index policy
+                                    # for aws/spans". See lessons.md Bug 119.
+                                    "xray:GetIndexingRules",
+                                    "xray:GetTraceSummaries",
+                                    "xray:BatchGetTraces",
+                                    "xray:GetTraceGraph",
+                                    "xray:GetGroup",
+                                    "xray:GetGroups",
+                                    "xray:GetServiceGraph",
+                                    "xray:GetSamplingRules",
+                                    "application-signals:Get*",
+                                    "application-signals:List*",
+                                    "application-signals:BatchGet*",
                                 ],
                                 "Resource": "*",
                             }

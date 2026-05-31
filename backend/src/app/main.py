@@ -13,6 +13,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.routers import workflows_router
 from app.routers.flows import router as flows_router
 from app.routers.observability import router as observability_router
+from app.routers.workspaces import router as workspaces_router
+from app.routers.git_sync import router as git_sync_router
 # routers/deployment.py and routers/tools.py used to mount /api/deploy + tool
 # routes here, but API Gateway routes those endpoints directly to the
 # Deployment Lambda (deployment_handler.py). The router files were dead code
@@ -96,6 +98,10 @@ app.include_router(flows_router, prefix="/api", tags=["flows"])
 ## deployment_router and tools_router were mounted here previously — see comment
 ## near imports above. The Deployment Lambda owns those endpoints now.
 app.include_router(observability_router, prefix="/api", tags=["observability"])
+# Phase 2 Gap 2E — workspace sharing + RBAC. Mounted on the workflow Lambda
+# because it reads/writes workflow storage. Router carries its own /api prefix.
+app.include_router(workspaces_router)
+app.include_router(git_sync_router)  # Gap 3D GitOps - /api/workflows/{id}/git-sync + /git-token
 
 
 @app.get("/health")

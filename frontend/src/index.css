@@ -1,4 +1,7 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+/* Inter is loaded from the system font stack below (system-ui / -apple-system).
+   We intentionally do NOT @import it from fonts.googleapis.com — that external
+   stylesheet is blocked by our strict Content-Security-Policy (style-src 'self')
+   and surfaced as a console error. System fonts render the UI identically. */
 @import "tailwindcss";
 
 :root {

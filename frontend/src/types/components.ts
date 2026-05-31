@@ -245,6 +245,10 @@ export interface IdentityConfiguration {
   credentialType: 'oauth2' | 'api_key';
   oauth2Config?: OAuth2Configuration;
   apiKeyConfig?: APIKeyConfiguration;
+  // Gap P3.3B — execution-role isolation. 'shared' (default) keeps the Bug-60
+  // stack shared role; 'per_agent' opts into a least-privilege per-runtime
+  // role (slower first deploy due to IAM propagation). Absent => 'shared'.
+  mode?: 'shared' | 'per_agent';
 }
 
 export interface OAuth2Configuration {
@@ -374,6 +378,12 @@ export interface A2AConfiguration {
   routingStrategy: 'round_robin' | 'capability_based' | 'load_balanced';
   shareContext: boolean;
   contextWindowSize: number;
+  // Gap 3A - fields consumed by the deploy payload / runtime agent card.
+  // Mapped at deploy time to backend snake_case (advertisedDescription ->
+  // advertised_description, peerAllowlist -> peer_allowlist).
+  capabilities?: string[];
+  advertisedDescription?: string;
+  peerAllowlist?: string[];
 }
 
 export interface AgentEndpoint {
@@ -488,6 +498,9 @@ export interface KnowledgeBaseToolConfig extends ToolConfiguration {
   kmsKeyArn?: string;
   // Shared - RAG foundation model
   foundationModelId?: string;
+  // Gap 3C — agentic retrieval strategy. 'simple' (default/absent) keeps the
+  // single-shot retrieve_from_kb tool; the others swap in a strategy-specific tool.
+  retrievalStrategy?: 'simple' | 'multi_hop' | 'hybrid' | 'reranked';
 }
 
 // ============================================================================

@@ -91,3 +91,59 @@ def assert_owner(record_owner_sub: Optional[str], caller_sub: str) -> None:
         raise HTTPException(status_code=404, detail="Not found")
     if record_owner_sub != caller_sub:
         raise HTTPException(status_code=404, detail="Not found")
+
+
+# Gap 2E: org-wide RBAC role from the Cognito group claim. ADVISORY ONLY.
+# The per-workflow ACL (services/workspace_acl.py) is the authoritative authz
+# check for view/edit/share; this role must NEVER bypass that ACL (a group=
+# editor must not let a user edit another tenant's private workflow). It exists
+# for a future org-admin escalation path only.
+_ROLE_PRECEDENCE = {"org-admin": 3, "editor": 2, "viewer": 1, "none": 0}
+
+
+def get_caller_role(request: Request) -> str:
+    """Return the caller's highest-privilege Cognito group role.
+
+    One of 'org-admin' | 'editor' | 'viewer' | 'none'. Mirrors the defensive
+    authorizer-claim walk in get_caller_sub. The cognito:groups claim may be a
+    JSON-array string, a comma/space-joined string, or a list depending on the
+    HTTP API JWT authorizer/token serialization, so we parse all shapes.
+    """
+    import json as _json
+
+    aws_event = request.scope.get("aws.event") if request.scope else None
+    if aws_event is None:
+        # Local dev: single-user keeps full access, like _LOCAL_DEV_SUB.
+        return "org-admin"
+
+    groups: list[str] = []
+    try:
+        authz = aws_event["requestContext"]["authorizer"]
+        jwt = authz.get("jwt") or authz
+        claims = jwt.get("claims") or jwt
+        raw = claims.get("cognito:groups")
+    except (KeyError, TypeError, AttributeError) as e:
+        logger.warning("Could not extract cognito:groups from authorizer: %s", e)
+        raw = None
+
+    if isinstance(raw, list):
+        groups = [str(g) for g in raw]
+    elif isinstance(raw, str) and raw:
+        s = raw.strip()
+        if s.startswith("["):
+            try:
+                parsed = _json.loads(s)
+                if isinstance(parsed, list):
+                    groups = [str(g) for g in parsed]
+            except ValueError:
+                groups = []
+        if not groups:
+            # Cognito also delivers groups as a bracketed/space/comma list.
+            s = s.strip("[]")
+            groups = [g.strip() for g in s.replace(",", " ").split() if g.strip()]
+
+    best = "none"
+    for g in groups:
+        if _ROLE_PRECEDENCE.get(g, 0) > _ROLE_PRECEDENCE[best]:
+            best = g
+    return best

@@ -62,7 +62,11 @@ def handler(event: dict, context) -> dict:
         config = RuntimeConfig.model_validate(config_dict)
         region = _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
 
-        runtime_name = sanitize_runtime_name(config.name)
+        # Phase 1 Gap 1A — versioning. Use the version-suffixed AgentCore
+        # runtime name minted in deployment_handler.handle_deploy. Falls back
+        # to the legacy naming for any caller bypassing the deployment handler
+        # (direct deploys via services/deployment.py).
+        runtime_name = event.get("agentcore_runtime_name") or sanitize_runtime_name(config.name)
         role_arn = event.get("role_arn", "")
         s3_bucket = event.get("s3_bucket", "")
         s3_key = event.get("s3_key", "")
@@ -146,6 +150,50 @@ def handler(event: dict, context) -> dict:
         )
         env_vars.update(otel_env)
 
+        # Phase 2 Gap 2D — human-in-the-loop. The injected human_approval @tool
+        # writes PENDING rows keyed on the AgentCore runtime NAME (known here;
+        # the canonical runtime_id does not exist until create_agent_runtime
+        # returns, and env vars are fixed at create time). owner_sub rides the
+        # SFN input from deployment_handler.handle_deploy so the owner_sub GSI
+        # pending queue is populated for the right tenant.
+        if "hitl" in (event.get("connected_tools") or []):
+            hitl_table = _get_env("HITL_REQUESTS_TABLE_NAME", "")
+            if hitl_table:
+                env_vars["HITL_REQUESTS_TABLE_NAME"] = hitl_table
+                env_vars["HITL_RUNTIME_ID"] = runtime_name
+                env_vars["RUNTIME_OWNER_SUB"] = event.get("owner_sub", "")
+
+        # Gap 3A - A2A. Inject agent-card + peer-allowlist env when the runtime
+        # is A2A (by protocol OR by an 'a2a' tool node). The self-contained
+        # agent reads these at runtime; absent vars fail-closed (no allowlist =>
+        # all peers refused).
+        is_a2a = (config.protocol or "HTTP").upper() == "A2A" or "a2a" in (
+            event.get("connected_tools") or []
+        )
+        if is_a2a:
+            a2a_cfg = event.get("a2a_config") or {}
+            caps = a2a_cfg.get("capabilities") or []
+            if caps:
+                env_vars["A2A_CAPABILITIES"] = ",".join([str(c)[:64] for c in caps][:32])
+            if a2a_cfg.get("advertised_description"):
+                env_vars["A2A_ADVERTISED_DESCRIPTION"] = str(a2a_cfg["advertised_description"])[:512]
+            allow = a2a_cfg.get("peer_allowlist") or []
+            if allow:
+                env_vars["A2A_PEER_ALLOWLIST"] = ",".join([str(u)[:512] for u in allow][:64])
+
+        # Bug 129: the A2A agent is a SELF-CONTAINED interop layer that serves the
+        # agent card + invoke over the standard BedrockAgentCoreApp HTTP entrypoint
+        # (/invocations + an extra /.well-known/agent-card.json route). It does NOT
+        # embed the a2a-sdk JSON-RPC server. So the control-plane serverProtocol
+        # MUST be HTTP — setting it to "A2A" makes AgentCore probe for a native
+        # A2A JSON-RPC server the container never starts, and every invoke fails
+        # with HTTP 424 (Failed Dependency) + zero container logs. The A2A
+        # behaviour is delivered by the agent-card route + env above, never by the
+        # native server protocol. Any non-HTTP/MCP protocol value collapses to HTTP.
+        server_protocol = (config.protocol or "HTTP").upper()
+        if server_protocol not in ("HTTP", "MCP"):
+            server_protocol = "HTTP"
+
         runtime_result = create_agent_runtime(
             agentcore_ctrl=agentcore_ctrl,
             runtime_name=runtime_name,
@@ -154,7 +202,7 @@ def handler(event: dict, context) -> dict:
             s3_key=s3_key,
             entrypoint=entrypoint,
             python_runtime=config.python_runtime or "PYTHON_3_13",
-            protocol=config.protocol or "HTTP",
+            protocol=server_protocol,
             env_vars=env_vars if env_vars else None,
         )
 

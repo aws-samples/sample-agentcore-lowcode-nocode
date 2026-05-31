@@ -551,6 +551,63 @@ def _resolve_runtime_identifier(agentcore_ctrl, identifier: str) -> str:
     return identifier  # fall through; caller will see ResourceNotFound and treat as no-op
 
 
+def _resolve_runtime_name_for_cleanup(
+    canonical_id: str, region: str
+) -> Optional[str]:
+    """Map an AgentCore canonical runtime id back to the friendly runtime_name.
+
+    The TriggersTable is keyed by the human-friendly ``runtime_name`` (e.g.
+    ``my_agent``), but ``destroy_runtime`` only has the canonical AgentCore id
+    (``<agentcore_runtime_name>-<10hash>``). The deployer records the
+    runtime_name<->runtime_id / agentcore_runtime_name mapping in the
+    AgentVersions table, so scan there for a matching row.
+
+    Best-effort: returns the friendly name if a version row matches, otherwise
+    falls back to the canonical id with its 10-char hash suffix stripped (which
+    equals the friendly name in the single-version per-agent path). Returns
+    None only if resolution is impossible — callers treat that as "nothing to
+    clean up". Never raises; the caller's cleanup is best-effort.
+    """
+    if not canonical_id:
+        return None
+    try:
+        # The versions store keys rows by friendly runtime_name and stamps each
+        # with runtime_id / agentcore_runtime_name. We only have the AgentCore
+        # id here, so do a bounded scan of the AgentVersions table and match on
+        # either field. The table is tenant-small in practice; cap pages.
+        table_name = os.environ.get("AGENT_VERSIONS_TABLE_NAME", "AgentVersions")
+        table = boto3.resource("dynamodb", region_name=region).Table(table_name)
+        scan_kwargs: dict = {
+            "ProjectionExpression": (
+                "runtime_name, runtime_id, agentcore_runtime_name"
+            ),
+        }
+        for _ in range(20):  # cap at 20 pages of scan
+            resp = table.scan(**scan_kwargs)
+            for item in resp.get("Items", []):
+                if (
+                    item.get("runtime_id") == canonical_id
+                    or item.get("agentcore_runtime_name") == canonical_id
+                ):
+                    name = item.get("runtime_name")
+                    if name:
+                        return name
+            last_key = resp.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            scan_kwargs["ExclusiveStartKey"] = last_key
+    except Exception as e:
+        logger.warning(
+            "Could not resolve runtime_name for %s via versions store: %s",
+            canonical_id,
+            e,
+        )
+    # Fallback: strip the canonical 10-char hash suffix. For per-agent runtimes
+    # the friendly runtime_name equals the un-hashed AgentCore name.
+    stripped = re.sub(r"-[A-Za-z0-9]{10}$", "", canonical_id)
+    return stripped or None
+
+
 def destroy_runtime(runtime_id: str, region: str) -> dict:
     """Delete an AgentCore runtime AND its execution role.
 
@@ -604,6 +661,10 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
     # Use the original argument as the runtime "name" component for the
     # convention-based fallback. canonical_id may include a `-XxXxXxXxXx`
     # suffix; strip that to recover the runtime name.
+    # NOTE (Gap P3.3B): this `AgentCoreRuntime-{name}` candidate also matches
+    # per-agent least-privilege roles minted by iam_step (mode == 'per_agent'),
+    # so they are cleaned up here too — and are NOT skipped by the Bug-62 guard
+    # below (which only skips the stack shared role / '-shared' suffix).
     name_for_role = re.sub(r"-[A-Za-z0-9]{10}$", "", runtime_id)
     for role_name in (
         f"AgentCoreRuntime-{name_for_role}",
@@ -658,6 +719,148 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
         except Exception as e:
             # Don't fail the whole delete because of role cleanup issues.
             logger.warning("Runtime %s role cleanup (%s) failed: %s", runtime_id, role_name, e)
+
+    # Phase 1 Gap 1D — best-effort dashboard cleanup. The dashboard was
+    # created in runtime_launch_step.py with name `agentcore-{runtime_id}`.
+    # delete_dashboards is idempotent and a failure here doesn't fail the
+    # destroy. Same Bug 25/27 cascade-cleanup pattern.
+    try:
+        from app.services.observability_dashboard import delete_dashboard_for_runtime
+        delete_dashboard_for_runtime(canonical_id, region)
+    except Exception as e:
+        logger.warning("Dashboard cleanup for %s failed: %s", canonical_id, e)
+
+    # Phase 1 Gap 1C cleanup (M-2 + real-tester finding 2026-05-28):
+    # cascade-delete the AgentCore OnlineEvaluationConfig + its CloudWatch
+    # eval-results log group + the AgentCoreEval-* IAM execution role.
+    # evaluation_step.py names the config `eval_<sanitized_runtime_id>`
+    # and the role `AgentCoreEval-<agent_id[:32]>`. Best-effort: failures
+    # here don't fail the destroy. Same pattern as Bug 25/27. See Bug 124.
+    try:
+        ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
+        logs_client = boto3.client("logs", region_name=region)
+        normalised_runtime = re.sub(r"[^a-zA-Z0-9_]", "_", canonical_id)[:32]
+        next_token: Optional[str] = None
+        for _ in range(20):  # cap pagination at 20 pages × 50 = 1000 configs
+            kw: dict = {"maxResults": 50}
+            if next_token:
+                kw["nextToken"] = next_token
+            try:
+                resp = ctrl.list_online_evaluation_configs(**kw)
+            except Exception:
+                break
+            for cfg in resp.get("onlineEvaluationConfigs", []):
+                cfg_name = cfg.get("onlineEvaluationConfigName", "")
+                if normalised_runtime not in cfg_name:
+                    continue
+                cfg_id = cfg.get("onlineEvaluationConfigId", "")
+                if not cfg_id:
+                    continue
+                try:
+                    ctrl.delete_online_evaluation_config(onlineEvaluationConfigId=cfg_id)
+                    logger.info("Deleted OnlineEvaluationConfig %s", cfg_id)
+                except Exception as e:
+                    logger.warning("Failed to delete eval config %s: %s", cfg_id, e)
+                # Eval results log group is per-config — see Bug 120.
+                try:
+                    logs_client.delete_log_group(
+                        logGroupName=f"/aws/bedrock-agentcore/evaluations/results/{cfg_id}"
+                    )
+                    logger.info(
+                        "Deleted eval-results log group for config %s", cfg_id
+                    )
+                except Exception as e:
+                    msg = str(e)
+                    if "ResourceNotFound" in msg:
+                        pass
+                    else:
+                        logger.warning(
+                            "Failed to delete eval log group for %s: %s", cfg_id, e
+                        )
+            next_token = resp.get("nextToken")
+            if not next_token:
+                break
+        # Bug 124: also delete the AgentCoreEval-* IAM exec role. evaluation_step
+        # mints it as `AgentCoreEval-{agent_id[:32]}` where agent_id is the
+        # AgentCore runtime_id. Match the same prefix here. Idempotent on
+        # already-gone roles.
+        eval_role_name = f"AgentCoreEval-{normalised_runtime}"
+        try:
+            for pn in iam.list_role_policies(RoleName=eval_role_name).get(
+                "PolicyNames", []
+            ):
+                try:
+                    iam.delete_role_policy(RoleName=eval_role_name, PolicyName=pn)
+                except Exception:
+                    pass
+            iam.delete_role(RoleName=eval_role_name)
+            logger.info("Deleted eval execution role %s", eval_role_name)
+        except iam.exceptions.NoSuchEntityException:
+            pass
+        except Exception as e:
+            logger.warning(
+                "Failed to delete eval role %s: %s", eval_role_name, e
+            )
+    except Exception as e:
+        logger.warning("Eval-config cleanup for %s failed: %s", canonical_id, e)
+
+    # Bug 124 — Phase 3 Gap 3F: tear down any scheduled / event triggers so a
+    # destroyed runtime doesn't leave a live cron/webhook invoking a dead ARN.
+    # destroy_runtime only has canonical_id; resolve the friendly runtime_name
+    # (the triggers PK) from the versions/slots store, then for each trigger
+    # delete the provisioned EventBridge Scheduler schedule / events.Rule /
+    # Lambda Function URL + the webhook HMAC secret, and finally the DDB rows.
+    # Best-effort: every failure is logged and never fails the destroy.
+    try:
+        from app.services.trigger_store import get_trigger_store
+
+        # Resolve the friendly runtime_name that keys the TriggersTable. The
+        # deployer already records runtime_name<->runtime_id in AgentVersions;
+        # use that mapping (or the owner GSI) to find the rows to clean up.
+        runtime_name = _resolve_runtime_name_for_cleanup(canonical_id, region)
+        if runtime_name:
+            store = get_trigger_store()
+            scheduler = boto3.client("scheduler", region_name=region)
+            events = boto3.client("events", region_name=region)
+            lam = boto3.client("lambda", region_name=region)
+            sm = boto3.client("secretsmanager", region_name=region)
+            for trig in store.list_for_runtime(runtime_name):
+                if trig.scheduler_name:
+                    try:
+                        scheduler.delete_schedule(Name=trig.scheduler_name)
+                    except Exception as e:
+                        logger.warning("Trigger schedule cleanup failed: %s", e)
+                if trig.eventbridge_rule_arn:
+                    try:
+                        rule_name = trig.eventbridge_rule_arn.rsplit("/", 1)[-1]
+                        for t in events.list_targets_by_rule(Rule=rule_name).get(
+                            "Targets", []
+                        ):
+                            events.remove_targets(Rule=rule_name, Ids=[t["Id"]])
+                        events.delete_rule(Name=rule_name)
+                    except Exception as e:
+                        logger.warning("Trigger rule cleanup failed: %s", e)
+                if trig.function_url:
+                    try:
+                        lam.delete_function_url_config(
+                            FunctionName=trig.function_url
+                        )
+                    except Exception as e:
+                        logger.warning("Trigger function-url cleanup failed: %s", e)
+                if trig.webhook_secret_ref:
+                    try:
+                        sm.delete_secret(
+                            SecretId=trig.webhook_secret_ref,
+                            ForceDeleteWithoutRecovery=True,
+                        )
+                    except Exception as e:
+                        logger.warning("Trigger secret cleanup failed: %s", e)
+                try:
+                    store.delete(trig.runtime_name, trig.trigger_id)
+                except Exception as e:
+                    logger.warning("Trigger row cleanup failed: %s", e)
+    except Exception as e:
+        logger.warning("Triggers cleanup for %s failed: %s", canonical_id, e)
 
     if deleted_any_role:
         return {"success": True, "message": f"Runtime {runtime_id} and execution role deleted"}

@@ -82,6 +82,20 @@ class PlatformStack(cdk.Stack):
         self.workflows_table = self._create_workflows_table()
         self.deployments_table = self._create_deployments_table()
         self.flows_table = self._create_flows_table()
+        # Phase 1 Gap 1A — versioning + slot tables.
+        self.agent_versions_table = self._create_agent_versions_table()
+        self.runtime_slots_table = self._create_runtime_slots_table()
+        # Phase 2 Gap 2A — agent registry / catalog table.
+        self.agent_registry_table = self._create_agent_registry_table()
+        # Phase 2 Gap 2B — usage events table (optional/dormant write path for
+        # explicit per-invocation usage events; primary cost path is query-time).
+        self.usage_events_table = self._create_usage_events_table()
+        # Phase 2 Gap 2D — human-in-the-loop approval requests table.
+        self.hitl_requests_table = self._create_hitl_requests_table()
+        # Phase 3 Gap 3F — scheduled / event triggers registry table.
+        self.triggers_table = self._create_triggers_table()
+        # Phase 3 Gap 3H — prompt library / catalog table.
+        self.prompt_library_table = self._create_prompt_library_table()
         self.logging_bucket = self._create_logging_bucket()
         self.artifacts_bucket = self._create_artifacts_bucket()
         self._upload_agentcore_deps()
@@ -231,6 +245,294 @@ class PlatformStack(cdk.Stack):
                 point_in_time_recovery_enabled=True,
             ),
         )
+
+    def _create_agent_versions_table(self) -> dynamodb.Table:
+        """Phase 1 Gap 1A — DynamoDB table for AgentVersions.
+
+        PK: ``runtime_name`` (the friendly name the user typed)
+        SK: ``version_id`` (sortable id; lex order = chronological)
+        GSI: ``owner_sub-version_id-index`` for list-by-user queries.
+
+        Composite key supports list-versions-of-a-runtime via Query (newest
+        first via ScanIndexForward=False). The owner_sub GSI supports the
+        cross-runtime "all my versions" view for a future registry tab.
+        """
+        table = dynamodb.Table(
+            self,
+            "AgentVersionsTable",
+            table_name=f"{self._project}-{self._env}-agent-versions",
+            partition_key=dynamodb.Attribute(
+                name="runtime_name",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="version_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=self._removal_policy,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+        table.add_global_secondary_index(
+            index_name="owner_sub-version_id-index",
+            partition_key=dynamodb.Attribute(
+                name="owner_sub",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="version_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+        )
+        return table
+
+    def _create_runtime_slots_table(self) -> dynamodb.Table:
+        """Phase 1 Gap 1A — DynamoDB table for runtime production/staging slots.
+
+        PK: ``runtime_name``. One row per friendly name. Stores which version
+        is currently in production vs. staging, plus the previous-production
+        pointer used by /rollback. Owner_sub is on the row itself (not a GSI)
+        because reads are always keyed on runtime_name.
+        """
+        return dynamodb.Table(
+            self,
+            "RuntimeSlotsTable",
+            table_name=f"{self._project}-{self._env}-runtime-slots",
+            partition_key=dynamodb.Attribute(
+                name="runtime_name",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=self._removal_policy,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_agent_registry_table(self) -> dynamodb.Table:
+        """Phase 2 Gap 2A — DynamoDB table for the agent registry / catalog.
+
+        PK: ``org_id``, SK: ``agent_slug``. One row per published agent.
+        GSI ``owner_sub-agent_slug-index`` for list-by-publisher.
+        GSI ``visibility-agent_slug-index`` for list-public discovery.
+
+        Visibility model (private/org/public) is enforced in routers/registry.py;
+        the table stores the raw entries and the router filters on read.
+        """
+        table = dynamodb.Table(
+            self,
+            "AgentRegistryTable",
+            table_name=f"{self._project}-{self._env}-agent-registry",
+            partition_key=dynamodb.Attribute(
+                name="org_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="agent_slug",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=self._removal_policy,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+        table.add_global_secondary_index(
+            index_name="owner_sub-agent_slug-index",
+            partition_key=dynamodb.Attribute(
+                name="owner_sub",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="agent_slug",
+                type=dynamodb.AttributeType.STRING,
+            ),
+        )
+        table.add_global_secondary_index(
+            index_name="visibility-agent_slug-index",
+            partition_key=dynamodb.Attribute(
+                name="visibility",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="agent_slug",
+                type=dynamodb.AttributeType.STRING,
+            ),
+        )
+        return table
+
+    def _create_hitl_requests_table(self) -> dynamodb.Table:
+        """Phase 2 Gap 2D — DynamoDB table for human-in-the-loop approvals.
+
+        PK ``runtime_id`` (the agent-stamped AgentCore runtime NAME), SK
+        ``request_id`` (sortable). GSI ``owner_sub-request_id-index`` powers the
+        tenant-scoped pending queue. Rows carry a ``ttl`` (24h) so DynamoDB
+        auto-expires decided/abandoned requests — no destroy_runtime cascade.
+        """
+        table = dynamodb.Table(
+            self,
+            "HitlRequestsTable",
+            table_name=f"{self._project}-{self._env}-hitl-requests",
+            partition_key=dynamodb.Attribute(
+                name="runtime_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="request_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=self._removal_policy,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            time_to_live_attribute="ttl",
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+        table.add_global_secondary_index(
+            index_name="owner_sub-request_id-index",
+            partition_key=dynamodb.Attribute(
+                name="owner_sub",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="request_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+        )
+        return table
+
+    def _create_triggers_table(self) -> dynamodb.Table:
+        """Phase 3 Gap 3F — DynamoDB table for scheduled / event triggers.
+
+        PK ``runtime_name`` (tenant-supplied friendly name; the router gates
+        every write/list/delete through the production-slot owner, so the Bug
+        122 PK-collision class is closed by ownership resolution). SK
+        ``trigger_id`` (sortable hex). GSI ``owner_sub-trigger_id-index`` powers
+        the owner-scoped list-across-runtimes query. No TTL — rows live until the
+        trigger is deleted or destroy_runtime cleans them up (Bug 124).
+        """
+        table = dynamodb.Table(
+            self,
+            "TriggersTable",
+            table_name=f"{self._project}-{self._env}-triggers",
+            partition_key=dynamodb.Attribute(
+                name="runtime_name",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="trigger_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=self._removal_policy,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+        table.add_global_secondary_index(
+            index_name="owner_sub-trigger_id-index",
+            partition_key=dynamodb.Attribute(
+                name="owner_sub",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="trigger_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+        )
+        return table
+
+    def _create_prompt_library_table(self) -> dynamodb.Table:
+        """Phase 3 Gap 3H — DynamoDB table for the prompt library / catalog.
+
+        PK ``org_id``, SK ``prompt_name``. One row per saved prompt. GSI
+        ``owner_sub-prompt_name-index`` for the list-by-author view. Mirrors
+        _create_agent_registry_table; routers/prompts.py (mounted on the
+        deployment Lambda) reads/writes this table.
+        """
+        table = dynamodb.Table(
+            self,
+            "PromptLibraryTable",
+            table_name=f"{self._project}-{self._env}-prompt-library",
+            partition_key=dynamodb.Attribute(
+                name="org_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="prompt_name",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=self._removal_policy,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+        table.add_global_secondary_index(
+            index_name="owner_sub-prompt_name-index",
+            partition_key=dynamodb.Attribute(
+                name="owner_sub",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="prompt_name",
+                type=dynamodb.AttributeType.STRING,
+            ),
+        )
+        return table
+
+    def _create_usage_events_table(self) -> dynamodb.Table:
+        """Phase 2 Gap 2B — DynamoDB table for explicit per-invocation usage
+        events (cost analytics + FinOps).
+
+        PK ``runtime_id`` (AWS-assigned, never tenant-supplied), SK
+        ``event_id`` (sortable). GSI ``owner_sub-event_id-index`` for the
+        list-by-owner cross-runtime view. TTL on ``ttl`` (90-day) bounds growth.
+
+        OPTIONAL / DORMANT in the primary flow: the cost endpoint derives
+        cost at query-time from CloudWatch Logs gen_ai.usage attrs, so no
+        rows are written until a future codegen span-processor hook lands.
+        """
+        table = dynamodb.Table(
+            self,
+            "UsageEventsTable",
+            table_name=f"{self._project}-{self._env}-usage-events",
+            partition_key=dynamodb.Attribute(
+                name="runtime_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="event_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=self._removal_policy,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            time_to_live_attribute="ttl",
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+        table.add_global_secondary_index(
+            index_name="owner_sub-event_id-index",
+            partition_key=dynamodb.Attribute(
+                name="owner_sub",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="event_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+        )
+        return table
 
     # ------------------------------------------------------------------
     # SSM Parameters
@@ -564,6 +866,12 @@ class PlatformStack(cdk.Stack):
                 actions=["secretsmanager:GetSecretValue"],
                 resources=[self._otel_auth_secret_arn],
             ))
+        # Phase 2 Gap 2D — the injected human_approval @tool writes PENDING
+        # approval rows. Scoped to the single HITL table; PutItem only.
+        role.add_to_policy(iam.PolicyStatement(
+            actions=["dynamodb:PutItem"],
+            resources=[self.hitl_requests_table.table_arn],
+        ))
         return role
 
     def _create_workflow_lambda(self) -> _lambda.Function:
@@ -607,6 +915,25 @@ class PlatformStack(cdk.Stack):
                 ],
                 resources=[
                     f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:agentcore-otel/*",
+                ],
+            )
+        )
+        # Phase 3 Gap 3D GitOps: owner-scoped git PAT storage + retrieval. The
+        # git_sync service names secrets `agentcore-git/{safe_owner}-{uuid}` and
+        # reads them back at /api/workflows/{id}/git-sync time. Scoped to the
+        # agentcore-git/ namespace only. (No new API GW route is needed —
+        # /git-sync + /git-token are covered by the existing
+        # /api/workflows/{proxy+} POST route.)
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "secretsmanager:CreateSecret",
+                    "secretsmanager:TagResource",
+                    "secretsmanager:GetSecretValue",
+                    "secretsmanager:PutSecretValue",
+                ],
+                resources=[
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:agentcore-git/*",
                 ],
             )
         )
@@ -656,6 +983,26 @@ class PlatformStack(cdk.Stack):
         )
         # DynamoDB deployments table: read/write
         self.deployments_table.grant_read_write_data(role)
+        # Phase 1 Gap 1A — versions + slots tables. The deployment Lambda is
+        # the read-write owner: handle_deploy() seeds the AgentVersion row,
+        # and the versions router promotes/rolls back slots.
+        self.agent_versions_table.grant_read_write_data(role)
+        self.runtime_slots_table.grant_read_write_data(role)
+        # Phase 2 Gap 2A — agent registry. The registry router (publish/
+        # search/clone/update/delete) is mounted on the deployment Lambda.
+        self.agent_registry_table.grant_read_write_data(role)
+        # Phase 2 Gap 2B — usage events table (optional write path). The
+        # query-time cost path uses logs:StartQuery already granted below.
+        self.usage_events_table.grant_read_write_data(role)
+        # Phase 2 Gap 2D — HITL approval queue. routers/hitl.py (mounted on the
+        # deployment Lambda) reads the owner_sub GSI and decides requests.
+        self.hitl_requests_table.grant_read_write_data(role)
+        # Phase 3 Gap 3F — triggers registry. routers/triggers.py (mounted on
+        # the deployment Lambda) reads/writes this table + the owner_sub GSI.
+        self.triggers_table.grant_read_write_data(role)
+        # Phase 3 Gap 3H — prompt library. routers/prompts.py (mounted on the
+        # deployment Lambda) reads/writes this table + the owner_sub GSI.
+        self.prompt_library_table.grant_read_write_data(role)
         # states:StartExecution on the state machine (granted after SM creation)
         # SSM read
         role.add_to_policy(
@@ -726,6 +1073,12 @@ class PlatformStack(cdk.Stack):
                     "bedrock-agentcore:CreatePolicy",
                     "bedrock-agentcore:DeletePolicy",
                     "bedrock-agentcore:ListPolicies",
+                    "bedrock-agentcore:GetPolicy",
+                    # Bug 134: gateway-scoped policy create/delete is authorized as
+                    # ManageResourceScopedPolicy on the gateway ARN (not CreatePolicy).
+                    "bedrock-agentcore:ManageResourceScopedPolicy",
+                    "bedrock-agentcore:GetResourceScopedPolicy",
+                    "bedrock-agentcore:ListResourceScopedPolicies",
                     # AgentCore's DeleteAgentRuntime cascades into deleting
                     # the runtime's auto-created workload-identity record;
                     # the caller principal must hold this verb too. Verified
@@ -733,6 +1086,41 @@ class PlatformStack(cdk.Stack):
                     "bedrock-agentcore:GetWorkloadIdentity",
                     "bedrock-agentcore:DeleteWorkloadIdentity",
                     "bedrock-agentcore:ListWorkloadIdentities",
+                    # Phase 1 Gap 1C — eval results endpoint reads
+                    # OnlineEvaluationConfigs from the AgentCore control plane.
+                    "bedrock-agentcore:ListOnlineEvaluationConfigs",
+                    "bedrock-agentcore:GetOnlineEvaluationConfig",
+                    # M-2 (security review 2026-05-28): destroy_runtime
+                    # cascade-deletes orphaned eval configs to avoid PII /
+                    # billing residue under deleted runtimes. See Bug 123.
+                    "bedrock-agentcore:DeleteOnlineEvaluationConfig",
+                ],
+                resources=["*"],
+            )
+        )
+        # Phase 1 Gap 1C — CloudWatch Logs Insights query for evaluator scores.
+        # M-2: also delete the eval-results log groups on destroy_runtime.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "logs:StartQuery",
+                    "logs:GetQueryResults",
+                    "logs:StopQuery",
+                    "logs:DescribeLogGroups",
+                    "logs:DeleteLogGroup",
+                ],
+                resources=["*"],
+            )
+        )
+        # Phase 1 Gap 1D — dashboard URL probe + cascade-delete on
+        # destroy_runtime. CloudWatch dashboard IAM is account-level
+        # (no resource ARN). DeleteDashboards is idempotent.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "cloudwatch:GetDashboard",
+                    "cloudwatch:DeleteDashboards",
+                    "cloudwatch:ListDashboards",
                 ],
                 resources=["*"],
             )
@@ -788,6 +1176,25 @@ class PlatformStack(cdk.Stack):
         )
         # S3 artifacts bucket: read/write for CFN template generation
         self.artifacts_bucket.grant_read_write(role)
+        # Phase 3 Gap 3F — webhook trigger HMAC secret. routers/triggers.py
+        # mints an HMAC signing secret per webhook trigger under the
+        # agentcore-trigger/ namespace; destroy_runtime (runtime_deployer)
+        # cascade-deletes it per trigger row on teardown (Bug 124). Scoped to
+        # the agentcore-trigger/ prefix only.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "secretsmanager:CreateSecret",
+                    "secretsmanager:TagResource",
+                    "secretsmanager:GetSecretValue",
+                    "secretsmanager:PutSecretValue",
+                    "secretsmanager:DeleteSecret",
+                ],
+                resources=[
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:agentcore-trigger/*",
+                ],
+            )
+        )
 
         fn = _lambda.Function(
             self,
@@ -804,6 +1211,19 @@ class PlatformStack(cdk.Stack):
                 "DEPLOYMENTS_TABLE_NAME": self.deployments_table.table_name,
                 "DEPLOYMENT_TABLE_NAME": self.deployments_table.table_name,
                 "WORKFLOWS_TABLE_NAME": self.workflows_table.table_name,
+                # Phase 1 Gap 1A — versioning tables.
+                "AGENT_VERSIONS_TABLE_NAME": self.agent_versions_table.table_name,
+                "RUNTIME_SLOTS_TABLE_NAME": self.runtime_slots_table.table_name,
+                # Phase 2 Gap 2A — agent registry table.
+                "AGENT_REGISTRY_TABLE_NAME": self.agent_registry_table.table_name,
+                # Phase 2 Gap 2B — usage events table (cost_tracking store).
+                "USAGE_EVENTS_TABLE_NAME": self.usage_events_table.table_name,
+                # Phase 2 Gap 2D — HITL requests table (routers/hitl.py store).
+                "HITL_REQUESTS_TABLE_NAME": self.hitl_requests_table.table_name,
+                # Phase 3 Gap 3F — triggers registry table (routers/triggers.py).
+                "TRIGGERS_TABLE_NAME": self.triggers_table.table_name,
+                # Phase 3 Gap 3H — prompt library table (routers/prompts.py).
+                "PROMPT_LIBRARY_TABLE_NAME": self.prompt_library_table.table_name,
                 "ARTIFACTS_BUCKET_NAME": self.artifacts_bucket.bucket_name,
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
@@ -863,6 +1283,12 @@ class PlatformStack(cdk.Stack):
         # ── Common: every step needs to update its DDB row + read SSM config ─
         self.deployments_table.grant_read_write_data(role)
         self.workflows_table.grant_read_data(role)
+        # Phase 1 Gap 1A — every step's versioning hooks read the AgentVersions
+        # table and status_update writes to both tables. Granting read to all
+        # steps is acceptable: the data is owner-scoped via owner_sub anyway,
+        # and these tables hold no secrets.
+        self.agent_versions_table.grant_read_write_data(role)
+        self.runtime_slots_table.grant_read_write_data(role)
         role.add_to_policy(iam.PolicyStatement(
             actions=["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
             resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter/agentcore-workflow/{self._env}/*"],
@@ -893,7 +1319,10 @@ class PlatformStack(cdk.Stack):
         # IAM roles for their own dynamically-created Lambdas / AgentCore
         # resources. (memory creates AgentCoreMemory-* role for the memory
         # resource — see tasks/lessons.md Bug 45.)
-        if step_name in {"iam", "mcp_server", "gateway", "knowledge_base", "memory"}:
+        # evaluation creates AgentCoreEval-* role for the AgentCore evaluation
+        # engine — same drift-across-paths shape as Bug 45/71/77; see
+        # tasks/lessons.md Bug 118 (Phase 1 Gap 1C).
+        if step_name in {"iam", "mcp_server", "gateway", "knowledge_base", "memory", "evaluation"}:
             role.add_to_policy(iam.PolicyStatement(
                 actions=[
                     "iam:CreateRole", "iam:AttachRolePolicy", "iam:PutRolePolicy", "iam:GetRole",
@@ -914,15 +1343,19 @@ class PlatformStack(cdk.Stack):
         # Bug 49. Resource includes the shared runtime role (Bug 60) and the
         # legacy per-deploy AgentCoreRuntime-* / AgentCoreMemory-* patterns
         # so cleanup of older deployments still works.
-        if step_name in {"runtime_configure", "runtime_launch", "mcp_server"}:
+        if step_name in {"runtime_configure", "runtime_launch", "mcp_server", "evaluation"}:
             role.add_to_policy(iam.PolicyStatement(
                 actions=["iam:PassRole"],
                 resources=[
                     f"arn:aws:iam::{self.account}:role/AgentCoreRuntime-{self._project}-{self._env}-shared",
                     f"arn:aws:iam::{self.account}:role/AgentCoreRuntime-*",
+                    f"arn:aws:iam::{self.account}:role/AgentCoreEval-*",
                     f"arn:aws:iam::{self.account}:role/AgentCoreMemory-*",
                     f"arn:aws:iam::{self.account}:role/AgentCoreMCP-*",
                 ],
+                # Defence-in-depth: these roles may only be passed to AgentCore,
+                # never to another service (matches the policy-step grant below).
+                conditions={"StringEquals": {"iam:PassedToService": "bedrock-agentcore.amazonaws.com"}},
             ))
 
         # policy step calls update_gateway(roleArn=...) when binding the
@@ -1054,6 +1487,12 @@ class PlatformStack(cdk.Stack):
                 "bedrock-agentcore:CreateGatewayTarget",
                 "bedrock-agentcore:DeleteGatewayTarget",
                 "bedrock-agentcore:ListGatewayTargets",
+                # Bug 134: the gateway step now reads each target's MCP tool
+                # manifest (GetGatewayTarget) and triggers a target sync
+                # (SynchronizeGatewayTargets) so the policy step gets the real,
+                # synced tool action names for schema-valid Cedar.
+                "bedrock-agentcore:GetGatewayTarget",
+                "bedrock-agentcore:SynchronizeGatewayTargets",
                 "bedrock-agentcore:CreateOauth2CredentialProvider",
                 "bedrock-agentcore:DeleteOauth2CredentialProvider",
                 "bedrock-agentcore:ListOauth2CredentialProviders",
@@ -1092,21 +1531,66 @@ class PlatformStack(cdk.Stack):
                 "bedrock-agentcore:DeletePolicy",
                 "bedrock-agentcore:ListPolicies",
                 "bedrock-agentcore:UpdatePolicy",
+                "bedrock-agentcore:GetPolicy",
                 # CreatePolicy implicitly requires ManageAdminPolicy
                 # (undocumented). See tasks/lessons.md Bug 93.
                 "bedrock-agentcore:ManageAdminPolicy",
+                # Bug 134 (real root cause): creating a policy SCOPED TO A GATEWAY
+                # is authorized as bedrock-agentcore:ManageResourceScopedPolicy on
+                # the *gateway* ARN — NOT CreatePolicy. Without it, create_policy
+                # silently AccessDenied'd, the engine attached with ZERO policies,
+                # and ENFORCE default-deny returned 0 tools (looked like a Cedar
+                # bug; it was a missing IAM grant). Grant the manage + read verbs.
+                "bedrock-agentcore:ManageResourceScopedPolicy",
+                "bedrock-agentcore:GetResourceScopedPolicy",
+                "bedrock-agentcore:ListResourceScopedPolicies",
                 # The policy step reads the gateway it's about to attach the
                 # engine to (and updates it). Without GetGateway, the bind
                 # call fails with AccessDenied. See tasks/lessons.md Bug 70.
                 "bedrock-agentcore:GetGateway",
                 "bedrock-agentcore:UpdateGateway",
+                # Bug 134: the policy step reads each target's MCP tool manifest
+                # (list + get gateway targets) to generate Cedar that references
+                # only REAL tool actions — referencing a non-existent tool fails
+                # schema validation (CREATE_FAILED).
+                "bedrock-agentcore:ListGatewayTargets",
+                "bedrock-agentcore:GetGatewayTarget",
             ],
             "evaluation": [
                 "bedrock-agentcore:Evaluate",
                 "bedrock-agentcore:CreateOnlineEvaluationConfig",
                 "bedrock-agentcore:GetOnlineEvaluationConfig",
                 "bedrock-agentcore:ListOnlineEvaluationConfigs",
+                "bedrock-agentcore:UpdateOnlineEvaluationConfig",
+                "bedrock-agentcore:DeleteOnlineEvaluationConfig",
                 "logs:StartQuery", "logs:GetQueryResults",
+                # AgentCore eval reads the aws/spans CloudWatch Logs index
+                # policy (X-Ray-backed traces). The error message
+                # "Access denied when accessing index policy for aws/spans"
+                # really means logs:DescribeIndexPolicies / PutIndexPolicy
+                # on the aws/spans log group. See lessons.md Bug 119.
+                "logs:DescribeIndexPolicies",
+                "logs:DescribeFieldIndexes",
+                "logs:DescribeLogGroups",
+                "logs:PutIndexPolicy",
+                # AgentCore's CreateOnlineEvaluationConfig validates that the
+                # calling principal can read X-Ray's per-account index policy
+                # (where AgentCore stores the runtime's span index). Without
+                # these the API returns AccessDeniedException with the
+                # confusing message "Access denied when accessing index
+                # policy for aws/spans" — it's the caller, not the eval
+                # execution role, that needs the grant. See lessons.md Bug 119.
+                "xray:GetIndexingRules",
+                "xray:UpdateIndexingRule",
+                "xray:GetGroup",
+                "xray:GetGroups",
+                "xray:CreateGroup",
+                "xray:UpdateGroup",
+                "xray:GetTraceSummaries",
+                "xray:BatchGetTraces",
+                "application-signals:Get*",
+                "application-signals:List*",
+                "application-signals:BatchGet*",
             ],
             "runtime_configure": [
                 # CreateAgentRuntime auto-creates a default endpoint AND a
@@ -1141,6 +1625,19 @@ class PlatformStack(cdk.Stack):
                 actions=agentcore_steps[step_name],
                 resources=["*"],
             ))
+
+        # Phase 1 Gap 1D — runtime_launch creates a CloudWatch dashboard
+        # for the deployed runtime. cloudwatch:PutDashboard / GetDashboard
+        # are global (no resource ARN format for dashboards in IAM).
+        if step_name == "runtime_launch":
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "cloudwatch:PutDashboard",
+                    "cloudwatch:GetDashboard",
+                    "cloudwatch:DeleteDashboards",
+                ],
+                resources=["*"],
+            ))
         return role
 
     def _create_step_lambdas(self) -> dict[str, _lambda.Function]:
@@ -1172,7 +1669,10 @@ class PlatformStack(cdk.Stack):
             "gateway": {
                 "handler": "src/app/step_handlers/gateway_step.handler",
                 "memory": 512,
-                "timeout": 300,
+                # Bug 134: lockstep with the DeployGateway SFN task timeout (720s).
+                # The step probes the gateway MCP tool plane and may recreate the
+                # gateway up to 3x to beat the empty-tool-plane provisioning flake.
+                "timeout": 720,
             },
             "runtime_configure": {
                 "handler": "src/app/step_handlers/runtime_configure_step.handler",
@@ -1243,6 +1743,13 @@ class PlatformStack(cdk.Stack):
                     "DEPLOYMENTS_TABLE_NAME": self.deployments_table.table_name,
                     "DEPLOYMENT_TABLE_NAME": self.deployments_table.table_name,
                     "WORKFLOWS_TABLE_NAME": self.workflows_table.table_name,
+                    # Phase 1 Gap 1A — versioning tables; status_update_step
+                    # writes the AgentVersion + RuntimeSlots rows on success.
+                    "AGENT_VERSIONS_TABLE_NAME": self.agent_versions_table.table_name,
+                    "RUNTIME_SLOTS_TABLE_NAME": self.runtime_slots_table.table_name,
+                    # Phase 2 Gap 2D — HITL table name so runtime_configure_step
+                    # injects it into the runtime's environmentVariables.
+                    "HITL_REQUESTS_TABLE_NAME": self.hitl_requests_table.table_name,
                     "ARTIFACTS_BUCKET_NAME": self.artifacts_bucket.bucket_name,
                     "ENVIRONMENT": self._env,
                     "APP_AWS_REGION": self.region,
@@ -1343,7 +1850,12 @@ class PlatformStack(cdk.Stack):
         gateway = self._create_step_task(
             "DeployGateway",
             self.step_lambdas["gateway"],
-            timeout_seconds=300,
+            # Bug 134: the gateway step now also resolves + waits for the target
+            # MCP tool manifest (up to ~90s) so the policy step gets authoritative
+            # tool action names. Raise the cap in lockstep with the Lambda timeout
+            # (Bug 56) so a slow manifest sync surfaces as a real failure, not a
+            # retryable States.Timeout that could mask a broken policy.
+            timeout_seconds=720,
             result_path="$",
         )
         gateway.add_retry(**self._retry_kwargs())
@@ -1509,6 +2021,9 @@ class PlatformStack(cdk.Stack):
             fn.grant_invoke(sm_role)
         # DynamoDB access for deployment state
         self.deployments_table.grant_read_write_data(sm_role)
+        # Phase 1 Gap 1A — state machine writes versions/slots via status_update.
+        self.agent_versions_table.grant_read_write_data(sm_role)
+        self.runtime_slots_table.grant_read_write_data(sm_role)
 
         return sfn.StateMachine(
             self,
@@ -1550,9 +2065,28 @@ class PlatformStack(cdk.Stack):
 
     @staticmethod
     def _retry_kwargs() -> dict:
-        """Return retry configuration kwargs for add_retry()."""
+        """Return retry configuration kwargs for add_retry().
+
+        Bug 134 (root cause): previously this retried ``States.TaskFailed`` —
+        a WILDCARD that matches ANY application error (incl. a deterministic
+        Cedar-validation RuntimeError from the policy step). When a step raised
+        on attempt 1 but a later attempt happened to succeed (e.g. the gateway
+        tool manifest finished syncing between attempts), Step Functions took the
+        SUCCESS path and the Catch (which only fires after retries are exhausted)
+        never ran — so a broken Cedar policy shipped as "succeeded". We now retry
+        ONLY genuinely-transient infra errors (Lambda service/throttle/timeout),
+        NOT the catch-all TaskFailed. A deterministic handler error now goes
+        straight to Catch(States.ALL) -> StatusUpdateFailure -> DeploymentFailed.
+        """
         return {
-            "errors": ["States.TaskFailed", "States.Timeout"],
+            "errors": [
+                "States.Timeout",
+                "Lambda.ServiceException",
+                "Lambda.AWSLambdaException",
+                "Lambda.SdkClientException",
+                "Lambda.ClientExecutionTimeoutException",
+                "Lambda.TooManyRequestsException",
+            ],
             "interval": Duration.seconds(2),
             "max_attempts": 3,
             "backoff_rate": 2.0,
@@ -1812,6 +2346,23 @@ class PlatformStack(cdk.Stack):
             integration=deployment_integration,
             authorizer=jwt_authorizer,
         )
+        # Phase 1 Gap 1A — versions + slot management endpoints. Routed to
+        # the deployment Lambda which mounts routers/versions.py. The proxy
+        # path covers GET /versions, GET /slots, POST /versions/.../promote,
+        # POST /rollback. Per Bug 21, every new router needs an explicit API
+        # GW route enumeration here; the IAM grants for the new tables are
+        # added on the deployment Lambda role + state machine role above.
+        api.add_routes(
+            path="/api/runtimes/{proxy+}",
+            # Phase 3 Gap 3F adds DELETE for DELETE /api/runtimes/{name}/triggers/{id}.
+            methods=[
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.POST,
+                apigwv2.HttpMethod.DELETE,
+            ],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
         api.add_routes(
             path="/api/generate-tool",
             methods=[apigwv2.HttpMethod.POST],
@@ -1840,6 +2391,100 @@ class PlatformStack(cdk.Stack):
             path="/api/generate-cfn-template",
             methods=[apigwv2.HttpMethod.POST],
             integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Phase 3 Gap 3G — eject standalone Python project. Same deployment
+        # Lambda + artifacts bucket grant as the CFN export; only a new route.
+        api.add_routes(
+            path="/api/export-python",
+            methods=[apigwv2.HttpMethod.POST],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Phase 1 Gap 1E — NL agent (canvas) generator. Same Bedrock
+        # InvokeModel grant as the existing tool generator (already on
+        # the deployment Lambda role); only a new API GW route is needed.
+        api.add_routes(
+            path="/api/generate-canvas",
+            methods=[apigwv2.HttpMethod.POST],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Phase 2 Gap 2A — agent registry. POST publish + GET search on the
+        # collection, plus GET/PUT/DELETE/clone on /{slug} via proxy.
+        api.add_routes(
+            path="/api/registry",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        api.add_routes(
+            path="/api/registry/{proxy+}",
+            methods=[
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.POST,
+                apigwv2.HttpMethod.PUT,
+                apigwv2.HttpMethod.DELETE,
+            ],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Phase 2 Gap 2D — HITL approval queue. GET /api/hitl/pending +
+        # POST /api/hitl/{request_id}/decision via the proxy.
+        api.add_routes(
+            path="/api/hitl",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        api.add_routes(
+            path="/api/hitl/{proxy+}",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Phase 3 Gap 3E — pre-built connector catalog (read-only). GET list +
+        # GET /{id} detail on the deployment Lambda (mounts routers/connectors).
+        api.add_routes(
+            path="/api/connectors",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        api.add_routes(
+            path="/api/connectors/{proxy+}",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Phase 3 Gap 3H — prompt management library. POST save + GET list on
+        # the collection, plus GET/PUT/DELETE on /{prompt_name} via proxy.
+        # Mounted on the deployment Lambda (routers/prompts.py).
+        api.add_routes(
+            path="/api/prompts",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        api.add_routes(
+            path="/api/prompts/{proxy+}",
+            methods=[
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.POST,
+                apigwv2.HttpMethod.PUT,
+                apigwv2.HttpMethod.DELETE,
+            ],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Phase 2 Gap 2E — workspace sharing. GET /api/workspaces routes to the
+        # WORKFLOW Lambda (main.py mounts workspaces_router; it reads workflow
+        # storage). The share endpoints /api/workflows/{id}/share already match
+        # the existing /api/workflows/{proxy+} route → workflow_integration.
+        api.add_routes(
+            path="/api/workspaces",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+            integration=workflow_integration,
             authorizer=jwt_authorizer,
         )
 
@@ -2380,7 +3025,11 @@ class PlatformStack(cdk.Stack):
                                 "Action::s3:List*",
                                 "Action::s3:Abort*",
                                 "Action::s3:DeleteObject*",
-                                "Resource::arn:<AWS::Partition>:s3:::cdk-hnb659fds-assets-<AWS::AccountId>-us-east-1/*",
+                                # Region-templated rather than hardcoded so the
+                                # suppression holds across all deployment regions.
+                                # Without this every non-us-east-1 deploy fails
+                                # CDK-NAG with an unmatched IAM5 wildcard.
+                                f"Resource::arn:<AWS::Partition>:s3:::cdk-hnb659fds-assets-<AWS::AccountId>-{self.region}/*",
                                 "Resource::<ArtifactsBucket2AAC5544.Arn>/*",
                             ],
                         ),

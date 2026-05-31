@@ -174,6 +174,18 @@ export function IdentityConfigurationModal({
               ]}
               required
             />
+
+            <SelectField
+              id="identityMode"
+              label="Execution Role Isolation"
+              value={config.mode ?? 'shared'}
+              onChange={(value) => updateConfig('mode', value as 'shared' | 'per_agent')}
+              options={[
+                { value: 'shared', label: 'Shared execution role (default, fastest deploy)' },
+                { value: 'per_agent', label: 'Per-agent least-privilege role (opt-in, slower first deploy)' },
+              ]}
+              helpText="Per-agent mode mints a least-privilege IAM role scoped to only this agent's wired resources. The first deploy is slower (one-time IAM propagation delay); subsequent deploys are unaffected."
+            />
           </FormSection>
         </div>
       ),

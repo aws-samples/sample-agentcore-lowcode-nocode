@@ -8,6 +8,11 @@ import { authFetch } from '../../auth/authFetch';
 import { WORKFLOW_TEMPLATES } from '../../data/templates';
 import { useWorkflowStore } from '../../store/workflowStore';
 import type { AgentCoreComponentType } from '../../types/workflow';
+import { VersionsList } from './VersionsList';
+import { EvaluationResultsPanel } from './EvaluationResultsPanel';
+import { CostPanel } from './CostPanel';
+import { ObservabilityPanel } from './ObservabilityPanel';
+import { TriggersPanel } from './TriggersPanel';
 
 interface DeploymentStatus {
   state: 'idle' | 'deploying' | 'deployed' | 'error';
@@ -53,6 +58,7 @@ export interface DeployPanelProps {
   mcpServerConfig?: Record<string, unknown> | null;
   knowledgeBaseConfig?: Record<string, unknown> | null;
   observabilityConfig?: Record<string, unknown> | null;
+  a2aConfig?: Record<string, unknown> | null;
   isVisible: boolean;
   onClose: () => void;
   restoredDeployment?: {
@@ -87,7 +93,7 @@ const STEP_ORDER = [
   'evaluation', 'auth', 'status_update',
 ];
 
-export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig, gatewayTools = [], templateId, identityConfig, customTools = [], memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, observabilityConfig, isVisible, onClose, restoredDeployment }: DeployPanelProps) {
+export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig, gatewayTools = [], templateId, identityConfig, customTools = [], memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, observabilityConfig, a2aConfig, isVisible, onClose, restoredDeployment }: DeployPanelProps) {
   // ============================================================
   // State Hooks
   // (Audit #14: deploy state, chat state, refs, memoized template)
@@ -98,7 +104,9 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
   const [, setTestResult] = useState<TestResult | null>(null);
   const [isTesting, setIsTesting] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
-  const [activeTab, setActiveTab] = useState<'deploy' | 'chat'>('deploy');
+  const [activeTab, setActiveTab] = useState<'deploy' | 'chat' | 'versions' | 'evals' | 'cost' | 'observability' | 'triggers'>('deploy');
+  // Phase 1 Gap 1A — increment to force VersionsList reload after a new deploy.
+  const [versionsRefreshKey, setVersionsRefreshKey] = useState(0);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [conversationHistory, setConversationHistory] = useState<Array<{role: string, content: string}>>([]);
   const [chatMessages, setChatMessages] = useState<Array<{
@@ -187,13 +195,14 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           nodeId, config: fullConfig, connectedTools, gatewayConfig, gatewayTools, templateId,
-          identityConfig: identityConfig?.oauth2Config ? {
-            provider: identityConfig.oauth2Config.provider,
-            clientId: identityConfig.oauth2Config.clientId,
-            clientSecretRef: identityConfig.oauth2Config.clientSecretRef,
-            discoveryUrl: identityConfig.oauth2Config.discoveryUrl || '',
-            scopes: identityConfig.oauth2Config.scopes || [],
-            audience: identityConfig.oauth2Config.audience || undefined,
+          identityConfig: (identityConfig?.oauth2Config || identityConfig?.mode === 'per_agent') ? {
+            mode: identityConfig?.mode ?? 'shared',
+            provider: identityConfig?.oauth2Config?.provider,
+            clientId: identityConfig?.oauth2Config?.clientId,
+            clientSecretRef: identityConfig?.oauth2Config?.clientSecretRef,
+            discoveryUrl: identityConfig?.oauth2Config?.discoveryUrl || '',
+            scopes: identityConfig?.oauth2Config?.scopes || [],
+            audience: identityConfig?.oauth2Config?.audience || undefined,
           } : undefined,
           customTools: customTools.length > 0 ? customTools : undefined,
           memoryConfig: memoryConfig || undefined,
@@ -203,6 +212,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
           mcpServerConfig: mcpServerConfig || undefined,
           knowledgeBaseConfig: knowledgeBaseConfig || undefined,
           observabilityConfig: observabilityConfig || undefined,
+          a2aConfig: a2aConfig || undefined,
         }),
       });
 
@@ -309,6 +319,9 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
               runtimeId: rId,
               gatewayUrl: statusResult.gateway_url || statusResult.gatewayUrl || undefined,
             });
+            // Phase 1 Gap 1A — bump the refresh key so VersionsList shows
+            // the new version row the moment the user clicks the tab.
+            setVersionsRefreshKey((k) => k + 1);
             setActiveTab('chat');
             warmupRuntime(rId, rEndpoint);
             return;
@@ -351,6 +364,82 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
   // ============================================================
 
   const [isDownloadingCfn, setIsDownloadingCfn] = useState(false);
+  const [isExportingPython, setIsExportingPython] = useState(false);
+
+  // Phase 3 Gap 3G — eject a standalone Python project. Near-copy of
+  // handleDownloadCfn but targets /api/export-python.
+  const handleExportPython = useCallback(async () => {
+    if (!config || !nodeId) return;
+    setIsExportingPython(true);
+
+    try {
+      const fullConfig = {
+        ...config,
+        entrypoint: config.entrypoint || 'agent.py',
+        deploymentType: config.deploymentType || 'S3_CODE_DEPLOY',
+        idleTimeout: config.idleTimeout ?? 900,
+        maxLifetime: config.maxLifetime ?? 28800,
+        enableOtel: config.enableOtel ?? false,
+      };
+
+      const response = await authFetch('/api/export-python', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          nodeId, config: fullConfig, connectedTools, gatewayConfig, gatewayTools, templateId,
+          identityConfig: (identityConfig?.oauth2Config || identityConfig?.mode === 'per_agent') ? {
+            mode: identityConfig?.mode ?? 'shared',
+            provider: identityConfig?.oauth2Config?.provider,
+            clientId: identityConfig?.oauth2Config?.clientId,
+            clientSecretRef: identityConfig?.oauth2Config?.clientSecretRef,
+            discoveryUrl: identityConfig?.oauth2Config?.discoveryUrl || '',
+            scopes: identityConfig?.oauth2Config?.scopes || [],
+            audience: identityConfig?.oauth2Config?.audience || undefined,
+          } : undefined,
+          customTools: customTools.length > 0 ? customTools : undefined,
+          memoryConfig: memoryConfig || undefined,
+          evaluationConfig: evaluationConfig || undefined,
+          policyConfig: policyConfig || undefined,
+          guardrailsConfig: guardrailsConfig || undefined,
+          mcpServerConfig: mcpServerConfig || undefined,
+          knowledgeBaseConfig: knowledgeBaseConfig || undefined,
+          observabilityConfig: observabilityConfig || undefined,
+          a2aConfig: a2aConfig || undefined,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Python export failed (${response.status})`);
+      }
+
+      const result = await response.json();
+
+      if (result.download_url) {
+        const a = document.createElement('a');
+        a.href = result.download_url;
+        a.download = result.filename || 'agent-python.zip';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      } else if (result.zip_base64) {
+        const bytes = Uint8Array.from(atob(result.zip_base64), c => c.charCodeAt(0));
+        const blob = new Blob([bytes], { type: 'application/zip' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = result.filename || 'agent-python.zip';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Python export failed';
+      setDeploymentStatus({ state: 'error', message });
+    } finally {
+      setIsExportingPython(false);
+    }
+  }, [config, nodeId, connectedTools, gatewayConfig, gatewayTools, templateId, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, observabilityConfig, a2aConfig, identityConfig]);
 
   const handleDownloadCfn = useCallback(async () => {
     if (!config || !nodeId) return;
@@ -371,13 +460,14 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           nodeId, config: fullConfig, connectedTools, gatewayConfig, gatewayTools, templateId,
-          identityConfig: identityConfig?.oauth2Config ? {
-            provider: identityConfig.oauth2Config.provider,
-            clientId: identityConfig.oauth2Config.clientId,
-            clientSecretRef: identityConfig.oauth2Config.clientSecretRef,
-            discoveryUrl: identityConfig.oauth2Config.discoveryUrl || '',
-            scopes: identityConfig.oauth2Config.scopes || [],
-            audience: identityConfig.oauth2Config.audience || undefined,
+          identityConfig: (identityConfig?.oauth2Config || identityConfig?.mode === 'per_agent') ? {
+            mode: identityConfig?.mode ?? 'shared',
+            provider: identityConfig?.oauth2Config?.provider,
+            clientId: identityConfig?.oauth2Config?.clientId,
+            clientSecretRef: identityConfig?.oauth2Config?.clientSecretRef,
+            discoveryUrl: identityConfig?.oauth2Config?.discoveryUrl || '',
+            scopes: identityConfig?.oauth2Config?.scopes || [],
+            audience: identityConfig?.oauth2Config?.audience || undefined,
           } : undefined,
           customTools: customTools.length > 0 ? customTools : undefined,
           memoryConfig: memoryConfig || undefined,
@@ -387,6 +477,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
           mcpServerConfig: mcpServerConfig || undefined,
           knowledgeBaseConfig: knowledgeBaseConfig || undefined,
           observabilityConfig: observabilityConfig || undefined,
+          a2aConfig: a2aConfig || undefined,
         }),
       });
 
@@ -782,6 +873,77 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
               <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
             )}
           </button>
+          {/* Phase 1 Gap 1A — Versions tab. Always available so the user can
+              inspect history even before deploying for the first time. */}
+          <button
+            onClick={() => setActiveTab('versions')}
+            className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${
+              activeTab === 'versions'
+                ? 'text-[#0972d3]'
+                : 'text-[#5f6b7a] hover:text-[#16191f]'
+            }`}
+          >
+            Versions
+            {activeTab === 'versions' && (
+              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
+            )}
+          </button>
+          {/* Phase 1 Gap 1C — Eval results tab. */}
+          <button
+            onClick={() => setActiveTab('evals')}
+            className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${
+              activeTab === 'evals'
+                ? 'text-[#0972d3]'
+                : 'text-[#5f6b7a] hover:text-[#16191f]'
+            }`}
+          >
+            Eval
+            {activeTab === 'evals' && (
+              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
+            )}
+          </button>
+          {/* Phase 2 Gap 2B — Cost tab. */}
+          <button
+            onClick={() => setActiveTab('cost')}
+            className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${
+              activeTab === 'cost'
+                ? 'text-[#0972d3]'
+                : 'text-[#5f6b7a] hover:text-[#16191f]'
+            }`}
+          >
+            Cost
+            {activeTab === 'cost' && (
+              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
+            )}
+          </button>
+          {/* Phase 1 Gap 1D — Observability tab. */}
+          <button
+            onClick={() => setActiveTab('observability')}
+            className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${
+              activeTab === 'observability'
+                ? 'text-[#0972d3]'
+                : 'text-[#5f6b7a] hover:text-[#16191f]'
+            }`}
+          >
+            Observe
+            {activeTab === 'observability' && (
+              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
+            )}
+          </button>
+          {/* Phase 3 Gap 3F — Triggers tab. */}
+          <button
+            onClick={() => setActiveTab('triggers')}
+            className={`flex-1 py-2.5 text-sm font-medium transition-colors relative ${
+              activeTab === 'triggers'
+                ? 'text-[#0972d3]'
+                : 'text-[#5f6b7a] hover:text-[#16191f]'
+            }`}
+          >
+            Triggers
+            {activeTab === 'triggers' && (
+              <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[#0972d3]" />
+            )}
+          </button>
         </div>
 
         {/* Content */}
@@ -937,6 +1099,31 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
                           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
                         </svg>
                         Download CloudFormation Template
+                      </>
+                    )}
+                  </button>
+                </div>
+              )}
+
+              {/* Export as Python button — visible in idle and deployed states (Gap 3G) */}
+              {(deploymentStatus.state === 'idle' || deploymentStatus.state === 'deployed') && (
+                <div>
+                  <button
+                    onClick={handleExportPython}
+                    disabled={!config || isExportingPython}
+                    className="w-full py-2.5 px-4 bg-white text-[#0972d3] border border-[#0972d3] rounded-md font-medium hover:bg-[#f2f8fd] disabled:bg-[#e9ebed] disabled:text-[#8d99a8] disabled:border-[#d1d5db] disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 text-sm"
+                  >
+                    {isExportingPython ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-[#0972d3] border-t-transparent rounded-full animate-spin" />
+                        Exporting...
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" />
+                        </svg>
+                        Export as Python
                       </>
                     )}
                   </button>
@@ -1192,6 +1379,36 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
                 </div>
               </div>
             </div>
+          )}
+          {activeTab === 'versions' && (
+            <VersionsList
+              runtimeName={config?.name ?? null}
+              refreshKey={versionsRefreshKey}
+            />
+          )}
+          {activeTab === 'evals' && (
+            <EvaluationResultsPanel
+              runtimeName={config?.name ?? null}
+              refreshKey={versionsRefreshKey}
+            />
+          )}
+          {activeTab === 'cost' && (
+            <CostPanel
+              runtimeName={config?.name ?? null}
+              refreshKey={versionsRefreshKey}
+            />
+          )}
+          {activeTab === 'observability' && (
+            <ObservabilityPanel
+              runtimeName={config?.name ?? null}
+              refreshKey={versionsRefreshKey}
+            />
+          )}
+          {activeTab === 'triggers' && (
+            <TriggersPanel
+              runtimeName={config?.name ?? null}
+              refreshKey={versionsRefreshKey}
+            />
           )}
         </div>
 

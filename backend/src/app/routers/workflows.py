@@ -148,14 +148,28 @@ async def list_workflows(
     DynamoDB (no GSI on owner_sub yet) or in-memory; flip to a query when
     scale demands it.
     """
+    from app.services.workspace_acl import Acl, can_view
+
     storage = get_workflow_storage()
+    # Gap 2E: include workflows shared with the caller (editor/viewer) in
+    # addition to owned ones. list_by_owner (if present) only returns owned
+    # rows, so when it exists we still scan list_all for shared rows and union.
     list_by_owner = getattr(storage, "list_by_owner", None)
-    if callable(list_by_owner):
-        return list_by_owner(caller_sub)
-    return [
-        wf for wf in storage.list_all()
-        if getattr(wf, "owner_sub", None) == caller_sub
-    ]
+    owned: list = list(list_by_owner(caller_sub)) if callable(list_by_owner) else []
+    owned_ids = {wf.id for wf in owned}
+
+    result = list(owned)
+    for wf in storage.list_all():
+        if wf.id in owned_ids:
+            continue
+        owner_sub = getattr(wf, "owner_sub", None)
+        if owner_sub == caller_sub or can_view(
+            Acl.normalize(getattr(wf, "acl", None), owner_sub=owner_sub),
+            caller_sub,
+            owner_sub=owner_sub,
+        ):
+            result.append(wf)
+    return result
 
 
 @router.get("/{workflow_id}", response_model=WorkflowDefinition)
@@ -163,10 +177,17 @@ async def get_workflow(
     workflow_id: str,
     caller_sub: str = Depends(get_caller_sub),
 ) -> WorkflowDefinition:
-    """Get a workflow by ID. Caller must own it.
+    """Get a workflow by ID. Caller must own it OR be a shared viewer/editor.
+
+    Gap 2E (Bug M-1 fix): a workflow shared with the caller (acl.viewers /
+    acl.editors) is viewable. Owner-only used to 404 shared editors who could
+    see the row in the LIST endpoint — an inconsistency the security review
+    flagged. Denial still returns 404 (existence-non-disclosure), never 403.
 
     Requirements: 9.5
     """
+    from app.services.workspace_acl import Acl, can_view
+
     workflow_id = _validate_workflow_id(workflow_id)
     workflow = get_workflow_storage().get(workflow_id)
     if workflow is None:
@@ -174,7 +195,17 @@ async def get_workflow(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Workflow with ID '{workflow_id}' not found",
         )
-    assert_owner(getattr(workflow, "owner_sub", None), caller_sub)
+    owner_sub = getattr(workflow, "owner_sub", None)
+    if not can_view(
+        Acl.normalize(getattr(workflow, "acl", None), owner_sub=owner_sub),
+        caller_sub,
+        owner_sub=owner_sub,
+    ):
+        # 404 (not 403) — don't disclose existence to unauthorized callers.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow with ID '{workflow_id}' not found",
+        )
     return workflow
 
 
@@ -184,10 +215,19 @@ async def update_workflow(
     request: WorkflowUpdateRequest,
     caller_sub: str = Depends(get_caller_sub),
 ) -> WorkflowResponse:
-    """Update an existing workflow. Caller must own it.
+    """Update an existing workflow. Caller must own it OR be a shared editor.
+
+    Gap 2E (Bug M-1 fix): editors granted via acl.editors can update the
+    workflow's nodes/edges/etc. Viewers cannot (can_edit is False for them).
+    Denial returns 404 (existence-non-disclosure), never 403. The acl + owner
+    fields themselves are NOT updatable here — sharing goes through the
+    dedicated /share endpoint (routers/workspaces.py) which is owner-only — so
+    an editor cannot escalate themselves to owner or re-share.
 
     Requirements: 9.1
     """
+    from app.services.workspace_acl import Acl, can_edit
+
     workflow_id = _validate_workflow_id(workflow_id)
     existing = get_workflow_storage().get(workflow_id)
     if existing is None:
@@ -195,7 +235,16 @@ async def update_workflow(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Workflow with ID '{workflow_id}' not found",
         )
-    assert_owner(getattr(existing, "owner_sub", None), caller_sub)
+    owner_sub = getattr(existing, "owner_sub", None)
+    if not can_edit(
+        Acl.normalize(getattr(existing, "acl", None), owner_sub=owner_sub),
+        caller_sub,
+        owner_sub=owner_sub,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Workflow with ID '{workflow_id}' not found",
+        )
 
     # Build updated workflow with only provided fields
     update_data = {}

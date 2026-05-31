@@ -5,23 +5,30 @@ import { ComponentPalette } from './components/palette/ComponentPalette';
 import { RuntimeConfigurationModal } from './components/modals/RuntimeConfigurationModal';
 import { GatewayConfigurationModal } from './components/modals/GatewayConfigurationModal';
 import { IdentityConfigurationModal } from './components/modals/IdentityConfigurationModal';
+import { A2AConfigurationModal } from './components/modals/A2AConfigurationModal';
 import { DeployPanel } from './components/deploy/DeployPanel';
 import { ActiveDeploymentBanner } from './components/deploy/ActiveDeploymentBanner';
 import type { ActiveDeployment } from './components/deploy/ActiveDeploymentBanner';
 import { ToolGeneratorPanel } from './components/ai/ToolGeneratorPanel';
+import { AgentGeneratorPanel } from './components/ai/AgentGeneratorPanel';
+import type { GeneratedCanvasSpec } from './services/api';
 import { TemplateGallery } from './components/templates';
 import { MemoryConfigurationModal } from './components/modals/MemoryConfigurationModal';
 import { PolicyConfigurationModal } from './components/modals/PolicyConfigurationModal';
 import { KnowledgeBaseConfigModal } from './components/modals/KnowledgeBaseConfigModal';
 import { GuardrailsConfigurationModal } from './components/modals/GuardrailsConfigurationModal';
 import { ObservabilityConfigurationModal } from './components/modals/ObservabilityConfigurationModal';
+import { EvaluationConfigurationModal, type EvaluationNodeConfig } from './components/modals/EvaluationConfigurationModal';
+import { PromptLibraryModal, type PromptSelection } from './components/modals/PromptLibraryModal';
+import { RegistryModal } from './components/modals/RegistryModal';
+import { HitlInboxModal } from './components/modals/HitlInboxModal';
 import { useWorkflowStore } from './store/workflowStore';
 import { useFlowStore } from './store/flowStore';
 import { useAutoSave } from './hooks/useAutoSave';
 import { instantiateTemplate } from './utils/templates';
 import type { AgentCoreComponentType } from './types/workflow';
 import type { WorkflowTemplate } from './types/templates';
-import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration, MemoryConfiguration, PolicyConfiguration, GuardrailsConfiguration, ObservabilityConfiguration, ComponentConfiguration, ToolConfiguration, KnowledgeBaseToolConfig } from './types/components';
+import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration, MemoryConfiguration, PolicyConfiguration, GuardrailsConfiguration, ObservabilityConfiguration, ComponentConfiguration, ToolConfiguration, KnowledgeBaseToolConfig, A2AConfiguration } from './types/components';
 import type { GeneratedTool } from './services/api';
 import './App.css';
 
@@ -38,6 +45,15 @@ function App() {
   const [showDeployPanel, setShowDeployPanel] = useState(false);
   const [showTemplateGallery, setShowTemplateGallery] = useState(false);
   const [showToolGenerator, setShowToolGenerator] = useState(false);
+  const [showAgentGenerator, setShowAgentGenerator] = useState(false);
+  // Phase 3 Gap 3H — prompt management library. `showPromptLibrary` opens it
+  // in management mode; `promptPicker` (when set) opens it in picker mode and
+  // receives the resolved {promptName, versionId, body} via its onSelect.
+  const [showPromptLibrary, setShowPromptLibrary] = useState(false);
+  const [promptPicker, setPromptPicker] = useState<((sel: PromptSelection) => void) | null>(null);
+  // Phase 2 Gap 2A — agent registry (browse/clone). Phase 2 Gap 2D — HITL inbox.
+  const [showRegistry, setShowRegistry] = useState(false);
+  const [showHitlInbox, setShowHitlInbox] = useState(false);
   const [restoredDeployment, setRestoredDeployment] = useState<{
     runtimeId: string;
     endpoint: string;
@@ -121,7 +137,7 @@ function App() {
 
   // Get connected tools, gateway config, identity config, custom tools, and MCP server config
   const getConnectedToolsAndGateway = useCallback(() => {
-    if (!deployableNodeId) return { tools: [], gatewayConfig: null, gatewayTools: [], identityConfig: null, customTools: [], memoryConfig: null, evaluationConfig: null, policyConfig: null, guardrailsConfig: null, observabilityConfig: null, mcpServerConfig: null, knowledgeBaseConfig: null };
+    if (!deployableNodeId) return { tools: [], gatewayConfig: null, gatewayTools: [], identityConfig: null, customTools: [], memoryConfig: null, evaluationConfig: null, policyConfig: null, guardrailsConfig: null, observabilityConfig: null, mcpServerConfig: null, knowledgeBaseConfig: null, a2aConfig: null };
     const connectedTools: string[] = [];
     const gatewayTools: string[] = [];
     let gatewayConfig = null;
@@ -132,6 +148,7 @@ function App() {
     let policyConfig: Record<string, unknown> | null = null;
     let guardrailsConfig: Record<string, unknown> | null = null;
     let observabilityConfig: Record<string, unknown> | null = null;
+    let a2aConfig: Record<string, unknown> | null = null;
     let mcpServerConfig: Record<string, unknown> | null = null;
 
     // Find direct connections to the runtime node
@@ -141,7 +158,7 @@ function App() {
         const otherNode = nodes.find(n => n.id === otherNodeId);
         if (otherNode) {
           const type = otherNode.data.componentType;
-          if (['browser', 'code_interpreter', 'memory', 'gateway', 'identity', 'observability', 'evaluation', 'policy', 'guardrails'].includes(type)) {
+          if (['browser', 'code_interpreter', 'memory', 'gateway', 'identity', 'observability', 'evaluation', 'policy', 'guardrails', 'a2a'].includes(type)) {
             connectedTools.push(type);
             if (type === 'gateway' && otherNode.data.configuration) {
               gatewayConfig = otherNode.data.configuration;
@@ -158,6 +175,14 @@ function App() {
             }
             if (type === 'observability') {
               observabilityConfig = (otherNode.data.configuration as unknown as Record<string, unknown>) || { enabled: false };
+            }
+            if (type === 'a2a') {
+              const cfg = (otherNode.data.configuration as unknown as Record<string, unknown>) || {};
+              a2aConfig = {
+                capabilities: cfg.capabilities || [],
+                advertised_description: cfg.advertisedDescription || '',
+                peer_allowlist: cfg.peerAllowlist || [],
+              };
             }
             if (type === 'policy') {
               policyConfig = (otherNode.data.configuration as unknown as Record<string, unknown>) || { enabled: true };
@@ -234,10 +259,10 @@ function App() {
       });
     }
 
-    return { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig };
+    return { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig, a2aConfig };
   }, [deployableNodeId, edges, nodes]);
 
-  const { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig } = getConnectedToolsAndGateway();
+  const { tools: connectedTools, gatewayConfig, gatewayTools, identityConfig, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, observabilityConfig, mcpServerConfig, knowledgeBaseConfig, a2aConfig } = getConnectedToolsAndGateway();
 
   // Handle pending node creation - open modal when node appears
   useEffect(() => {
@@ -309,6 +334,41 @@ function App() {
     loadTemplate(templateNodes, templateEdges, template.id);
   }, [loadTemplate]);
 
+  // Phase 1 Gap 1E — apply NL-generated canvas spec.
+  // Adapts the generator's spec shape onto the existing
+  // instantiateTemplate / loadTemplate pipeline so a generated agent
+  // lands on the canvas exactly like a hand-built template would.
+  const handleApplyGeneratedSpec = useCallback((spec: GeneratedCanvasSpec) => {
+    const fakeTemplate = {
+      id: `ai-generated-${Date.now()}`,
+      name: spec.name,
+      description: spec.description ?? '',
+      longDescription: spec.rationale ?? '',
+      icon: '✨',
+      difficulty: 'intermediate' as const,
+      tags: ['ai-generated'],
+      componentTypes: [],
+      builtInTools: [],
+      nodes: spec.nodes.map((n) => ({
+        idSuffix: n.idSuffix,
+        type: n.type as never,
+        label: n.label,
+        position: n.position,
+        configuration: n.configuration as never,
+      })),
+      edges: spec.edges.map((e) => ({
+        sourceIdSuffix: e.sourceIdSuffix,
+        targetIdSuffix: e.targetIdSuffix,
+        connectionType: e.connectionType as never,
+      })),
+    };
+    const { nodes: instNodes, edges: instEdges } = instantiateTemplate(
+      fakeTemplate as unknown as WorkflowTemplate,
+    );
+    loadTemplate(instNodes, instEdges, fakeTemplate.id);
+    setShowAgentGenerator(false);
+  }, [loadTemplate]);
+
   // Handle AI-generated tool → add as custom tool node on canvas
   const handleAddGeneratedTool = useCallback((tool: GeneratedTool) => {
     const toolConfig: ToolConfiguration = {
@@ -353,6 +413,7 @@ function App() {
         onSearchChange={handleSearchChange}
         onOpenTemplates={() => setShowTemplateGallery(true)}
         onOpenToolGenerator={() => setShowToolGenerator(true)}
+        onOpenAgentGenerator={() => setShowAgentGenerator(true)}
       />
 
       <div className="flex-1 relative flex flex-col">
@@ -385,6 +446,29 @@ function App() {
                 Ready
               </div>
             )}
+
+            {/* Phase 2 Gap 2A — Registry (browse/clone agents) */}
+            <button
+              onClick={() => setShowRegistry(true)}
+              className="px-3 py-1.5 rounded-md text-sm text-white/70 hover:text-white hover:bg-white/10 transition-colors flex items-center gap-1.5"
+              title="Browse the agent registry"
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+              </svg>
+              Registry
+            </button>
+            {/* Phase 2 Gap 2D — HITL approvals inbox */}
+            <button
+              onClick={() => setShowHitlInbox(true)}
+              className="px-3 py-1.5 rounded-md text-sm text-white/70 hover:text-white hover:bg-white/10 transition-colors flex items-center gap-1.5"
+              title="Human-in-the-loop approvals"
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" />
+              </svg>
+              Approvals
+            </button>
 
             {/* Deploy Button */}
             <button
@@ -553,6 +637,7 @@ function App() {
         mcpServerConfig={mcpServerConfig}
         knowledgeBaseConfig={knowledgeBaseConfig}
         observabilityConfig={observabilityConfig}
+        a2aConfig={a2aConfig}
         isVisible={showDeployPanel}
         onClose={() => setShowDeployPanel(false)}
         restoredDeployment={restoredDeployment}
@@ -623,12 +708,30 @@ function App() {
         />
       )}
 
+      {configModal.componentType === 'evaluation' && (
+        <EvaluationConfigurationModal
+          isOpen={configModal.isOpen}
+          onClose={handleCloseConfig}
+          onSave={(config) => handleSaveConfig(config)}
+          initialConfig={configModal.initialConfig as Partial<EvaluationNodeConfig>}
+        />
+      )}
+
       {configModal.componentType === 'tool' && !!(configModal.initialConfig as unknown as Record<string, unknown>)?.isKnowledgeBase && (
         <KnowledgeBaseConfigModal
           isOpen={configModal.isOpen}
           onClose={handleCloseConfig}
           onSave={(config) => handleSaveConfig(config)}
           initialConfig={configModal.initialConfig as Partial<KnowledgeBaseToolConfig>}
+        />
+      )}
+
+      {configModal.componentType === 'a2a' && (
+        <A2AConfigurationModal
+          isOpen={configModal.isOpen}
+          onClose={handleCloseConfig}
+          onSave={(config) => handleSaveConfig(config)}
+          initialConfig={configModal.initialConfig as Partial<A2AConfiguration>}
         />
       )}
 
@@ -645,6 +748,38 @@ function App() {
         isVisible={showToolGenerator}
         onClose={() => setShowToolGenerator(false)}
         onAddToolToCanvas={handleAddGeneratedTool}
+      />
+
+      {/* Phase 1 Gap 1E — NL Agent Generator Panel */}
+      <AgentGeneratorPanel
+        isVisible={showAgentGenerator}
+        onClose={() => setShowAgentGenerator(false)}
+        onApplySpec={handleApplyGeneratedSpec}
+        hasExistingNodes={nodes.length > 0}
+      />
+
+      {/* Phase 3 Gap 3H — Prompt Management Library */}
+      <PromptLibraryModal
+        isOpen={showPromptLibrary || promptPicker !== null}
+        mode={promptPicker !== null ? 'picker' : 'management'}
+        onClose={() => { setShowPromptLibrary(false); setPromptPicker(null); }}
+        onSelect={(sel) => { promptPicker?.(sel); setPromptPicker(null); }}
+      />
+
+      {/* Phase 2 Gap 2A — Agent Registry (browse / clone to canvas) */}
+      <RegistryModal
+        isOpen={showRegistry}
+        onClose={() => setShowRegistry(false)}
+        onClone={(snapshot) => {
+          handleApplyGeneratedSpec(snapshot as GeneratedCanvasSpec);
+          setShowRegistry(false);
+        }}
+      />
+
+      {/* Phase 2 Gap 2D — Human-in-the-loop approvals inbox */}
+      <HitlInboxModal
+        isOpen={showHitlInbox}
+        onClose={() => setShowHitlInbox(false)}
       />
     </div>
   );

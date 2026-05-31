@@ -6,6 +6,7 @@ Requirements: 3.4
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
 import app.services._otel_platform  # noqa: F401
 
+import json
 import logging
 import os
 
@@ -33,6 +34,39 @@ def _get_deployment_store() -> DeploymentStateStore:
     )
 
 
+def _resolve_otel_secret_arn(event: dict) -> str | None:
+    """Resolve the OTEL auth-header secret ARN for the runtime exec role.
+
+    Single source of truth shared by the per-agent (Gap P3.3B) and legacy
+    per-deploy role paths. Prefers the platform-managed secret (always in the
+    ``agentcore-otel/`` namespace), then falls back to a per-canvas ARN — but
+    only after ``_validate_user_otel_secret_arn`` confirms it stays inside that
+    namespace (Critic Finding 1 BLOCKER: never grant ``GetSecretValue`` on a
+    tenant-supplied ARN that escapes the namespace). A rejected/invalid ARN is
+    dropped (warn-and-disable) rather than failing the deploy — OTEL auth is
+    best-effort and must never block the runtime.
+    """
+    platform_defaults = get_platform_observability_defaults()
+    if platform_defaults and platform_defaults.get("auth_header_secret_arn"):
+        return platform_defaults["auth_header_secret_arn"]
+
+    obs_cfg = event.get("observability_config") or {}
+    otel_secret_arn = obs_cfg.get("auth_header_secret_arn") or obs_cfg.get(
+        "authHeaderSecretArn"
+    )
+    if otel_secret_arn:
+        try:
+            _validate_user_otel_secret_arn(otel_secret_arn)
+        except ValueError as e:
+            logger.warning(
+                "Per-canvas OTEL secret ARN rejected (%s); disabling OTEL "
+                "auth for this runtime.",
+                e,
+            )
+            return None
+    return otel_secret_arn
+
+
 def handler(event: dict, context) -> dict:
     deployment_id = event.get("deployment_id", "")
 
@@ -52,6 +86,93 @@ def handler(event: dict, context) -> dict:
         # deploy to fail with `ValidationException: Access denied when trying
         # to retrieve zip file from S3`. The shared role had its IAM cache
         # propagated during stack creation, so user-deploys see no race.
+        # ---- Gap P3.3B: opt-in per-agent least-privilege execution role ----
+        # ONLY when the canvas Identity node sets mode == 'per_agent'. The
+        # shared-role default (below) is 100% unchanged for everyone else.
+        identity_config = event.get("identity_config") or {}
+        identity_mode = identity_config.get("mode", "shared")
+        if identity_mode == "per_agent":
+            from app.services import per_agent_identity
+            import time as _time
+
+            account_id = boto3.client("sts").get_caller_identity()["Account"]
+            iam_client = boto3.client("iam")
+            agentcore_runtime_name = (
+                event.get("agentcore_runtime_name")
+                or sanitize_runtime_name(config.get("name", "agent"))
+            )
+            pa_role_name = per_agent_identity.build_per_agent_role_name(
+                agentcore_runtime_name
+            )
+
+            # Construct resource ARNs from the step results already on the
+            # event (gateway/memory/kb expose IDs, not ARNs). Missing id ->
+            # None -> the policy builder falls back to '*' for that one tool.
+            gw_id = (event.get("gateway_result") or {}).get("gateway_id")
+            gateway_arn = (
+                f"arn:aws:bedrock-agentcore:{region}:{account_id}:gateway/{gw_id}"
+                if gw_id else None
+            )
+            mem_id = (event.get("memory_result") or {}).get("memory_id")
+            memory_arn = (
+                f"arn:aws:bedrock-agentcore:{region}:{account_id}:memory/{mem_id}"
+                if mem_id else None
+            )
+            kb_result = event.get("knowledge_base_result") or {}
+            kb_id = kb_result.get("kb_id") or kb_result.get("knowledge_base_id")
+            kb_arn = (
+                f"arn:aws:bedrock:{region}:{account_id}:knowledge-base/{kb_id}"
+                if kb_id else None
+            )
+
+            otel_secret_arn = _resolve_otel_secret_arn(event)
+            artifacts_bucket = _get_env("ARTIFACTS_BUCKET_NAME", "") or None
+
+            try:
+                iam_client.create_role(
+                    RoleName=pa_role_name,
+                    AssumeRolePolicyDocument=json.dumps(
+                        per_agent_identity.build_trust_policy()
+                    ),
+                    Description=(
+                        f"Per-agent least-privilege role for {agentcore_runtime_name}"
+                    ),
+                )
+            except iam_client.exceptions.EntityAlreadyExistsException:
+                pass
+            pa_role_arn = iam_client.get_role(RoleName=pa_role_name)["Role"]["Arn"]
+            iam_client.put_role_policy(
+                RoleName=pa_role_name,
+                PolicyName="AgentCoreRuntimePolicy",
+                PolicyDocument=json.dumps(
+                    per_agent_identity.build_scoped_runtime_policy(
+                        connected_tools,
+                        kb_arn=kb_arn,
+                        gateway_arn=gateway_arn,
+                        memory_arn=memory_arn,
+                        otel_secret_arn=otel_secret_arn,
+                        artifacts_bucket=artifacts_bucket,
+                    )
+                ),
+            )
+            # Bug 52/63: per-agent roles are minted fresh at deploy time, so
+            # AgentCore's service-side IAM cache can lag (17-20 min observed).
+            # create_agent_runtime's 8x5s transient-retry loop is the safety
+            # net; this 15s sleep keeps the happy path one-shot. per_agent is
+            # opt-in + slower-first-deploy and is NEVER the default.
+            _time.sleep(15)
+            logger.info("Using per-agent exec role %s (Gap P3.3B)", pa_role_arn)
+            return {
+                **event,
+                "role_name": pa_role_name,
+                "role_arn": pa_role_arn,
+                "identity_mode": "per_agent",
+                "iam_result": {
+                    "success": True,
+                    "message": f"Per-agent role {pa_role_name} ready",
+                },
+            }
+
         shared_role_arn = _get_env("SHARED_RUNTIME_ROLE_ARN", "").strip()
         if shared_role_arn:
             logger.info("Using shared runtime exec role %s (Bug 60)", shared_role_arn)
@@ -74,29 +195,7 @@ def handler(event: dict, context) -> dict:
 
         # Pass through the OTEL auth secret ARN so the role can resolve
         # OTLP headers at agent boot via secretsmanager:GetSecretValue.
-        platform_defaults = get_platform_observability_defaults()
-        if platform_defaults and platform_defaults.get("auth_header_secret_arn"):
-            otel_secret_arn = platform_defaults["auth_header_secret_arn"]
-        else:
-            obs_cfg = event.get("observability_config") or {}
-            otel_secret_arn = obs_cfg.get("auth_header_secret_arn") \
-                or obs_cfg.get("authHeaderSecretArn")
-            # Critic Finding 1 (BLOCKER): never grant secretsmanager:GetSecretValue
-            # on a tenant-supplied ARN that escapes the agentcore-otel/ namespace.
-            # If the canvas tries to slip in another tenant's secret ARN, drop it
-            # silently (warn-and-disable) rather than failing the deploy — OTEL
-            # is best-effort and we don't want a malformed config blocking the
-            # runtime.
-            if otel_secret_arn:
-                try:
-                    _validate_user_otel_secret_arn(otel_secret_arn)
-                except ValueError as e:
-                    logger.warning(
-                        "Per-canvas OTEL secret ARN rejected (%s); disabling "
-                        "OTEL auth for this runtime.",
-                        e,
-                    )
-                    otel_secret_arn = None
+        otel_secret_arn = _resolve_otel_secret_arn(event)
 
         role_arn = create_runtime_iam_role(
             iam_client=iam_client,

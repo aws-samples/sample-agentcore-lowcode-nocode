@@ -13,6 +13,7 @@ import boto3
 
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services.deployment_state_store import DeploymentStateStore
+from app.services.observability_dashboard import put_dashboard_for_runtime
 from app.services.runtime_deployer import wait_for_runtime_ready
 
 logger = logging.getLogger(__name__)
@@ -72,15 +73,39 @@ def handler(event: dict, context) -> dict:
         if not endpoint_url:
             endpoint_url = result.get("arn", "")
 
+        # Phase 1 Gap 1D — every successful runtime gets a CloudWatch
+        # dashboard with widgets for invocations / latency / tokens / errors
+        # / tool calls. Best-effort: a put_dashboard failure is logged but
+        # doesn't fail the deploy. The dashboard is upserted on the runtime
+        # ID so re-deploys of the same version overwrite in place.
+        dashboard_name = ""
+        dashboard_url = ""
+        try:
+            friendly_name = event.get("friendly_runtime_name") or runtime_id
+            dashboard_name, dashboard_url = put_dashboard_for_runtime(
+                runtime_id=runtime_id,
+                runtime_name=friendly_name,
+                region=region,
+            )
+        except Exception:
+            logger.exception(
+                "put_dashboard failed for runtime %s — continuing without dashboard",
+                runtime_id,
+            )
+
         return {
             **event,
             "runtime_id": runtime_id,
             "runtime_arn": result.get("arn", ""),
             "runtime_endpoint": endpoint_url,
+            "dashboard_name": dashboard_name,
+            "dashboard_url": dashboard_url,
             "launch_result": {
                 "success": True,
                 "runtime_id": runtime_id,
                 "endpoint": endpoint_url,
+                "dashboard_name": dashboard_name,
+                "dashboard_url": dashboard_url,
             },
         }
 

@@ -21,6 +21,10 @@ import boto3
 
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services.deployment_state_store import DeploymentStateStore
+from app.services.guardrail_builders import (
+    build_contextual_grounding_config,
+    build_regex_filters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +60,25 @@ _PII_TYPES = {
 }
 
 
-def _build_content_filter_config(content_filters: dict) -> dict:
-    """Build contentPolicyConfig from {category: strength} mapping."""
+def _build_content_filter_config(content_filters) -> dict:
+    """Build contentPolicyConfig from a {category: strength} mapping.
+
+    Canonical shape is a dict {violence:"HIGH", hate:"MEDIUM", ...}. Be defensive:
+    a list of {type/category, inputStrength/strength} dicts (the alt shape some
+    UIs emit) is normalized to the dict form rather than 500-ing with
+    AttributeError on .items() (see also memory_step Bug 131).
+    """
+    if isinstance(content_filters, list):
+        normalized = {}
+        for f in content_filters:
+            if isinstance(f, dict):
+                cat = f.get("type") or f.get("category") or f.get("name")
+                strength = f.get("inputStrength") or f.get("strength") or f.get("outputStrength") or "MEDIUM"
+                if cat:
+                    normalized[str(cat).lower()] = strength
+        content_filters = normalized
+    if not isinstance(content_filters, dict):
+        return {}
     filters = []
     category_map = {
         "hate": "HATE",
@@ -225,6 +246,29 @@ def handler(event: dict, context) -> dict:
             word_policy = _build_word_config(word_filters)
             if word_policy:
                 create_params["wordPolicyConfig"] = word_policy
+
+        # Contextual grounding (Gap 2C). Blocks hallucinated / off-topic
+        # responses by enforcing minimum grounding + relevance scores. NOTE:
+        # inert unless the agent passes grounding_source + query qualifiers on
+        # its ApplyGuardrail/converse call at invoke time (RAG agents).
+        grounding = guardrails_config.get("contextualGrounding") or guardrails_config.get("contextual_grounding")
+        if grounding:
+            cg = build_contextual_grounding_config(
+                grounding.get("groundingThreshold", grounding.get("grounding_threshold")),
+                grounding.get("relevanceThreshold", grounding.get("relevance_threshold")),
+            )
+            if cg:
+                create_params["contextualGroundingPolicyConfig"] = cg
+
+        # Custom regex filters (Gap 2C). Wired into
+        # sensitiveInformationPolicyConfig.regexesConfig. MUST MERGE (not
+        # assign) so it coexists with any piiEntitiesConfig set above —
+        # overwriting would silently drop the user's PII filters (Bug-122).
+        regex_filters = guardrails_config.get("regexFilters") or guardrails_config.get("regex_filters")
+        if regex_filters:
+            rx = build_regex_filters(regex_filters)
+            if rx:
+                create_params.setdefault("sensitiveInformationPolicyConfig", {}).update(rx)
 
         # Bug 82: idempotent upsert. A prior partial run can leave a
         # guardrail with this name behind; create_guardrail then fails with

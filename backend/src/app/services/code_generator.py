@@ -1975,12 +1975,23 @@ def _maybe_inject_hitl(code: str) -> str:
         if "human_approval" in args:
             new_args = args  # idempotent
         elif "tools=[" in args:
-            new_args = _re.sub(
-                r"tools=\[([^\]]*)\]",
-                lambda g: "tools=[%s]" % ((g.group(1).strip().rstrip(",") + ", human_approval") if g.group(1).strip() else "human_approval"),
-                args,
-                count=1,
-            )
+            # Splice "human_approval" into the FIRST tools=[...] list. Done with a
+            # linear str.find scan rather than a regex: the previous
+            # r"tools=\[([^\]]*)\]" backtracks polynomially on adversarial input
+            # (many "tools=[" with long non-"]" runs) — py/polynomial-redos, and
+            # `args` is derived from user-influenced generated code. find() is O(n).
+            _ts = args.find("tools=[")
+            _open = _ts + len("tools=[")
+            _close = args.find("]", _open)
+            if _close == -1:
+                # No closing bracket (shouldn't happen for valid code) — leave as-is.
+                new_args = args
+            else:
+                _inner = args[_open:_close].strip().rstrip(",")
+                _replacement = (
+                    "tools=[%s]" % (_inner + ", human_approval" if _inner else "human_approval")
+                )
+                new_args = args[:_ts] + _replacement + args[_close + 1:]
         elif _re.search(r"tools=\S", args):
             # Existing tools=<expr> (a var/list-comp) → concat with our list.
             new_args = _re.sub(r"(tools=)([^,\n]+)", r"\1list(\2) + [human_approval]", args, count=1)

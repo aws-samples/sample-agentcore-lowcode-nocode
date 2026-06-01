@@ -1340,3 +1340,18 @@ route dropped (router only has GET). Untracked test_registry_rbac.py committed s
 tests asserting EXACT passthrough (Bug 29 contract: memory needs the verbatim id) and was
 solving a non-problem (the UI always sends a UUID). REVERTED. LESSON: don't add "robustness"
 that violates an existing tested contract to fix a test-harness mistake; fix the harness.
+
+## Bug 141 — CodeQL py/incomplete-url-substring-sanitization (alert #15)
+
+test_observability_dashboard.py asserted `"us-east-1.console.aws.amazon.com" in url`
+on an UNPARSED url string. CodeQL flags this (high) because a host substring can
+appear at an arbitrary position in a URL, so substring checks are bypassable — the
+anti-pattern, even though here it was only a test assertion (production
+dashboard_console_url is fine).
+FIX: parse the URL (urlparse) and assert on exact components — netloc, scheme,
+parse_qs(region), path — instead of substring containment.
+LESSON: never validate/assert a URL by `"host" in url`; always urlparse and check
+netloc/scheme exactly. Applies to BOTH production guards and tests (CodeQL scans
+tests too). Swept the codebase — the only real instance was this test; the
+gateway_deployer discoveryUrl split is trusted self-constructed parsing, not a
+security boundary.

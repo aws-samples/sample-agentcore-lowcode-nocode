@@ -35,8 +35,8 @@ from moto import mock_aws  # noqa: E402
 from app.services.agent_versions_store import AgentVersion, RuntimeSlots  # noqa: E402
 from app.services.auth import get_caller_sub  # noqa: E402
 from app.services.trigger_store import (  # noqa: E402
-    STATUS_ACTIVE,
     STATUS_DISABLED,
+    STATUS_REGISTERED,
     TYPE_CRON,
     TriggerStore,
     new_trigger_id,
@@ -120,7 +120,10 @@ def test_create_get_roundtrip_preserves_fields(store: TriggerStore):
     assert fetched.owner_sub == "alice"
     assert fetched.type == TYPE_CRON
     assert fetched.schedule == "cron(0 12 * * ? *)"
-    assert fetched.status == STATUS_ACTIVE
+    # Bug 139: new triggers are REGISTERED (recorded but not yet provisioned/firing),
+    # not ACTIVE — the platform doesn't create the EventBridge/Scheduler resource yet,
+    # so claiming "active" would mislead the user.
+    assert fetched.status == STATUS_REGISTERED
     assert fetched.target_runtime_arn.endswith("runtime/alice")
     assert fetched.created_at > 0
     assert fetched.updated_at > 0

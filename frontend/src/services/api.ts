@@ -1009,6 +1009,10 @@ export interface RegistryEntry {
   created_at: string;
   updated_at: string;
   is_owner: boolean;
+  status?: string;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  rejection_reason?: string | null;
 }
 
 export interface PublishRegistryRequest {
@@ -1045,7 +1049,7 @@ export async function publishToRegistryApi(
 
 /** Search/list registry entries visible to the caller. */
 export async function searchRegistryApi(
-  opts: { q?: string; tag?: string; scope?: 'all' | 'mine' | 'public' } = {},
+  opts: { q?: string; tag?: string; scope?: 'all' | 'mine' | 'public' | 'pending' } = {},
   baseUrl: string = API_BASE_URL,
 ): Promise<RegistryEntry[]> {
   const params = new URLSearchParams();
@@ -1078,7 +1082,7 @@ export async function cloneFromRegistryApi(
   return (await response.json()) as RegistryCloneResponse;
 }
 
-/** Unpublish a registry entry (owner only). */
+/** Unpublish a registry entry (owner or admin). */
 export async function deleteRegistryEntryApi(
   slug: string,
   baseUrl: string = API_BASE_URL,
@@ -1090,6 +1094,43 @@ export async function deleteRegistryEntryApi(
   if (!response.ok) {
     throw new Error(`Unpublish failed (${response.status})`);
   }
+}
+
+/** Approve a pending registry entry (admin only). */
+export async function approveRegistryApi(
+  slug: string,
+  baseUrl: string = API_BASE_URL,
+): Promise<RegistryEntry> {
+  const response = await authFetch(
+    `${baseUrl}/api/registry/${encodeURIComponent(slug)}/approve`,
+    { method: 'POST' },
+  );
+  if (!response.ok) {
+    const msg = response.status === 403 ? 'Admin access required' : `Approve failed (${response.status})`;
+    throw new Error(msg);
+  }
+  return (await response.json()) as RegistryEntry;
+}
+
+/** Reject a pending registry entry (admin only). */
+export async function rejectRegistryApi(
+  slug: string,
+  reason?: string,
+  baseUrl: string = API_BASE_URL,
+): Promise<RegistryEntry> {
+  const response = await authFetch(
+    `${baseUrl}/api/registry/${encodeURIComponent(slug)}/reject`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: reason ? JSON.stringify({ reason }) : undefined,
+    },
+  );
+  if (!response.ok) {
+    const msg = response.status === 403 ? 'Admin access required' : `Reject failed (${response.status})`;
+    throw new Error(msg);
+  }
+  return (await response.json()) as RegistryEntry;
 }
 
 // ============================================================================

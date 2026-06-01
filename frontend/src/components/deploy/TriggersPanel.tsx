@@ -110,7 +110,11 @@ export function TriggersPanel({ runtimeName, refreshKey }: TriggersPanelProps) {
         <div>
           <h4 className="text-sm font-semibold text-gray-800">Triggers</h4>
           <p className="text-xs text-gray-500">
-            Schedule runs via cron, EventBridge, S3, or webhook events.
+            Define cron, EventBridge, S3, or webhook triggers for this agent.
+            Triggers are <span className="font-medium">recorded</span> here; a
+            trigger shows <span className="font-medium">registered</span> until
+            its AWS resource is provisioned, and only fires once it turns{' '}
+            <span className="font-medium text-emerald-700">active</span>.
           </p>
         </div>
         <button

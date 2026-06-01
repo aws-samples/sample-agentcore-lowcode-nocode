@@ -39,6 +39,30 @@ from app.services.agentic_rag_codegen import (
 from app.services.code_generator import generate_agent_code
 
 
+@pytest.fixture(autouse=True)
+def _restore_boto3():
+    """Bug 139: tests here replace sys.modules['boto3'] with a fake module (no
+    Session attr) to exec generated tool source in isolation, and never restore
+    it. Because this file sorts first alphabetically, the fake leaked into the
+    whole pytest process and broke moto's lazy boto3.Session import in 16
+    downstream tests. Snapshot the real boto3 (+ submodules) before each test and
+    restore it after, so the swap is strictly local to this file.
+    """
+    saved = {
+        name: mod
+        for name, mod in list(sys.modules.items())
+        if name == "boto3" or name.startswith("boto3.")
+    }
+    try:
+        yield
+    finally:
+        for name in [
+            n for n in list(sys.modules) if n == "boto3" or n.startswith("boto3.")
+        ]:
+            del sys.modules[name]
+        sys.modules.update(saved)
+
+
 # ---------------------------------------------------------------------------
 # Fake boto3 — records retrieve/converse calls, returns canned responses.
 # ---------------------------------------------------------------------------

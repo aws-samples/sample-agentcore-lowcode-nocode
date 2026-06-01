@@ -62,6 +62,13 @@ class RegistryEntry(BaseModel):
     source_runtime_name: Optional[str] = None
     created_at: str = ""
     updated_at: str = ""
+    # Two-persona approval workflow. CRITICAL: status defaults to 'approved' so
+    # pre-existing rows (which have no status attribute) deserialize as approved
+    # and DO NOT disappear from listings. New publishes explicitly set 'pending'.
+    status: str = "approved"  # pending | approved | rejected
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[str] = None
+    rejection_reason: Optional[str] = None
 
 
 def slugify(name: str) -> str:
@@ -200,6 +207,13 @@ class RegistryStore:
                 break
             kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
         return [_deserialize(i) for i in items]
+
+    def list_pending(self, org_id: str) -> list[RegistryEntry]:
+        """Entries in the org awaiting review (status == 'pending').
+
+        Reuses list_for_org then filters in memory — no new GSI is added.
+        """
+        return [e for e in self.list_for_org(org_id) if e.status == "pending"]
 
     def list_for_owner(self, owner_sub: str) -> list[RegistryEntry]:
         items: list[dict] = []

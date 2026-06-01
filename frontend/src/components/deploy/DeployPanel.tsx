@@ -7,6 +7,7 @@ import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration 
 import { authFetch } from '../../auth/authFetch';
 import { WORKFLOW_TEMPLATES } from '../../data/templates';
 import { useWorkflowStore } from '../../store/workflowStore';
+import { publishToRegistryApi } from '../../services/api';
 import type { AgentCoreComponentType } from '../../types/workflow';
 import { VersionsList } from './VersionsList';
 import { EvaluationResultsPanel } from './EvaluationResultsPanel';
@@ -365,6 +366,10 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
 
   const [isDownloadingCfn, setIsDownloadingCfn] = useState(false);
   const [isExportingPython, setIsExportingPython] = useState(false);
+  // Registry publish (Gap 2A — connects deploy -> registry so a deployed agent
+  // becomes a reusable blueprint others can Browse + Clone-to-canvas).
+  const [isPublishing, setIsPublishing] = useState(false);
+  const [publishMsg, setPublishMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   // Phase 3 Gap 3G — eject a standalone Python project. Near-copy of
   // handleDownloadCfn but targets /api/export-python.
@@ -515,6 +520,33 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
       setIsDownloadingCfn(false);
     }
   }, [config, nodeId, connectedTools, gatewayConfig, gatewayTools, templateId, customTools, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, identityConfig]);
+
+  // Gap 2A — publish the deployed agent's canvas as a reusable registry blueprint.
+  // This closes the deploy -> registry -> Browse -> Clone-to-canvas loop: the
+  // exact nodes/edges on the canvas become the snapshot that RegistryModal's
+  // "Clone to Canvas" later rehydrates for another user.
+  const handlePublishToRegistry = useCallback(async () => {
+    if (!config) return;
+    setIsPublishing(true);
+    setPublishMsg(null);
+    try {
+      const { nodes, edges } = useWorkflowStore.getState();
+      const display = config.name || 'Untitled Agent';
+      await publishToRegistryApi({
+        display_name: display,
+        description: config.systemPrompt?.slice(0, 280) || `Deployed agent ${display}`,
+        visibility: 'org',
+        canvas_snapshot: { name: display, nodes, edges },
+        source_runtime_name: config.name || undefined,
+      });
+      setPublishMsg({ kind: 'ok', text: `Published "${display}" to the registry.` });
+    } catch (error) {
+      const text = error instanceof Error ? error.message : 'Publish failed';
+      setPublishMsg({ kind: 'err', text });
+    } finally {
+      setIsPublishing(false);
+    }
+  }, [config]);
 
   // ============================================================
   // Streaming Chat
@@ -1127,6 +1159,37 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
                       </>
                     )}
                   </button>
+                </div>
+              )}
+
+              {/* Publish to Registry — only once deployed (Gap 2A: deploy -> registry loop) */}
+              {deploymentStatus.state === 'deployed' && (
+                <div>
+                  <button
+                    onClick={handlePublishToRegistry}
+                    disabled={!config || isPublishing}
+                    className="w-full py-2.5 px-4 bg-white text-[#0972d3] border border-[#0972d3] rounded-md font-medium hover:bg-[#f2f8fd] disabled:bg-[#e9ebed] disabled:text-[#8d99a8] disabled:border-[#d1d5db] disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2 text-sm"
+                    title="Publish this agent's canvas as a reusable blueprint others can browse and clone"
+                  >
+                    {isPublishing ? (
+                      <>
+                        <div className="w-4 h-4 border-2 border-[#0972d3] border-t-transparent rounded-full animate-spin" />
+                        Publishing...
+                      </>
+                    ) : (
+                      <>
+                        <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M12 19V5" /><polyline points="5 12 12 5 19 12" />
+                        </svg>
+                        Publish to Registry
+                      </>
+                    )}
+                  </button>
+                  {publishMsg && (
+                    <p className={`mt-2 text-xs ${publishMsg.kind === 'ok' ? 'text-green-700' : 'text-red-600'}`}>
+                      {publishMsg.text}
+                    </p>
+                  )}
                 </div>
               )}
 

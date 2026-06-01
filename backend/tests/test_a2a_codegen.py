@@ -301,9 +301,12 @@ def test_ssrf_refuses_non_allowlisted_host(monkeypatch):
 @pytest.mark.parametrize(
     "peer_url",
     [
-        "http://169.254.169.254/latest/meta-data/",  # IMDS
-        "http://127.0.0.1:8080/",  # loopback
-        "http://10.0.0.5/invoke",  # RFC1918
+        # Bug 139: peer urls are now https-only, so use https here — this keeps the
+        # test proving the IP/DNS DENYLIST (not the scheme check). http variants are
+        # covered by test_ssrf_refuses_non_https below.
+        "https://169.254.169.254/latest/meta-data/",  # IMDS
+        "https://127.0.0.1:8080/",  # loopback
+        "https://10.0.0.5/invoke",  # RFC1918
     ],
 )
 def test_ssrf_refuses_private_and_imds_hosts(peer_url, monkeypatch):
@@ -320,6 +323,31 @@ def test_ssrf_refuses_private_and_imds_hosts(peer_url, monkeypatch):
     res = json.loads(out)
     assert res["status"] == "BLOCKED", f"expected BLOCKED for {peer_url}, got {res}"
     assert _RecordingHttpxClient.calls == [], "no outbound call should happen for blocked IP"
+
+
+@pytest.mark.parametrize(
+    "peer_url",
+    [
+        "http://example.com/",  # plaintext to an otherwise-allowed host
+        "http://169.254.169.254/latest/meta-data/",  # plaintext IMDS
+        "ftp://example.com/",  # non-web scheme
+    ],
+)
+def test_ssrf_refuses_non_https(peer_url, monkeypatch):
+    # Bug 139: A2A peer urls must be https-only (matches the OIDC/git SSRF rule).
+    # http/other schemes are rejected before any outbound call.
+    from urllib.parse import urlparse
+
+    host = urlparse(peer_url).hostname
+    if host:
+        monkeypatch.setenv("A2A_PEER_ALLOWLIST", host)
+    g = _make_agent()
+    out = g["call_a2a_peer"](peer_url, "hi")
+    import json
+
+    res = json.loads(out)
+    assert res["status"] == "ERROR", f"expected ERROR (non-https) for {peer_url}, got {res}"
+    assert _RecordingHttpxClient.calls == [], "no outbound call for a non-https scheme"
 
 
 def test_ssrf_fail_closed_without_allowlist(monkeypatch):

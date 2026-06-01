@@ -197,6 +197,9 @@ def test_org_entry_visible_to_same_org(store: RegistryStore):
             "canvas_snapshot": {"nodes": [], "edges": []},
         },
     )
+    # Publishing now creates a 'pending' entry (approval workflow). An admin
+    # must approve it before non-owners in the org can see it.
+    store.update(DEFAULT_ORG_ID, "shared-bot", {"status": "approved"})
     bob = _client("bob")
     # Same default org → Bob sees it.
     assert bob.get("/api/registry/shared-bot").status_code == 200
@@ -216,6 +219,9 @@ def test_clone_increments_usage_and_returns_snapshot(store: RegistryStore):
             "canvas_snapshot": {"nodes": [{"type": "runtime"}], "edges": []},
         },
     )
+    # Publishing now creates a 'pending' entry; approve it so a non-owner can
+    # clone it (approval gates reuse).
+    store.update(DEFAULT_ORG_ID, "clonable", {"status": "approved"})
     bob = _client("bob")
     resp = bob.post("/api/registry/clonable/clone")
     assert resp.status_code == 200

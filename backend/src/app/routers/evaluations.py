@@ -185,7 +185,10 @@ async def list_evaluation_results(
         logger.exception("Failed to list eval configs while resolving log group")
 
     if not log_group:
-        log_group = f"/aws/bedrock-agentcore/runtimes/{runtime_id}"
+        # Bug 139: runtime invocation logs land in the "-DEFAULT" endpoint group
+        # (same group cost + dashboard read); without the suffix this queried an
+        # empty group and the panel showed no scores even with live traffic.
+        log_group = f"/aws/bedrock-agentcore/runtimes/{runtime_id}-DEFAULT"
 
     end_ts = int(time.time())
     start_ts = end_ts - hours * 3600

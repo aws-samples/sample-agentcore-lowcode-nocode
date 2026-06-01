@@ -62,11 +62,18 @@ STATUS_ACTIVE = "active"
 STATUS_DISABLED = "disabled"
 STATUS_PROVISIONING = "provisioning"
 STATUS_ERROR = "error"
+# Bug 139: a trigger is RECORDED in the store but its AWS resource (EventBridge
+# rule / Scheduler / Function URL) is not yet provisioned by the platform — so it
+# does NOT fire yet. Stamp new triggers REGISTERED (not ACTIVE) so the UI never
+# falsely tells a customer the trigger is live. Flip to ACTIVE only once the AWS
+# resource is created and its handle stamped (TriggerStore.update_status).
+STATUS_REGISTERED = "registered"
 TRIGGER_STATUSES = (
     STATUS_ACTIVE,
     STATUS_DISABLED,
     STATUS_PROVISIONING,
     STATUS_ERROR,
+    STATUS_REGISTERED,
 )
 
 
@@ -207,7 +214,7 @@ class TriggerStore:
         owner_sub: str,
         type: str,
         target_runtime_arn: str,
-        status: str = STATUS_ACTIVE,
+        status: str = STATUS_REGISTERED,
         schedule: Optional[str] = None,
         pattern: Optional[dict] = None,
         webhook_secret_ref: Optional[str] = None,

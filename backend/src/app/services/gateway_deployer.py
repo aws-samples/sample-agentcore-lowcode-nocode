@@ -2034,6 +2034,36 @@ def deploy_gateway(
             except Exception as sync_err:
                 logger.warning("Gateway target sync (non-fatal): %s", sync_err)
 
+        # Bug 138: if the caller asked for tools (built-in and/or custom) but the
+        # gateway ended up with ZERO targets, the agent would deploy against an
+        # empty gateway and break at first invocation ("returned 0 tools ...
+        # gateway wiring is broken"). This happens when an AI-generated spec
+        # passes an unknown built-in toolId (no schema match → DynamicTools target
+        # skipped) or every custom tool failed validation. FAIL LOUDLY here with a
+        # message the user can act on, instead of silently shipping a dead gateway.
+        tools_requested = bool(gateway_tools) or bool(custom_tools)
+        if tools_requested:
+            try:
+                _existing_targets = _get_targets_from_response(
+                    agentcore_ctrl.list_gateway_targets(gatewayIdentifier=gateway["gatewayId"])
+                )
+            except Exception:  # noqa: BLE001
+                _existing_targets = []
+            if not _existing_targets:
+                _known = sorted(GATEWAY_TOOL_SCHEMAS.keys())
+                _unknown = [t for t in (gateway_tools or []) if t not in GATEWAY_TOOL_SCHEMAS]
+                detail = ""
+                if _unknown:
+                    detail = (
+                        f" None of the requested tools {_unknown} are built-in "
+                        f"tools (valid: {_known}). A custom tool needs lambdaCode + "
+                        "an inputSchema to be deployable."
+                    )
+                raise RuntimeError(
+                    "Gateway was created but no tool targets could be deployed, so "
+                    "the agent would have no tools." + detail
+                )
+
         # Bug 134: the policy step needs the gateway ARN + the fully-qualified
         # tool action names ("{TargetName}___{tool}") to generate schema-valid
         # Cedar. The control plane's get_gateway returns the ARN; the target

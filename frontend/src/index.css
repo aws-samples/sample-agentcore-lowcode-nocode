@@ -16,20 +16,41 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 
-  /* AWS-inspired design tokens */
+  /* AWS-inspired design tokens — refined for Linear/Vercel-grade polish */
   --color-aws-squid-ink: #232f3e;
   --color-aws-anchor: #16191f;
   --color-aws-smile: #ff9900;
   --color-aws-smile-hover: #ec7211;
   --color-aws-blue: #0972d3;
   --color-aws-blue-hover: #0061b9;
+
+  /* Semantic surface tokens */
   --color-surface: #ffffff;
-  --color-bg: #f2f3f3;
+  --color-surface-hover: #fafbfc;
+  --color-surface-elevated: #ffffff;
+  --color-bg: #f7f8f9;
+  --color-bg-subtle: #f2f3f5;
+
+  /* Border tokens — hairline first */
   --color-border: #e9ebed;
+  --color-border-hover: #d1d5db;
   --color-border-active: #0972d3;
+  --color-border-subtle: rgba(0, 0, 0, 0.06);
+
+  /* Text hierarchy */
   --color-text-primary: #16191f;
   --color-text-secondary: #5f6b7a;
   --color-text-tertiary: #8d99a8;
+  --color-text-placeholder: #9ca3af;
+
+  /* Shadows — micro-layered, not blurry Material shadows */
+  --shadow-sm: 0 1px 0 rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 1px 2px rgba(0, 0, 0, 0.04), 0 4px 8px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 2px 4px rgba(0, 0, 0, 0.04), 0 8px 16px rgba(0, 0, 0, 0.1);
+
+  /* Easing curves */
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
 
   /* Modal sizing tokens */
   --modal-width: 540px;

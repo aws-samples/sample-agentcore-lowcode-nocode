@@ -147,3 +147,53 @@ def get_caller_role(request: Request) -> str:
         if _ROLE_PRECEDENCE.get(g, 0) > _ROLE_PRECEDENCE[best]:
             best = g
     return best
+
+
+# Registry RBAC: approvers belong to the 'registry-admin' Cognito group. We also
+# accept the legacy 'org-admin' group so existing platform admins keep approval
+# rights without a re-grant. This is distinct from get_caller_role/_ROLE_PRECEDENCE
+# (which workspace_acl depends on) — do NOT fold these together.
+_REGISTRY_ADMIN_GROUPS = {"registry-admin", "org-admin"}
+
+
+def is_registry_admin(request: Request) -> bool:
+    """True if the caller is a registry approver (group registry-admin/org-admin).
+
+    Reuses the exact defensive cognito:groups claim parsing from get_caller_role
+    (list / JSON-array string / comma-or-space-joined string). In local dev (no
+    aws.event) returns True, mirroring get_caller_role's full-access local path.
+    """
+    import json as _json
+
+    aws_event = request.scope.get("aws.event") if request.scope else None
+    if aws_event is None:
+        # Local dev: single-user keeps full access, like get_caller_role.
+        return True
+
+    groups: list[str] = []
+    try:
+        authz = aws_event["requestContext"]["authorizer"]
+        jwt = authz.get("jwt") or authz
+        claims = jwt.get("claims") or jwt
+        raw = claims.get("cognito:groups")
+    except (KeyError, TypeError, AttributeError) as e:
+        logger.warning("Could not extract cognito:groups from authorizer: %s", e)
+        raw = None
+
+    if isinstance(raw, list):
+        groups = [str(g) for g in raw]
+    elif isinstance(raw, str) and raw:
+        s = raw.strip()
+        if s.startswith("["):
+            try:
+                parsed = _json.loads(s)
+                if isinstance(parsed, list):
+                    groups = [str(g) for g in parsed]
+            except ValueError:
+                groups = []
+        if not groups:
+            # Cognito also delivers groups as a bracketed/space/comma list.
+            s = s.strip("[]")
+            groups = [g.strip() for g in s.replace(",", " ").split() if g.strip()]
+
+    return any(g in _REGISTRY_ADMIN_GROUPS for g in groups)

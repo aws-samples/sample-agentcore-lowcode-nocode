@@ -1412,20 +1412,24 @@ def _cleanup_old_cognito_pool(gw_detail: dict, cognito_client) -> None:
         jwt_cfg = auth_cfg.get("customJWTAuthorizer", {})
         discovery_url = jwt_cfg.get("discoveryUrl", "")
         # Format: https://cognito-idp.{region}.amazonaws.com/{pool_id}/.well-known/...
-        if "cognito-idp" in discovery_url and "/" in discovery_url:
-            parts = discovery_url.split("/")
-            # pool_id is after amazonaws.com/ and before /.well-known
-            for i, part in enumerate(parts):
-                if part.endswith("amazonaws.com") and i + 1 < len(parts):
-                    old_pool_id = parts[i + 1]
-                    if old_pool_id and "_" in old_pool_id:
-                        pool_detail = cognito_client.describe_user_pool(UserPoolId=old_pool_id)
-                        domain = pool_detail.get("UserPool", {}).get("Domain")
-                        if domain:
-                            cognito_client.delete_user_pool_domain(UserPoolId=old_pool_id, Domain=domain)
-                        cognito_client.delete_user_pool(UserPoolId=old_pool_id)
-                        logger.info("Cleaned up old Cognito pool: %s", old_pool_id)
-                    break
+        # Parse with urlparse and validate the host EXACTLY (netloc) rather than a
+        # substring/endswith check on the raw URL — a substring like "amazonaws.com"
+        # can appear at an arbitrary position (py/incomplete-url-substring-sanitization).
+        from urllib.parse import urlparse as _urlparse
+
+        _parsed = _urlparse(discovery_url)
+        _host = _parsed.hostname or ""
+        if _host.startswith("cognito-idp.") and _host.endswith(".amazonaws.com"):
+            # path is /{pool_id}/.well-known/... — pool_id is the first segment.
+            _segments = [s for s in _parsed.path.split("/") if s]
+            old_pool_id = _segments[0] if _segments else ""
+            if old_pool_id and "_" in old_pool_id:
+                pool_detail = cognito_client.describe_user_pool(UserPoolId=old_pool_id)
+                domain = pool_detail.get("UserPool", {}).get("Domain")
+                if domain:
+                    cognito_client.delete_user_pool_domain(UserPoolId=old_pool_id, Domain=domain)
+                cognito_client.delete_user_pool(UserPoolId=old_pool_id)
+                logger.info("Cleaned up old Cognito pool: %s", old_pool_id)
     except Exception as e:
         logger.warning("Could not clean up old Cognito pool: %s", e)
 
@@ -2156,9 +2160,12 @@ def deploy_gateway(
             "qualified_tools": qualified_tools,
             "expected_tool_count": expected_tool_count,
         }
+        # Log the gateway id/arn (stable identifiers) rather than the full
+        # gateway_url. The URL is a public MCP endpoint (not a secret), but
+        # logging a url-typed value trips py/clear-text-logging-sensitive-data's
+        # heuristic; the id+arn are sufficient to correlate and carry no such flag.
         logger.info(
-            "Gateway deployed: url=%s, id=%s, arn=%s, tools=%d",
-            result["gateway_url"],
+            "Gateway deployed: id=%s, arn=%s, tools=%d",
             result["gateway_id"],
             gateway_arn,
             len(qualified_tools),

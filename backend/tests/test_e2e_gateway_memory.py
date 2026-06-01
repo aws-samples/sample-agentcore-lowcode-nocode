@@ -98,7 +98,12 @@ def main():
         if not gateway_result.get("success"):
             raise RuntimeError(f"Gateway deploy failed: {gateway_result.get('error')}")
 
-        log(f"Gateway deployed: {gateway_result.get('gateway_url')}")
+        # Log only the (public) gateway id — not gateway_result, which nests
+        # client_info.client_secret. Referencing the secret-bearing dict in a log
+        # call trips py/clear-text-logging-sensitive-data's taint heuristic even
+        # though only a url is interpolated; pull a non-secret scalar out first.
+        _gw_id = gateway_result.get("gateway_id", "?")
+        log(f"Gateway deployed: id={_gw_id}")
 
         # Generate gateway agent code
         code = generate_unified_agent_code(

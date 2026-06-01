@@ -65,9 +65,25 @@ GENERATION_PROMPT = """Generate an AgentCore canvas spec from the conversation. 
 - `memory` (OPTIONAL): persistent memory. Configuration:
     {"name": "AgentMemory", "enabled": true, "eventExpiryDuration": 90,
      "strategies": [{"type": "semantic", "name": "semantic_strategy"}]}
-- `tool` (OPTIONAL, repeatable): a custom or built-in tool. Configuration:
+- `tool` (OPTIONAL, repeatable): a built-in OR custom tool. Configuration:
     {"name": "ToolName", "toolId": "snake_case_id", "description": "...",
      "enabled": true, "isCustom": false}
+  TOOL SELECTION RULES (critical — a wrong toolId yields a gateway with NO
+  targets and a broken agent):
+  * BUILT-IN tools — set `isCustom: false` and use EXACTLY one of these toolIds:
+      - `duckduckgo_search`  (web search)
+      - `wikipedia_search`   (encyclopedia lookup)
+      - `weather_api`        (real-time weather + geocoding via Open-Meteo)
+      - `web_page_fetcher`   (fetch a URL's text)
+    Do NOT invent a built-in toolId. If the user asks for weather, use
+    `weather_api`. If they ask to search the web, use `duckduckgo_search`.
+  * CUSTOM tools — only when the need maps to NONE of the built-ins. Set
+    `isCustom: true`, pick a unique snake_case `toolId`, and ALSO include:
+      "inputSchema": {"type":"object","properties":{...},"required":[...]}
+    A custom tool's Lambda code is generated automatically from its description +
+    inputSchema, so write a precise, implementable description.
+  * NEVER emit a `tool` node with `isCustom: false` whose toolId is not in the
+    built-in list above.
 - `guardrails` (OPTIONAL): Bedrock Guardrails. Configuration:
     {"name": "Guardrails", "enabled": true, "mode": "create_new",
      "contentFilters": {"hate": "HIGH", "sexual": "HIGH", "violence": "HIGH",
@@ -196,6 +212,19 @@ _SUBMIT_TOOL = {
 # Validation
 # ---------------------------------------------------------------------------
 
+# Built-in gateway tools the platform ships (mirrors
+# gateway_deployer.GATEWAY_TOOL_SCHEMAS keys). A `tool` node with isCustom=false
+# MUST use one of these ids, else the deploy creates a gateway with NO targets
+# ("No predefined tool schemas matched ... skipping DynamicTools target") and the
+# agent is broken. Custom tools (isCustom=true) bypass this set but must carry an
+# inputSchema so the deploy can generate their Lambda. (Bug 138.)
+_BUILTIN_TOOL_IDS = {
+    "duckduckgo_search",
+    "wikipedia_search",
+    "weather_api",
+    "web_page_fetcher",
+}
+
 
 def _validate_spec(spec: dict) -> Optional[str]:
     """Return None if the spec is valid, else an error message string.
@@ -245,6 +274,31 @@ def _validate_spec(spec: dict) -> Optional[str]:
             continue
         if not any(e.get("sourceIdSuffix") == s and e.get("targetIdSuffix") == runtime_suffix for e in edges):
             return f"non-runtime node '{s}' has no edge to runtime '{runtime_suffix}'"
+
+    # Tool nodes: a built-in tool MUST use a known toolId; a custom tool MUST
+    # carry an inputSchema (Bug 138 — otherwise the deploy yields 0 gateway
+    # targets and a broken agent). Returning the error feeds self-correction.
+    for n in nodes:
+        if n.get("type") != "tool":
+            continue
+        cfg = n.get("configuration") or {}
+        tool_id = cfg.get("toolId") or ""
+        is_custom = bool(cfg.get("isCustom"))
+        if not is_custom:
+            if tool_id not in _BUILTIN_TOOL_IDS:
+                return (
+                    f"tool node '{n.get('idSuffix')}' has isCustom=false but toolId "
+                    f"'{tool_id}' is not a built-in tool. Use one of "
+                    f"{sorted(_BUILTIN_TOOL_IDS)}, or set isCustom=true with an "
+                    "inputSchema to generate a custom tool."
+                )
+        else:
+            schema = cfg.get("inputSchema")
+            if not isinstance(schema, dict) or schema.get("type") != "object":
+                return (
+                    f"custom tool node '{n.get('idSuffix')}' (isCustom=true) must "
+                    "include an inputSchema object (type=object with properties)."
+                )
 
     return None
 

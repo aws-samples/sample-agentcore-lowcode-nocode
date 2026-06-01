@@ -1202,3 +1202,141 @@ policy. ENFORCE attaches a default-deny engine; an empty one denies everything s
 authoritative server-side state (count ACTIVE children) before attaching — never trust a
 swallowed Conflict as success. Treat account-global vs resource-scoped naming as unknown
 until proven; prefix names with a resource-unique token.
+
+## Bug 138 — Customer test findings: CloudFront API-masking, AI-gen 0-target gateway, delete role leak
+
+Four distinct bugs surfaced by a customer testing the live UI (2026-05-31):
+
+### 138a — CloudFront masks API 4xx → "Unexpected response from server" (THE big one)
+`platform_stack.py` CloudFront `error_responses` mapped 403/404 → `200 /index.html`
+for SPA deep-link routing. These are DISTRIBUTION-WIDE, so every `/api/*` 404 also
+became `200 text/html`. The frontend (`api.ts` ~289) throws "Unexpected response
+from server" on any 2xx-non-JSON, and the panels' 404→empty-state logic
+(`isNotReadyError`) could NEVER fire because the client never saw a 404.
+PROOF: as the runtime owner, API GW direct returned correct 200 JSON + legit 404;
+through CloudFront the 404 came back as 200 HTML.
+FIX: removed the distribution-wide error_responses; added a CloudFront Function
+(VIEWER_REQUEST) on the DEFAULT (S3) behavior only that rewrites extensionless
+nav paths to /index.html. `/api/*` is a separate behavior the function isn't on,
+so API status codes pass through as real JSON.
+LESSON: CloudFront custom error responses are global, not per-behavior. NEVER use
+them for SPA fallback on a distribution that also fronts an API — use a
+CloudFront Function / viewer-request rewrite scoped to the SPA behavior instead.
+
+### 138b — AI agent-generator produced a gateway with 0 targets
+`agent_generator.py` let the model emit a `tool` node with an invented `toolId`
+and `isCustom:false`. At deploy, `gateway_deployer` filters
+`if tid in GATEWAY_TOOL_SCHEMAS` → unknown id matches nothing → "No predefined
+tool schemas matched ... skipping DynamicTools target" → gateway with 0 targets →
+runtime "returned 0 tools ... gateway wiring is broken". Manual tool selection
+worked (1/1) because those ids are real.
+FIX (defense in depth): (1) GENERATION_PROMPT now enumerates the exact built-in
+toolIds and the isCustom=true+inputSchema rule for custom tools; (2) `_validate_spec`
+rejects a tool node with isCustom=false whose toolId isn't built-in, and a custom
+tool lacking an inputSchema (feeds self-correction retry); (3) `deploy_gateway`
+FAILS LOUDLY if tools were requested but 0 targets got created (was a silent skip).
+LESSON: an LLM that emits resource identifiers must be constrained to the real
+catalog AND validated server-side; never let "create 0 children" be a silent success.
+
+### 138c — DELETE leaks `{runtime}-role` IAM roles
+`runtime_deployer.destroy_runtime` cleans up BOTH `AgentCoreRuntime-{name}` (SFN)
+and `{name}-role` (direct-deploy, Bug 57) conventions, but the DeploymentLambda
+IAM grant scoped role-cleanup verbs to `role/AgentCore*` only. A `{rt}-role` name
+doesn't match → AccessDenied on ListAttachedRolePolicies → every delete leaked the
+role. FIX: added a cleanup-only grant (Get/Detach/Delete/List, NOT Create/PassRole)
+on `role/*-role`.
+LESSON: when a cleanup path targets multiple naming conventions, the IAM resource
+ARNs must cover ALL of them — grep the deleter for every role-name pattern.
+
+### 138d — AI canvas showed error COUNT not error TEXT (frontend, fixed in UI uplift)
+
+### 138e — Artifact verification (CFN + Python) — VERIFIED end-to-end on real AWS
+Downloaded BOTH a CloudFormation bundle AND a standalone Python export for an
+embedded-tools weather/web agent, then proved each independently:
+- CFN: ran the bundle's own deploy.sh → fresh stack `cfntest-wx` created a real
+  AgentCore Runtime → invoked via boto3 invoke_agent_runtime → returned REAL
+  weather data (66.5°F, overcast, Chicago) → teardown.sh cleaned it. PASS.
+- Python: `pip install -r requirements.txt && ./run.sh` → SDK served
+  POST /invocations on :8080 → returned REAL weather data. PASS — BUT only after
+  setting SSL_CERT_FILE to certifi's bundle. macOS stdlib urllib has no default
+  CA bundle, so the embedded tools failed SSL verification until pointed at
+  certifi. The agent HONESTLY reported "SSL certificate verification error"
+  rather than hallucinating — good fail-loud behavior. Linux/AgentCore Runtime
+  have system certs so this is local-macOS-only.
+FIX: python_exporter README now documents the SSL_CERT_FILE workaround + shows
+the curl invoke command.
+LESSON: when verifying a "downloadable artifact" claim, actually DEPLOY/RUN the
+artifact as an external user would (its own scripts, a clean stack/venv) and
+INVOKE it — an HTTP 200 / "stack created" is not proof the agent answers. Both
+artifacts here produce working agents; the only gap was a missing macOS cert doc.
+
+## Bug 139 / Feature — Registry two-persona approval (developer/admin via Cognito groups)
+
+Added an approval workflow ON the existing DDB-backed registry (not a new store, not a
+native AWS service — there is no separate "AgentCore registry" primitive).
+
+Design:
+- Personas = Cognito groups: `registry-admin` (approve/reject, see+delete everything) and
+  `registry-developer` (publish→pending, view approved + own, clone approved). Built on the
+  pre-existing `auth.py::get_caller_role` cognito:groups parser; added `is_registry_admin`
+  (accepts registry-admin OR legacy org-admin) + a `caller_is_admin` FastAPI dependency.
+- RegistryEntry gained `status` (default **"approved"** — CRITICAL so legacy rows with no
+  status attr stay visible), `reviewed_by/at`, `rejection_reason`, + `list_pending`.
+- Router: publish→pending; search/get/clone status-gate non-owners to approved; new
+  approve/reject (403 for non-admin, distinct from 404 cross-tenant); admin can delete any;
+  non-admin PUT resets to pending (but empty-body PUT is a no-op — fixed the workflow's low bug).
+- Infra: two CfnUserPoolGroup (registry-admin prec 0, registry-developer prec 10). No new
+  API GW route needed — POST /api/registry/{proxy+} already covers approve/reject.
+- Frontend: useIsRegistryAdmin() reads cognito:groups from the Amplify ID token; admin gets a
+  Pending-review tab with Approve/Reject; status badges; clone gated on approved/owner.
+
+Verified LIVE (main loop, real Cognito users in real groups — subagents can't SRP-auth):
+13/13 RBAC checks PASS through CloudFront — dev publish→pending, dev approve→403, dev can't
+see/clone another dev's pending (404), admin pending-queue+approve, non-owner clone after
+approve, admin reject+delete. Built via a 3-phase workflow (parallel impl → 3 adversarial
+verifiers → synthesis); 46 registry/auth tests pass, tsc -b clean, cdk synth clean.
+
+LESSON: when adding a status/approval gate to an existing store, default the new status to the
+"already-good" value so pre-existing rows don't vanish; keep RBAC-denial (403) and
+not-visible/cross-tenant (404) strictly distinct; drive personas off Cognito groups (the claim
+parser likely already exists) rather than a new auth system.
+
+## Bug 140 — Ship-readiness audit findings (the RED→GREEN pass)
+
+A full ship-readiness workflow (6 parallel audits + adversarial verify + synth) returned
+RED with real blockers. Fixed all + re-proved live:
+
+140a (HIGH regression) — test_agentic_rag_codegen.py swapped sys.modules['boto3'] with a
+fake and never restored it; because it sorts first, the fake leaked into moto's lazy
+boto3.Session import and failed 16 downstream tests. FIX: autouse fixture snapshots+restores
+boto3 (+submodules) per test. Suite went 16-fail → 706 pass.
+LESSON: a test that monkeypatches sys.modules MUST restore it (autouse fixture), or it
+poisons every later test in the process.
+
+140b (HIGH feature) — Triggers panel stamped new triggers STATUS_ACTIVE (green "active")
+but the platform never provisions the EventBridge/Scheduler/FunctionURL resource, so the
+trigger never fires — a silently-misleading feature. FIX: new STATUS_REGISTERED state,
+create_trigger defaults to it; UI copy explains "recorded → registered → active (only then
+fires)". LESSON: never show a success/active state for a capability that isn't wired;
+model the honest intermediate state.
+
+140c (MEDIUM IAM) — the Bug-138 delete-orphan fix scoped cleanup verbs to role/*-role,
+which matches ANY account role ending in -role (cdk-exec, customer roles). FIX: tag runtime
+exec roles ManagedBy=agentcore-flows at creation; gate the cleanup grant with
+aws:ResourceTag condition so it can only ever touch our own roles. AccessDenied on an
+untagged candidate name is now the guard working (logged at debug, not as an orphan alarm).
+LESSON: scope destructive IAM by resource TAG, not a name-suffix wildcard.
+
+140d (MEDIUM eval) — evaluation_step + evaluations router watched
+/aws/bedrock-agentcore/runtimes/{id} but the runtime emits to {id}-DEFAULT (the group cost
++ dashboard read), so the evaluations panel stayed empty. FIX: use the -DEFAULT suffix in both.
+
+140e (LOW) — a2a call_a2a_peer allowed http; tightened to https-only (peer_url + card
+invoke-url, both fail-closed) to match the OIDC/git SSRF rule. Dead POST /api/workspaces
+route dropped (router only has GET). Untracked test_registry_rbac.py committed so CI runs it.
+
+140f (REVERTED, lesson) — I added session_id normalization (pad <33-char ids) as
+"robustness" after my OWN test used a bad session_id. It broke 4 test_session_properties
+tests asserting EXACT passthrough (Bug 29 contract: memory needs the verbatim id) and was
+solving a non-problem (the UI always sends a UUID). REVERTED. LESSON: don't add "robustness"
+that violates an existing tested contract to fix a test-harness mistake; fix the harness.

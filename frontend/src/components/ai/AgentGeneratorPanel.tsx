@@ -16,6 +16,7 @@ import {
   type AgentGenerateResponse,
   type GeneratedCanvasSpec,
 } from '../../services/api';
+import { useWorkflowStore } from '../../store/workflowStore';
 
 interface ChatMessage {
   id: string;
@@ -43,6 +44,7 @@ export function AgentGeneratorPanel({
   const [currentSpec, setCurrentSpec] = useState<GeneratedCanvasSpec | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const validationState = useWorkflowStore((state) => state.validationState);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -54,11 +56,7 @@ export function AgentGeneratorPanel({
     }
   }, [isVisible]);
 
-  const reset = useCallback(() => {
-    setMessages([]);
-    setCurrentSpec(null);
-    setInputValue('');
-  }, []);
+  // Panel is closed via onClose prop — validation results remain visible
 
   const handleSubmit = useCallback(async () => {
     const trimmed = inputValue.trim();
@@ -149,9 +147,8 @@ export function AgentGeneratorPanel({
       return;
     }
     onApplySpec(currentSpec);
-    reset();
-    onClose();
-  }, [currentSpec, hasExistingNodes, onApplySpec, onClose, reset]);
+    // Panel stays open to show validation results — user can close manually
+  }, [currentSpec, hasExistingNodes, onApplySpec]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -241,18 +238,65 @@ export function AgentGeneratorPanel({
 
         {/* Action bar (visible once we have a spec) */}
         {currentSpec && !isGenerating && (
-          <div className="border-t border-[#e9ebed] bg-emerald-50 p-3 flex items-center justify-between">
-            <div className="text-xs text-emerald-900">
-              <span className="font-medium">{currentSpec.name}</span>{' '}
-              · {currentSpec.nodes.length} node
-              {currentSpec.nodes.length === 1 ? '' : 's'}
+          <div className={`border-t border-[#e9ebed] p-3 ${validationState?.errors && validationState.errors.length > 0 ? 'bg-red-50' : 'bg-emerald-50'}`}>
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-xs text-emerald-900">
+                <span className="font-medium">{currentSpec.name}</span>{' '}
+                · {currentSpec.nodes.length} node
+                {currentSpec.nodes.length === 1 ? '' : 's'}
+              </div>
+              <button
+                onClick={handleApply}
+                className="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700"
+              >
+                Apply to Canvas →
+              </button>
             </div>
-            <button
-              onClick={handleApply}
-              className="text-xs px-3 py-1.5 rounded bg-emerald-600 text-white hover:bg-emerald-700"
-            >
-              Apply to Canvas →
-            </button>
+            {/* Validation feedback — show errors/warnings if present after apply */}
+            {validationState && (validationState.errors.length > 0 || validationState.warnings.length > 0) && (
+              <div className="mt-2 space-y-1.5">
+                {validationState.errors.length > 0 && (
+                  <div className="rounded border border-red-300 bg-red-50 px-2.5 py-2">
+                    <div className="text-xs font-semibold text-red-800 mb-1">
+                      {validationState.errors.length} Error{validationState.errors.length !== 1 ? 's' : ''}
+                    </div>
+                    <ul className="space-y-0.5 text-[11px] text-red-700">
+                      {validationState.errors.slice(0, 5).map((err, i) => (
+                        <li key={i} className="flex items-start gap-1.5">
+                          <span className="text-red-400 mt-0.5">•</span>
+                          <span>
+                            <span className="font-medium">{err.componentId}:</span> {err.message}
+                          </span>
+                        </li>
+                      ))}
+                      {validationState.errors.length > 5 && (
+                        <li className="text-red-600 italic">...and {validationState.errors.length - 5} more</li>
+                      )}
+                    </ul>
+                  </div>
+                )}
+                {validationState.warnings.length > 0 && (
+                  <div className="rounded border border-yellow-300 bg-yellow-50 px-2.5 py-2">
+                    <div className="text-xs font-semibold text-yellow-800 mb-1">
+                      {validationState.warnings.length} Warning{validationState.warnings.length !== 1 ? 's' : ''}
+                    </div>
+                    <ul className="space-y-0.5 text-[11px] text-yellow-700">
+                      {validationState.warnings.slice(0, 3).map((warn, i) => (
+                        <li key={i} className="flex items-start gap-1.5">
+                          <span className="text-yellow-400 mt-0.5">•</span>
+                          <span>
+                            <span className="font-medium">{warn.componentId}:</span> {warn.message}
+                          </span>
+                        </li>
+                      ))}
+                      {validationState.warnings.length > 3 && (
+                        <li className="text-yellow-600 italic">...and {validationState.warnings.length - 3} more</li>
+                      )}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 

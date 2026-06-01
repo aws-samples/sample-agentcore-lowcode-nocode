@@ -1163,6 +1163,40 @@ class PlatformStack(cdk.Stack):
                 resources=[f"arn:aws:iam::{self.account}:role/AgentCore*"],
             )
         )
+        # Bug 138/139: runtime_deployer.destroy_runtime also cleans up the
+        # direct-deploy execution-role convention `{runtime_name}-role` (Bug 57),
+        # whose name does NOT start with "AgentCore". The first cut scoped this to
+        # role/*-role, but that wildcard matches ANY account role ending in '-role'
+        # (cdk-exec roles, customer lambda roles, etc.) — a least-privilege
+        # regression. Bug 139 fix: runtime exec roles are now TAGGED
+        # ManagedBy=agentcore-flows at creation, so we gate the cleanup-only verbs
+        # (read/detach/delete — NOT CreateRole/PassRole) on that tag. A role we
+        # didn't create can never carry the tag, so this can no longer touch
+        # unrelated account roles. iam:TagRole below lets us stamp/repair the tag.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
+                    "iam:GetRole",
+                    "iam:DetachRolePolicy",
+                    "iam:DeleteRole",
+                    "iam:ListAttachedRolePolicies",
+                    "iam:ListRolePolicies",
+                    "iam:DeleteRolePolicy",
+                ],
+                resources=[f"arn:aws:iam::{self.account}:role/*-role"],
+                conditions={
+                    "StringEquals": {"aws:ResourceTag/ManagedBy": "agentcore-flows"}
+                },
+            )
+        )
+        # Stamp/repair the ManagedBy tag on runtime exec roles (needed so the
+        # tag-gated cleanup grant above can match them). Scoped to *-role names.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["iam:TagRole"],
+                resources=[f"arn:aws:iam::{self.account}:role/*-role"],
+            )
+        )
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
@@ -2154,6 +2188,29 @@ class PlatformStack(cdk.Stack):
             refresh_token_validity=Duration.days(7),
         )
 
+        # Two-persona approval workflow groups for the agent registry.
+        # 'registry-admin' members can approve/reject submissions and manage any
+        # entry; 'registry-developer' members publish (pending) and manage their
+        # own. Persona is resolved backend-side from cognito:groups (see
+        # services/auth.is_registry_admin). Higher precedence = stronger role,
+        # so registry-admin (0) outranks registry-developer (10).
+        cognito.CfnUserPoolGroup(
+            self,
+            "RegistryAdminGroup",
+            user_pool_id=pool.user_pool_id,
+            group_name="registry-admin",
+            description="Registry approvers",
+            precedence=0,
+        )
+        cognito.CfnUserPoolGroup(
+            self,
+            "RegistryDeveloperGroup",
+            user_pool_id=pool.user_pool_id,
+            group_name="registry-developer",
+            description="Registry publishers",
+            precedence=10,
+        )
+
         # Pre-create users from context (comma-separated string via env var).
         #
         # A Lambda-backed Custom Resource generates a temporary password from
@@ -2483,7 +2540,9 @@ class PlatformStack(cdk.Stack):
         # the existing /api/workflows/{proxy+} route → workflow_integration.
         api.add_routes(
             path="/api/workspaces",
-            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+            # Bug 139: workspaces_router only declares GET /workspaces — POST was
+            # dead API surface. Match the route to the router (Bug 21 enumeration).
+            methods=[apigwv2.HttpMethod.GET],
             integration=workflow_integration,
             authorizer=jwt_authorizer,
         )
@@ -2742,6 +2801,36 @@ class PlatformStack(cdk.Stack):
             ),
         )
 
+        # SPA client-side routing WITHOUT masking API errors (Bug 138).
+        # CloudFront custom error_responses are DISTRIBUTION-WIDE — a 404→index.html
+        # rule also rewrites every /api/* 404 into a 200 text/html page, which the
+        # frontend then reports as "Unexpected response from server" and which makes
+        # the panels' 404→empty-state logic unreachable. Instead, handle SPA deep
+        # links with a CloudFront Function on the DEFAULT behavior only (the S3
+        # origin). It rewrites extensionless navigation paths to /index.html so the
+        # SPA loads, while /api/* (a separate behavior the function is NOT attached
+        # to) passes origin status codes through untouched as real JSON.
+        spa_router_fn = cloudfront.Function(
+            self,
+            "SpaRouterFunction",
+            comment="Rewrite extensionless SPA routes to /index.html (default behavior only)",
+            runtime=cloudfront.FunctionRuntime.JS_2_0,
+            code=cloudfront.FunctionCode.from_inline(
+                "function handler(event) {\n"
+                "  var request = event.request;\n"
+                "  var uri = request.uri;\n"
+                "  if (uri === '/') { request.uri = '/index.html'; return request; }\n"
+                "  // A path whose last segment has no '.' is a client-side route\n"
+                "  // (e.g. /canvas/123) -> serve the SPA shell. Real assets\n"
+                "  // (/assets/app.js, /vite.svg) keep their URI and 404 honestly.\n"
+                "  var lastSlash = uri.lastIndexOf('/');\n"
+                "  var lastSegment = uri.substring(lastSlash + 1);\n"
+                "  if (lastSegment.indexOf('.') === -1) { request.uri = '/index.html'; }\n"
+                "  return request;\n"
+                "}\n"
+            ),
+        )
+
         distribution = cloudfront.Distribution(
             self,
             "FrontendDistribution",
@@ -2755,6 +2844,12 @@ class PlatformStack(cdk.Stack):
                 origin=s3_origin,
                 viewer_protocol_policy=cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
                 response_headers_policy=security_headers,
+                function_associations=[
+                    cloudfront.FunctionAssociation(
+                        function=spa_router_fn,
+                        event_type=cloudfront.FunctionEventType.VIEWER_REQUEST,
+                    )
+                ],
             ),
             additional_behaviors={
                 "/api/*": cloudfront.BehaviorOptions(
@@ -2774,20 +2869,8 @@ class PlatformStack(cdk.Stack):
                     response_headers_policy=security_headers,
                 ),
             },
-            error_responses=[
-                cloudfront.ErrorResponse(
-                    http_status=403,
-                    response_http_status=200,
-                    response_page_path="/index.html",
-                    ttl=Duration.seconds(0),
-                ),
-                cloudfront.ErrorResponse(
-                    http_status=404,
-                    response_http_status=200,
-                    response_page_path="/index.html",
-                    ttl=Duration.seconds(0),
-                ),
-            ],
+            # NOTE: no distribution-wide error_responses — they would re-mask /api/*
+            # 4xx. SPA routing is handled by spa_router_fn on the default behavior.
         )
 
         return distribution

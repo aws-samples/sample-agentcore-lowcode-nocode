@@ -132,17 +132,27 @@ def create_runtime_iam_role(
         ],
     }
 
+    # Bug 139: tag every runtime exec role ManagedBy=agentcore-flows so the
+    # delete-path IAM grant can be scoped by aws:ResourceTag instead of a broad
+    # role/*-role wildcard that would match unrelated account roles.
+    _managed_tag = [{"Key": "ManagedBy", "Value": "agentcore-flows"}]
     try:
         resp = iam_client.create_role(
             RoleName=role_name,
             AssumeRolePolicyDocument=json.dumps(trust_policy),
             Description=f"Execution role for AgentCore runtime {role_name}",
+            Tags=_managed_tag,
         )
         role_arn = resp["Role"]["Arn"]
         logger.info("Created runtime IAM role: %s", role_arn)
     except iam_client.exceptions.EntityAlreadyExistsException:
         role_arn = iam_client.get_role(RoleName=role_name)["Role"]["Arn"]
         logger.info("Reusing existing runtime IAM role: %s", role_arn)
+        # Ensure the tag is present on reused roles too (idempotent).
+        try:
+            iam_client.tag_role(RoleName=role_name, Tags=_managed_tag)
+        except Exception as _tag_err:  # noqa: BLE001
+            logger.warning("Could not tag reused role %s: %s", role_name, _tag_err)
 
     # Attach core permissions
     # SECURITY: Scope S3 access to the specific artifacts bucket rather than "*".
@@ -717,8 +727,22 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
             # Role doesn't exist for this candidate — try the next.
             continue
         except Exception as e:
-            # Don't fail the whole delete because of role cleanup issues.
-            logger.warning("Runtime %s role cleanup (%s) failed: %s", runtime_id, role_name, e)
+            # Bug 139: the cleanup-only IAM grant is now tag-scoped
+            # (aws:ResourceTag/ManagedBy=agentcore-flows). An AccessDenied here
+            # therefore means this candidate name is NOT a role we created
+            # (untagged / belongs to someone else / never existed) — that's the
+            # guard working as intended, not a failure. Log it quietly so it
+            # doesn't read as an orphan-leak alarm; only surface other errors loud.
+            if "AccessDenied" in str(e):
+                logger.debug(
+                    "Skipping role %s during cleanup: not an agentcore-managed role "
+                    "(tag-scoped grant denied). Candidate name, not an orphan.",
+                    role_name,
+                )
+            else:
+                logger.warning(
+                    "Runtime %s role cleanup (%s) failed: %s", runtime_id, role_name, e
+                )
 
     # Phase 1 Gap 1D — best-effort dashboard cleanup. The dashboard was
     # created in runtime_launch_step.py with name `agentcore-{runtime_id}`.

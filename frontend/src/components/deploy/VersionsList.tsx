@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   getApiClient,
   getErrorMessage,
+  isNotReadyError,
   type AgentVersionSummary,
   type RuntimeSlotsSummary,
 } from '../../services/api';
@@ -44,7 +45,13 @@ export function VersionsList({ runtimeName, refreshKey }: VersionsListProps) {
       setVersions(vs);
       setSlots(sl);
     } catch (e) {
-      setError(getErrorMessage(e));
+      // 404/403 means runtime not deployed yet — empty state, not error (Bug 136)
+      if (isNotReadyError(e)) {
+        setVersions([]);
+        setSlots(null);
+      } else {
+        setError(getErrorMessage(e));
+      }
     } finally {
       setLoading(false);
     }

@@ -10,6 +10,7 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   getApiClient,
   getErrorMessage,
+  isNotReadyError,
   type DashboardUrlSummary,
   type EvaluationConfigSummary,
   type EvaluationResultsSummary,
@@ -40,13 +41,19 @@ export function EvaluationResultsPanel({ runtimeName, refreshKey }: EvaluationRe
       setCfg(await api.getEvaluationConfig(runtimeName));
     } catch (e) {
       setCfg(null);
-      setCfgError(getErrorMessage(e));
+      // 404/403 means not deployed yet — empty state, not error
+      if (!isNotReadyError(e)) {
+        setCfgError(getErrorMessage(e));
+      }
     }
     try {
       setResults(await api.listEvaluationResults(runtimeName, hours));
     } catch (e) {
       setResults(null);
-      setResultsError(getErrorMessage(e));
+      // 404/403 means not deployed yet — empty state, not error
+      if (!isNotReadyError(e)) {
+        setResultsError(getErrorMessage(e));
+      }
     }
     try {
       setDashboard(await api.getDashboardUrl(runtimeName));

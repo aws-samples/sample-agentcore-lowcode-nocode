@@ -366,8 +366,9 @@ function App() {
       fakeTemplate as unknown as WorkflowTemplate,
     );
     loadTemplate(instNodes, instEdges, fakeTemplate.id);
-    setShowAgentGenerator(false);
-  }, [loadTemplate]);
+    // Run validation after template loads to surface any issues
+    setTimeout(() => runValidation(), 10);
+  }, [loadTemplate, runValidation]);
 
   // Handle AI-generated tool → add as custom tool node on canvas
   const handleAddGeneratedTool = useCallback((tool: GeneratedTool) => {
@@ -414,11 +415,12 @@ function App() {
         onOpenTemplates={() => setShowTemplateGallery(true)}
         onOpenToolGenerator={() => setShowToolGenerator(true)}
         onOpenAgentGenerator={() => setShowAgentGenerator(true)}
+        onOpenRegistry={() => setShowRegistry(true)}
       />
 
       <div className="flex-1 relative flex flex-col">
         {/* Top Header Bar */}
-        <div className="h-12 bg-[#232f3e] flex items-center justify-between px-4 z-20">
+        <div className="h-12 bg-[#232f3e] flex items-center justify-between px-4 z-20 border-b border-white/10">
           <div className="flex items-center gap-4">
             <div className="flex items-center gap-2.5">
               <div className="w-7 h-7 rounded-md bg-[#ff9900] flex items-center justify-center">
@@ -441,7 +443,7 @@ function App() {
           <div className="flex items-center gap-3">
             {/* Status indicator */}
             {deployableConfig && (
-              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-500/15 text-emerald-400 rounded text-xs font-medium">
+              <div className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-500/15 text-emerald-300 rounded-md text-xs font-medium border border-emerald-500/20">
                 <div className="w-1.5 h-1.5 bg-emerald-400 rounded-full animate-pulse" />
                 Ready
               </div>
@@ -450,10 +452,11 @@ function App() {
             {/* Phase 2 Gap 2A — Registry (browse/clone agents) */}
             <button
               onClick={() => setShowRegistry(true)}
-              className="px-3 py-1.5 rounded-md text-sm text-white/70 hover:text-white hover:bg-white/10 transition-colors flex items-center gap-1.5"
+              className="px-3 py-1.5 rounded-md text-sm text-white/70 hover:text-white hover:bg-white/10 transition-all duration-150 flex items-center gap-1.5"
               title="Browse the agent registry"
+              aria-label="Browse agent registry"
             >
-              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
               </svg>
               Registry
@@ -461,10 +464,11 @@ function App() {
             {/* Phase 2 Gap 2D — HITL approvals inbox */}
             <button
               onClick={() => setShowHitlInbox(true)}
-              className="px-3 py-1.5 rounded-md text-sm text-white/70 hover:text-white hover:bg-white/10 transition-colors flex items-center gap-1.5"
+              className="px-3 py-1.5 rounded-md text-sm text-white/70 hover:text-white hover:bg-white/10 transition-all duration-150 flex items-center gap-1.5"
               title="Human-in-the-loop approvals"
+              aria-label="Human-in-the-loop approvals inbox"
             >
-              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" />
               </svg>
               Approvals
@@ -475,22 +479,28 @@ function App() {
               onClick={() => setShowDeployPanel(true)}
               disabled={!canDeploy}
               className={`
-                px-4 py-1.5 rounded-md font-medium transition-all flex items-center gap-2 text-sm
+                px-4 py-1.5 rounded-md font-semibold transition-all duration-200 flex items-center gap-2 text-sm
                 ${canDeploy
-                  ? 'bg-[#ff9900] text-[#232f3e] hover:bg-[#ec7211] shadow-sm'
+                  ? 'bg-[#ff9900] text-[#232f3e] hover:bg-[#ec7211] hover:scale-105 active:scale-95'
                   : 'bg-white/10 text-white/30 cursor-not-allowed'}
               `}
+              style={{
+                boxShadow: canDeploy ? '0 1px 2px rgba(0, 0, 0, 0.2), 0 2px 4px rgba(255, 153, 0, 0.3)' : 'none',
+                transitionTimingFunction: 'var(--ease-out-quint)',
+              }}
               title={!canDeploy ? 'Configure a Runtime node first' : 'Deploy to AgentCore'}
+              aria-label={!canDeploy ? 'Configure a Runtime node first' : 'Deploy agent to AgentCore'}
             >
-              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                 <path d="M22 2L11 13" /><path d="M22 2l-7 20-4-9-9-4 20-7z" />
               </svg>
               Deploy
             </button>
             <button
               onClick={() => signOut()}
-              className="px-3 py-1.5 rounded-md text-sm text-white/60 hover:text-white hover:bg-white/10 transition-colors"
+              className="px-3 py-1.5 rounded-md text-sm text-white/60 hover:text-white hover:bg-white/10 transition-all duration-150"
               title="Sign out"
+              aria-label="Sign out"
             >
               Sign out
             </button>
@@ -564,9 +574,12 @@ function App() {
 
           {/* Selected Node Info Card */}
           {selectedNode && (
-            <div className="absolute bottom-4 left-4 z-30 bg-white rounded-lg shadow-md border border-[#e9ebed] p-3.5 min-w-[220px]">
-              <div className="flex items-start gap-2.5">
-                <div className="w-9 h-9 rounded-md bg-[#232f3e] flex items-center justify-center text-white text-base flex-shrink-0">
+            <div
+              className="absolute bottom-4 left-4 z-30 bg-white rounded-xl border border-[#e9ebed] p-4 min-w-[240px]"
+              style={{ boxShadow: 'var(--shadow-md)' }}
+            >
+              <div className="flex items-start gap-3">
+                <div className="w-10 h-10 rounded-lg bg-gradient-to-br from-[#232f3e] to-[#16191f] flex items-center justify-center text-white text-base flex-shrink-0 shadow-sm">
                   {selectedNode.data.componentType === 'runtime' ? '🤖' :
                    selectedNode.data.componentType === 'gateway' ? '🔌' :
                    selectedNode.data.componentType === 'memory' ? '🧠' :
@@ -576,17 +589,19 @@ function App() {
                    selectedNode.data.componentType === 'tool' ? '🔧' : '🔑'}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium text-[#16191f] text-sm truncate">
+                  <div className="font-semibold text-[#16191f] text-sm truncate tracking-tight">
                     {selectedNode.data.label || selectedNode.data.componentType}
                   </div>
-                  <div className="text-xs text-[#5f6b7a] capitalize mt-0.5">
+                  <div className="text-xs text-[#5f6b7a] capitalize mt-1 font-medium">
                     {selectedNode.data.componentType.replace(/_/g, ' ')}
                   </div>
                 </div>
               </div>
               <button
                 onClick={() => handleOpenConfig(selectedNode.id)}
-                className="mt-2.5 w-full py-1.5 px-3 text-sm text-[#0972d3] hover:bg-[#0972d3]/5 rounded-md transition-colors font-medium flex items-center justify-center gap-1.5 border border-[#0972d3]/20"
+                className="mt-3 w-full py-2 px-3 text-sm text-[#0972d3] hover:bg-[#0972d3]/8 active:bg-[#0972d3]/12 rounded-lg transition-all duration-150 font-semibold flex items-center justify-center gap-2 border border-[#0972d3]/25 hover:border-[#0972d3]/40"
+                style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
+                aria-label={`Configure ${selectedNode.data.label || selectedNode.data.componentType}`}
               >
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
@@ -600,20 +615,38 @@ function App() {
           {/* Help hint when no nodes */}
           {nodes.length === 0 && (
             <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="text-center max-w-xs">
-                <div className="w-14 h-14 mx-auto mb-4 rounded-xl bg-[#232f3e] flex items-center justify-center">
-                  <svg className="w-7 h-7 text-[#ff9900]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <div className="text-center max-w-sm px-4">
+                <div
+                  className="w-16 h-16 mx-auto mb-5 rounded-2xl bg-gradient-to-br from-[#232f3e] to-[#16191f] flex items-center justify-center shadow-lg"
+                  style={{ boxShadow: '0 4px 12px rgba(35, 47, 62, 0.2)' }}
+                >
+                  <svg className="w-8 h-8 text-[#ff9900]" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                     <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
                   </svg>
                 </div>
-                <h3 className="text-base font-semibold text-[#16191f] mb-1">Build your workflow</h3>
-                <p className="text-sm text-[#5f6b7a] mb-4">Drag components from the sidebar or start with a template</p>
-                <button
-                  onClick={() => setShowTemplateGallery(true)}
-                  className="pointer-events-auto px-5 py-2 bg-[#0972d3] text-white rounded-md text-sm font-medium hover:bg-[#0961b9] transition-colors"
-                >
-                  Browse templates
-                </button>
+                <h3 className="text-lg font-semibold text-[#16191f] mb-2 tracking-tight">Build your agent workflow</h3>
+                <p className="text-sm text-[#5f6b7a] mb-5 leading-relaxed">
+                  Drag components from the sidebar, start with a template, or let AI generate an agent for you.
+                </p>
+                <div className="flex gap-2 justify-center">
+                  <button
+                    onClick={() => setShowTemplateGallery(true)}
+                    className="pointer-events-auto px-5 py-2.5 bg-[#0972d3] text-white rounded-lg text-sm font-semibold hover:bg-[#0961b9] transition-all duration-150 shadow-sm hover:shadow-md active:scale-95"
+                    style={{
+                      boxShadow: '0 1px 2px rgba(0, 0, 0, 0.1), 0 2px 4px rgba(9, 114, 211, 0.2)',
+                      transitionTimingFunction: 'var(--ease-out-quint)',
+                    }}
+                  >
+                    Browse Templates
+                  </button>
+                  <button
+                    onClick={() => setShowAgentGenerator(true)}
+                    className="pointer-events-auto px-5 py-2.5 bg-white text-[#0972d3] rounded-lg text-sm font-semibold hover:bg-gray-50 transition-all duration-150 border border-[#0972d3]/25 hover:border-[#0972d3]/40 active:scale-95"
+                    style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
+                  >
+                    Generate with AI
+                  </button>
+                </div>
               </div>
             </div>
           )}

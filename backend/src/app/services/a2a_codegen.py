@@ -315,9 +315,9 @@ def call_a2a_peer(peer_url: str, message: str) -> str:
     if not peer_url or not isinstance(peer_url, str):
         return json.dumps({{"status": "ERROR", "error": "peer_url is required"}})
     parsed = urllib.parse.urlparse(peer_url)
-    if parsed.scheme not in ("http", "https"):
+    if parsed.scheme != "https":
         return json.dumps(
-            {{"status": "ERROR", "error": "peer_url must use http or https scheme"}}
+            {{"status": "ERROR", "error": "peer_url must use https scheme"}}
         )
     host = parsed.hostname or ""
     block_reason = _a2a_check_peer_host(host)
@@ -337,12 +337,17 @@ def call_a2a_peer(peer_url: str, message: str) -> str:
         )
 
     invoke_url = (card or {{}}).get("url") or base + "/invocations"
-    # Re-validate the invoke endpoint host (the card may point elsewhere).
+    # Re-validate the invoke endpoint (the card may point elsewhere). It MUST be
+    # https and pass the host denylist — a card pointing at http or an internal
+    # host is fail-closed BLOCKED, never silently followed.
     invoke_parsed = urllib.parse.urlparse(invoke_url)
-    if invoke_parsed.scheme in ("http", "https"):
-        invoke_block = _a2a_check_peer_host(invoke_parsed.hostname or "")
-        if invoke_block is not None:
-            return json.dumps({{"status": "BLOCKED", "error": invoke_block}})
+    if invoke_parsed.scheme != "https":
+        return json.dumps(
+            {{"status": "BLOCKED", "error": "peer invoke url must use https scheme"}}
+        )
+    invoke_block = _a2a_check_peer_host(invoke_parsed.hostname or "")
+    if invoke_block is not None:
+        return json.dumps({{"status": "BLOCKED", "error": invoke_block}})
     elif not invoke_parsed.scheme:
         # Relative URL from the card — resolve against the validated base.
         invoke_url = base + "/" + invoke_url.lstrip("/")

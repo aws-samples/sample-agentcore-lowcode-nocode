@@ -1355,3 +1355,20 @@ netloc/scheme exactly. Applies to BOTH production guards and tests (CodeQL scans
 tests too). Swept the codebase — the only real instance was this test; the
 gateway_deployer discoveryUrl split is trusted self-constructed parsing, not a
 security boundary.
+
+## Bug 142 — CodeQL py/polynomial-redos in HITL tool injection
+
+_maybe_inject_hitl (code_generator.py) used r"tools=\[([^\]]*)\]" to splice
+human_approval into a tools=[...] list. [^\]]* backtracks polynomially on input
+like "tools=[" + "tools=[\\"*N — py/polynomial-redos (high). `args` derives from
+user-influenced generated code, so it's reachable. FIX: replaced with a linear
+str.find scan (find "tools=[", find the next "]", splice). Proven byte-identical
+to the regex across empty/populated/trailing-comma/whitespace cases; 40k
+adversarial input went from polynomial to ~0.1ms.
+LESSON: never use ([^x]*)x or nested quantifiers in a regex over user-influenced
+data — prefer a linear str.find/split scan. Swept the codebase for both this and
+the URL-substring class (Bug 141): remaining matches are safe — anchored
+single-char-class regexes ([^\n]*$) are linear, and the gateway_deployer
+discoveryUrl "in" check is trusted self-constructed parsing, not a boundary.
+CodeQL scans run per-commit and surface alerts one at a time, so sweep proactively
+for the whole vuln class when one instance is flagged rather than waiting.

@@ -37,10 +37,19 @@ def test_dashboard_name_truncated_to_255():
 
 
 def test_console_url_includes_region_and_dashboard():
+    # Parse the URL and assert on its components (host/scheme/query) rather than
+    # substring-matching the host in the raw string — a substring check on an
+    # unparsed URL is the py/incomplete-url-substring-sanitization anti-pattern
+    # (a host could appear at an arbitrary position), so we verify the netloc
+    # exactly via urlparse.
+    from urllib.parse import urlparse, parse_qs
+
     url = dashboard_console_url("us-east-1", "agentcore-myagent")
-    assert "us-east-1.console.aws.amazon.com" in url
-    assert "agentcore-myagent" in url
-    assert "region=us-east-1" in url
+    parsed = urlparse(url)
+    assert parsed.scheme == "https"
+    assert parsed.netloc == "us-east-1.console.aws.amazon.com"
+    assert parse_qs(parsed.query).get("region") == ["us-east-1"]
+    assert "agentcore-myagent" in parsed.fragment
 
 
 def test_dashboard_body_is_valid_json():
@@ -98,7 +107,11 @@ def test_put_dashboard_calls_cloudwatch():
             region="us-east-1",
         )
     assert name == "agentcore-myagent_v1-AbCdEfGh01"
-    assert "cloudwatch/home" in url
+    from urllib.parse import urlparse
+
+    parsed_url = urlparse(url)
+    assert parsed_url.netloc == "us-east-1.console.aws.amazon.com"
+    assert parsed_url.path == "/cloudwatch/home"
     cw.put_dashboard.assert_called_once()
     args = cw.put_dashboard.call_args.kwargs
     assert args["DashboardName"] == name

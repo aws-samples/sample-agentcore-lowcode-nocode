@@ -253,6 +253,14 @@ def handler(event: dict, context) -> dict:
             if strategies:
                 memory_strategies = []
                 for strategy in strategies:
+                    # Canonical shape is a dict {type,name,...} (MemoryStrategyConfig).
+                    # Be defensive: a bare string ("semantic") is coerced to
+                    # {"type": <string>} rather than 500-ing with AttributeError.
+                    if isinstance(strategy, str):
+                        strategy = {"type": strategy}
+                    elif not isinstance(strategy, dict):
+                        logger.warning("Ignoring malformed memory strategy: %r", strategy)
+                        continue
                     strategy_type = strategy.get("type", "semantic").lower()
                     api_key = STRATEGY_KEY_MAP.get(strategy_type)
                     if not api_key:

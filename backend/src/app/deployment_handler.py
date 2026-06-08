@@ -39,6 +39,8 @@ from app.models.deployment_models import (
     TestResponse,
 )
 from app.models.tool_generation_models import (
+    AgentGenerateRequest,
+    AgentGenerateResponse,
     ToolGenerateRequest,
     ToolGenerateResponse,
     ToolTestRequest,
@@ -193,6 +195,48 @@ deployment_app.add_middleware(
     allow_headers=["Content-Type", "Authorization", "X-Amz-Date", "X-Api-Key"],
 )
 
+# Phase 1 Gap 1A — version + slot management endpoints. Mounted on the
+# deployment Lambda because the versions table belongs to the runtime-control
+# plane (same data plane as /api/deploy and /api/test-runtime). API GW routes
+# for /api/runtimes/{name}/versions* are added in infra/stacks/platform_stack.py
+# per the Bug 21 router-enumeration rule.
+from app.routers.versions import router as versions_router  # noqa: E402
+from app.routers.evaluations import router as evaluations_router  # noqa: E402
+from app.routers.registry import router as registry_router  # noqa: E402
+from app.routers.cost import router as cost_router  # noqa: E402
+from app.routers.hitl import router as hitl_router  # noqa: E402
+from app.routers.prompts import router as prompts_router  # noqa: E402  # Phase 3 Gap 3H
+from app.routers.connectors import router as connectors_router  # noqa: E402
+from app.routers.triggers import router as triggers_router  # noqa: E402
+
+deployment_app.include_router(versions_router)
+# Phase 1 Gap 1C — evaluation results endpoint. Mounted on the deployment
+# Lambda because it queries CloudWatch Logs Insights and the AgentCore
+# control plane, both of which the deployment Lambda role already grants.
+deployment_app.include_router(evaluations_router)
+# Phase 2 Gap 2A — agent registry. Mounted here because the deployment
+# Lambda owns the AgentRegistry table grant + already has the auth helper.
+deployment_app.include_router(registry_router)
+# Phase 2 Gap 2B — cost analytics. Queries CloudWatch Logs Insights for
+# per-runtime token/cost rollups (same grant set as evaluations).
+deployment_app.include_router(cost_router)
+# Phase 2 Gap 2D — human-in-the-loop approval queue. Reads the HITL table's
+# owner_sub GSI and decides requests; deployment Lambda has the table grant.
+deployment_app.include_router(hitl_router)
+# Phase 3 Gap 3H — prompt management library. Mounted on the deployment
+# Lambda because it owns the PromptLibrary table grant + already has the auth
+# helper, and the deploy hook resolves prompt refs in this same process.
+deployment_app.include_router(prompts_router)
+# Phase 3 Gap 3E — pre-built connector catalog. Read-only catalog (no tenant
+# data) mounted on the deployment Lambda alongside the gateway tooling. Routes
+# /api/connectors + /api/connectors/{proxy+} are added in platform_stack.py per
+# the Bug 21 router-enumeration rule.
+deployment_app.include_router(connectors_router)
+# Phase 3 Gap 3F — scheduled / event triggers registry. Mounted here because
+# the deployment Lambda owns the TriggersTable grant + the agentcore-trigger/*
+# Secrets Manager grant and already has the get_caller_sub auth helper.
+deployment_app.include_router(triggers_router)
+
 
 @deployment_app.get("/health")
 async def health_check() -> dict:
@@ -224,16 +268,136 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     now = datetime.now(timezone.utc)
     user_id = _get_user_id(raw_request)
 
+    # Phase 1 Gap 1A — versioning. Mint a sortable version_id for this deploy
+    # and resolve the AgentCore-side runtime name (friendly + version suffix)
+    # so each version maps to a distinct AgentCore runtime ARN. The previous
+    # production version, if any, becomes parent_version_id so the version
+    # graph can be reconstructed from DDB without scanning history.
+    from app.services.agent_versions_store import (
+        AgentVersion,
+        get_slots_store,
+        get_versions_store,
+        new_version_id,
+        short_version_suffix,
+    )
+    from app.services.runtime_deployer import sanitize_runtime_name
+
+    friendly_runtime_name = sanitize_runtime_name(
+        request.config.name or f"agent-{deployment_id[:8]}"
+    )
+    version_id = new_version_id()
+    # AgentCore runtime name: 48 char limit, must match [a-zA-Z][a-zA-Z0-9_]{0,47}.
+    # We reserve 9 chars for "_<8-hex>", giving the friendly portion up to 39 chars.
+    suffix = short_version_suffix(version_id)
+    agentcore_runtime_name = f"{friendly_runtime_name[:39]}_{suffix}"
+
+    # Look up the previous production version, if any, to record lineage.
+    # SECURITY (H-1, security review 2026-05-28): the AgentVersionsTable PK is
+    # `runtime_name` and shared across tenants. Before we read the existing
+    # slot row to derive parent_version_id (and before status_update_step
+    # writes a new one) we MUST refuse the deploy if the friendly name is
+    # already owned by a different sub. Without this check, Tenant B can
+    # deploy `config.name="alice_bot"` and clobber Alice's slot row,
+    # locking her out and leaking her version_id via /slots.
+    # See tasks/lessons.md Bug 122.
+    parent_version_id: Optional[str] = None
+    try:
+        slots = get_slots_store().get(friendly_runtime_name)
+        if slots is not None and slots.owner_sub and slots.owner_sub != (user_id or ""):
+            # Cross-tenant collision. Use 409 (not 404) — the existence of the
+            # name is verifiable by trying to deploy it; a 404 here would be
+            # misleading because the name IS in use, just not by this caller.
+            # The owner_sub itself is never returned, so no extra info leaks.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Runtime name '{friendly_runtime_name}' is already in use "
+                    f"by another tenant. Pick a different name."
+                ),
+            )
+        if slots and slots.production_version_id:
+            parent_version_id = slots.production_version_id
+    except HTTPException:
+        raise
+    except Exception:
+        # Slots table may be missing on first deploy of a fresh stack — not fatal.
+        logger.warning("RuntimeSlotsStore.get failed; treating as first deploy",
+                       exc_info=True)
+
+    # Defense in depth: also check the AgentVersions table for any foreign-owner
+    # row under this friendly name. Covers the case where slots may not yet
+    # exist (a partial earlier deploy that never reached status_update) but
+    # the versions table already has rows owned by another sub.
+    try:
+        existing_versions = get_versions_store().list_for_runtime(friendly_runtime_name)
+        for v in existing_versions:
+            if v.owner_sub and v.owner_sub != (user_id or ""):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"Runtime name '{friendly_runtime_name}' is already in use "
+                        f"by another tenant. Pick a different name."
+                    ),
+                )
+    except HTTPException:
+        raise
+    except Exception:
+        logger.warning(
+            "AgentVersionsStore.list_for_runtime failed during ownership check; "
+            "treating as first deploy",
+            exc_info=True,
+        )
+
+    # Phase 3 Gap 3H — resolve a library-prompt reference in config.system_prompt
+    # to its actual body BEFORE the config is serialized into the SFN input.
+    # Tenant-scoped to the deploying caller (owner OR same-org visibility);
+    # an inline-string systemPrompt is left untouched (back-compat). Never
+    # hard-fails: a missing/foreign ref logs and keeps the original value.
+    from app.services.prompt_resolver import resolve_system_prompt
+    resolve_system_prompt(request.config, user_id)
+
     state = DeploymentState(
         deployment_id=deployment_id,
         workflow_id=request.node_id,
         user_id=user_id,
         status=DeploymentStatusEnum.PENDING,
         started_at=now,
+        version_id=version_id,
+        parent_version_id=parent_version_id,
+        deployment_slot=request.deployment_slot or "production",
+        agentcore_runtime_name=agentcore_runtime_name,
     )
 
     store = _get_state_store()
     store.create(state)
+
+    # Persist a *pending* AgentVersion row so partial-failed deploys still
+    # surface in the version history for the UI. status flips to succeeded
+    # in status_update_step on completion. See Bug 85 — every step that
+    # creates a shared resource MUST persist its ID immediately, not wait
+    # for the final status_update.
+    try:
+        get_versions_store().put(
+            AgentVersion(
+                runtime_name=friendly_runtime_name,
+                version_id=version_id,
+                owner_sub=user_id or "",
+                created_at=now.isoformat(),
+                deployment_id=deployment_id,
+                agentcore_runtime_name=agentcore_runtime_name,
+                parent_version_id=parent_version_id,
+                description=request.version_description,
+                status="pending",
+            )
+        )
+    except Exception:
+        # Don't fail the deploy on a versions-table write error — log it and
+        # continue. The deploy itself is still tracked via DeploymentState.
+        logger.exception(
+            "Failed to write initial AgentVersion %s/%s",
+            friendly_runtime_name,
+            version_id,
+        )
 
     # Auto-derive connected_tools from sibling configs so the codegen step
     # always sees the right tool list, even when a caller forgot to include
@@ -247,6 +411,8 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         auto_connected.append("gateway")
     if request.guardrails_config and "guardrails" not in auto_connected:
         auto_connected.append("guardrails")
+    if getattr(request, "a2a_config", None) and "a2a" not in auto_connected:
+        auto_connected.append("a2a")
     if request.observability_config and "observability" not in auto_connected:
         auto_connected.append("observability")
 
@@ -256,6 +422,15 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         "config": request.config.model_dump(mode="json", by_alias=True),
         "connected_tools": auto_connected,
         "template_id": request.template_id,
+        # Phase 1 Gap 1A — every step handler keys S3 paths and AgentCore
+        # runtime names off the version. friendly_runtime_name is the user's
+        # input; agentcore_runtime_name is what we actually pass to AgentCore.
+        "version_id": version_id,
+        "friendly_runtime_name": friendly_runtime_name,
+        "agentcore_runtime_name": agentcore_runtime_name,
+        "deployment_slot": request.deployment_slot or "production",
+        "parent_version_id": parent_version_id,
+        "owner_sub": user_id or "",
     }
     # Only include gateway fields if gateway is configured
     if request.gateway_config:
@@ -280,6 +455,8 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         sfn_input["guardrails_config"] = request.guardrails_config
     if getattr(request, "observability_config", None):
         sfn_input["observability_config"] = request.observability_config
+    if getattr(request, "a2a_config", None):
+        sfn_input["a2a_config"] = request.a2a_config
 
     execution_arn: Optional[str] = None
     try:
@@ -1139,6 +1316,66 @@ async def handle_get_test_result(test_id: str):
 
 
 # ---------------------------------------------------------------------------
+# POST /api/generate-canvas — Phase 1 Gap 1E (NL agent generator)
+# ---------------------------------------------------------------------------
+
+
+@deployment_app.post("/api/generate-canvas", response_model=AgentGenerateResponse, response_model_by_alias=True)
+async def handle_generate_canvas(
+    request: AgentGenerateRequest, raw_request: Request
+) -> AgentGenerateResponse:
+    """Generate an AgentCore canvas spec from a natural-language description.
+
+    Two-turn pattern (mirrors /api/generate-tool):
+    - First call (empty ``conversationHistory``): returns a clarification
+      message asking 2-4 questions about KB sources, memory, tools, etc.
+    - Subsequent calls (history populated): emits a canvas spec via Bedrock
+      tool-use, validated against the structural rules in the generator's
+      prompt. Up to 3 generation attempts with self-correcting validation
+      errors fed back into the next turn.
+
+    The returned ``spec`` is shaped like a frontend WorkflowTemplate (subset
+    used by ``instantiateTemplate``) so the UI can drop it onto the canvas
+    via the existing template-instantiation flow.
+
+    SECURITY (M-1, security review 2026-05-28): every invocation hits
+    Bedrock Converse (~$0.06 per call). API GW throttling is the only
+    rate limit, so we record caller_sub at INFO so abuse is attributable
+    after the fact and surfaces in CloudWatch Insights queries against the
+    deployment Lambda log group.
+    """
+    user_id = _get_user_id(raw_request) or "<no-sub>"
+    logger.info(
+        "generate-canvas invoked by sub=%s prompt_len=%d history_len=%d",
+        user_id,
+        len(request.prompt or ""),
+        len(request.conversation_history or []),
+    )
+    try:
+        from app.services.agent_generator import generate_canvas as _generate
+
+        result = _generate(
+            prompt=request.prompt,
+            conversation_history=request.conversation_history or [],
+            region=config.aws_region,
+        )
+        return AgentGenerateResponse(
+            success=bool(result.get("success")),
+            response_type=result.get("responseType", "spec"),
+            message=result.get("message"),
+            spec=result.get("spec"),
+            error=result.get("error"),
+        )
+    except Exception as exc:
+        logger.exception("generate-canvas failed (sub=%s)", user_id)
+        # Don't leak internal error detail to the client.
+        raise HTTPException(
+            status_code=500,
+            detail={"error": "Canvas generation failed. Check server logs."},
+        ) from exc
+
+
+# ---------------------------------------------------------------------------
 # POST /api/generate-cfn-template
 # ---------------------------------------------------------------------------
 
@@ -1181,6 +1418,51 @@ async def handle_generate_cfn_template(request: DeployRequest):
 
     except Exception as e:
         logger.exception("CFN template generation failed")
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+
+# ---------------------------------------------------------------------------
+# POST /api/export-python  (Phase 3 Gap 3G — eject standalone Python project)
+# ---------------------------------------------------------------------------
+
+
+@deployment_app.post("/api/export-python")
+async def handle_export_python(request: DeployRequest, raw_request: Request):
+    """Export a downloadable, standalone Python agent project.
+
+    Mirrors handle_generate_cfn_template: build the project bundle, zip it,
+    upload to the artifacts bucket and return a 3600s presigned URL (base64
+    fallback when no bucket). Unlike the CFN export, the S3 key is
+    owner-stamped per the tenant-isolation rules.
+    """
+    try:
+        from app.services.python_exporter import build_and_zip
+
+        zip_bytes, deployment_name = build_and_zip(request)
+
+        bucket = os.environ.get("ARTIFACTS_BUCKET_NAME", "")
+        if bucket:
+            caller_sub = _get_user_id(raw_request) or "anonymous"
+            s3_client = boto3.client("s3", region_name=config.aws_region)
+            s3_key = f"python-exports/{caller_sub}/{deployment_name}-{uuid.uuid4().hex[:8]}.zip"
+            s3_client.put_object(Bucket=bucket, Key=s3_key, Body=zip_bytes)
+
+            url = s3_client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": bucket, "Key": s3_key},
+                ExpiresIn=3600,
+            )
+            return {"download_url": url, "filename": f"{deployment_name}-python.zip"}
+
+        import base64
+
+        return {
+            "zip_base64": base64.b64encode(zip_bytes).decode(),
+            "filename": f"{deployment_name}-python.zip",
+        }
+
+    except Exception:
+        logger.exception("Python export failed")
         raise HTTPException(status_code=500, detail="Internal server error")
 
 

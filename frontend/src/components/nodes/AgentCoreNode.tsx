@@ -105,7 +105,7 @@ function AgentCoreNode({ data, selected }: AgentCoreNodeProps) {
   const execState = data.executionState as string | undefined;
 
   return (
-    <div className="relative min-w-[180px]">
+    <div className="relative min-w-[180px] group">
       {/* Execution state badge — outside overflow-hidden container so it's visible */}
       {execState === 'completed' && (
         <div className="absolute -top-1.5 -right-1.5 w-5 h-5 bg-green-500 rounded-full flex items-center justify-center shadow-sm z-10">
@@ -132,14 +132,18 @@ function AgentCoreNode({ data, selected }: AgentCoreNodeProps) {
 
       <div
         className={`
-          rounded-lg border shadow-sm cursor-pointer overflow-hidden
+          rounded-xl border cursor-pointer overflow-hidden
           ${colors.bg} ${colors.border}
-          ${selected ? 'ring-2 ring-[#0972d3] ring-offset-1' : ''}
+          ${selected ? 'ring-2 ring-[#0972d3] ring-offset-1 shadow-md' : 'shadow-sm hover:shadow-md'}
           ${data.validationStatus === 'error' ? 'border-red-500' : ''}
           ${data.validationStatus === 'warning' ? 'border-amber-500' : ''}
           ${execState === 'running' ? 'execution-running' : ''}
-          transition-all duration-150 hover:shadow-md
+          transition-all duration-200
         `}
+        style={{
+          boxShadow: selected ? 'var(--shadow-md)' : 'var(--shadow-sm)',
+          transitionTimingFunction: 'var(--ease-out-quint)',
+        }}
         data-testid={`node-${data.componentType}`}
       >
       {/* Color accent bar at top */}
@@ -167,13 +171,13 @@ function AgentCoreNode({ data, selected }: AgentCoreNodeProps) {
 
       {/* Node Content */}
       <div className="px-3.5 py-2.5">
-        <div className="flex items-center gap-2">
-          <span className="text-lg">{colors.icon}</span>
+        <div className="flex items-center gap-2.5">
+          <span className="text-base leading-none">{colors.icon}</span>
           <div className="flex-1 min-w-0">
-            <div className="font-medium text-[#16191f] text-[13px] truncate">
+            <div className="font-semibold text-[#16191f] text-[13px] truncate tracking-tight leading-tight">
               {data.label || data.componentType}
             </div>
-            <div className="text-[11px] text-[#5f6b7a]">
+            <div className="text-[11px] text-[#5f6b7a] leading-tight mt-0.5">
               {isRuntime && runtimeConfig?.framework ? (
                 <span className="capitalize">{runtimeConfig.framework.replace(/_/g, ' ')}</span>
               ) : isTool && toolConfig?.toolId ? (
@@ -229,8 +233,8 @@ function AgentCoreNode({ data, selected }: AgentCoreNodeProps) {
         style={{ top: '50%' }}
       />
 
-      {/* Double-click hint */}
-      <div className="absolute -bottom-5 left-0 right-0 text-center text-[10px] text-[#8d99a8] opacity-0 hover:opacity-100 transition-opacity">
+      {/* Double-click hint — more discoverable */}
+      <div className="absolute -bottom-6 left-0 right-0 text-center text-[10px] text-[#8d99a8] opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none">
         Double-click to configure
       </div>
       </div>

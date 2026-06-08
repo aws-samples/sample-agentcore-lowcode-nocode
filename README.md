@@ -46,6 +46,36 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 - **Knowledge Base (RAG)** -- Create Bedrock Knowledge Bases with 5 data source types (S3, Web Crawler, Confluence, Salesforce, SharePoint), 3 vector store types (S3 Vectors, OpenSearch Serverless, RDS Aurora PostgreSQL), 3 parsing strategies (Default, Bedrock Data Automation, Foundation Model), 3 chunking strategies (Fixed-Size, Hierarchical, Semantic), custom transformation Lambda, and configurable deletion policy and KMS encryption. The Web Crawler data source filters empty / null seed URLs before submission, BDA parsing auto-attaches `supplementalDataStorageConfiguration` pointing at the artifacts bucket, and S3 Vectors managed mode is the default — with an "Advanced (custom bucket)" toggle in the modal to attach an existing `s3VectorsBucketArn` / `s3VectorsIndexName` / `s3VectorsIndexArn`. Deployed as a Gateway tool target with a per-deployment Lambda for RetrieveAndGenerate.
 - **Full Resource Cleanup** -- Delete from AWS removes Runtime, Gateway, Gateway Targets, Cognito User Pool, custom tool Lambdas, Knowledge Base, Memory, Policy Engine, and Lambda functions.
 
+## Enterprise Platform Capabilities
+
+Beyond the core canvas, the platform layers an enterprise feature set on top of raw AgentCore primitives. Each capability is wired end-to-end (UI → API → Step Functions / store → AWS) and owner-scoped for multi-tenant safety.
+
+### Agent lifecycle & quality
+
+- **Agent Versioning & Rollback** -- Every deploy is an immutable, versioned snapshot. A runtime has `production` / `staging` slots; `GET /api/runtimes/{name}/versions` lists history and `POST .../rollback` promotes the previous version back into production. Lets you ship, compare, and revert without losing prior canvases.
+- **Cedar Policy Enforcement (`ENFORCE`)** -- Attach an AgentCore Policy node to a Gateway and the platform generates schema-correct Cedar (`permit(principal is AgentCore::OAuthUser, action in [Target___tool…], resource == Gateway::"<arn>")`) over the **real** synced tool manifest. Forbidden tools are denied by omission (default-deny); the deploy **fails closed** rather than ever attaching an empty/deny-all engine. Permitted tools return data, forbidden tools are denied at the gateway.
+- **Evaluation Framework** -- Register AgentCore Online Evaluation (built-in goal-success / correctness / helpfulness evaluators + custom judge prompts) at deploy time. `GET /api/runtimes/{name}/evaluations` aggregates per-evaluator scores from the runtime's CloudWatch log group via Logs Insights.
+- **Observability Dashboard** -- Each deploy upserts a per-runtime CloudWatch dashboard (latency, invocations, errors, token usage, tool-call success). `GET /api/runtimes/{name}/dashboard-url` returns the deep link. Platform Lambdas and deployed agents both emit OTLP spans (see [Observability](#observability)).
+- **Cost & Usage Analytics** -- `GET /api/runtimes/{name}/cost` prices `gen_ai.usage.*` token counts from the runtime's logs against a baked Bedrock price table and returns `{total_cost, total_in, total_out, by_model}` for the requested window.
+
+### Authoring & reuse
+
+- **NL Agent Generator (describe → canvas)** -- `POST /api/generate-canvas` turns a natural-language description into a validated canvas spec via Bedrock tool-use (two-turn: clarify → generate). Generated tools are constrained to real built-in tool IDs (or custom tools with an input schema) so a generated agent always deploys with working gateway targets.
+- **Agent Registry with two-persona approval** -- An org-wide catalog to publish, discover, and clone agents as reusable blueprints. **Role-based via Cognito groups**: a `registry-developer` publishes (entry enters `pending`), browses approved entries, and clones approved/own entries — but **cannot approve**; a `registry-admin` sees the pending-review queue, approves/rejects submissions, and can delete any entry. Publish from the Deploy panel; browse/clone from the canvas. See [Registry Roles & Approval](#agent-registry--roles--approval).
+- **Prompt Library** -- Versioned, reusable system prompts (`/api/prompts`) with version history, a promotable default version, and resolve-by-reference at codegen time. A runtime's `systemPrompt` can be an inline string or a `{prompt_id, version_id?}` reference.
+- **Python Code Export ("eject")** -- `POST /api/export-python` returns a standalone, runnable Python project (`agent.py`, `requirements.txt`, `Dockerfile`, `run.sh`, `.env.example`, `README`) so an agent can run independently of the platform. (Companion to the existing CloudFormation export.)
+
+### Integration & automation
+
+- **A2A (Agent-to-Agent)** -- Deploy a runtime that serves a `/.well-known/agent-card.json` and exposes an SSRF-guarded `call_a2a_peer` tool (https-only, host allowlist + IP denylist) so agents can discover and invoke peer agents.
+- **Per-Agent Identity** -- Opt-in `identityConfig.mode=per_agent` mints a distinct least-privilege IAM execution role scoped to exactly the resources an agent is wired to (vs the shared demo role). Roles are tagged `ManagedBy=agentcore-flows` so cleanup is tag-scoped.
+- **Agentic Retrieval** -- Knowledge Base nodes support `retrievalStrategy` of `multi_hop` (LLM query decomposition + iterative retrieve), `hybrid` (vector + keyword, with managed-KB fallback to semantic), or `reranked` (wide retrieve + Claude-judge reorder) beyond simple retrieval.
+- **Scheduled / Event Triggers** -- Register `cron`, `eventbridge`, `s3`, or `webhook` triggers on a runtime (`/api/runtimes/{name}/triggers`). The `target_runtime_arn` is derived server-side from the owned production slot (confused-deputy guard); webhook triggers mint an owner-scoped HMAC secret in Secrets Manager. New triggers are recorded as **`registered`** (not yet firing) until the AWS resource is provisioned — the UI never falsely shows an unwired trigger as active.
+- **Connector Catalog** -- `GET /api/connectors` lists pre-built SaaS connector definitions (tool + credential schema) for discovery; live use supplies credentials via Secrets Manager.
+- **GitOps Sync** -- Store a Git PAT in an owner-scoped Secrets Manager namespace (`/api/workflows/{id}/git-token`) and pull a workflow spec from a repo (`/api/workflows/{id}/git-sync`), preserving id/owner/ACL. SSRF-guarded.
+- **Human-in-the-Loop (HITL)** -- Inject a `human_approval` tool into an agent; pending approvals land in an owner-scoped queue (`GET /api/hitl/pending`, `POST /api/hitl/{id}/decision`) surfaced in the UI inbox.
+- **Team Workspaces & Sharing** -- Share a workflow with viewer/editor roles (`/api/workflows/{id}/share`); list workspace-visible workflows (`GET /api/workspaces`). Owner-only mutation with escalation guards.
+
 ## Security
 
 ### Infrastructure Hardening
@@ -79,6 +109,7 @@ CDK-NAG (`cdk_nag.AwsSolutionsChecks`) runs during every `cdk synth` to flag sec
 - **OTEL secret namespace lock** — User-supplied `auth_header_secret_arn` (per-canvas Observability node) is validated against `^arn:aws:secretsmanager:.*:secret:agentcore-otel/.*` before being granted to the runtime IAM role. Foreign ARNs are rejected at the API boundary; tenant cannot trick the runtime into reading + exfiltrating arbitrary secrets via OTLP headers. Secrets created via `POST /api/observability/credentials` are tagged with `owner_sub` (Cognito sub) so cross-tenant ownership is auditable.
 - **Tenant isolation hardening** — The `X-Test-Sub` header bypass is removed from `services/auth.py`; tests inject sub via FastAPI `dependency_overrides`. `assert_owner` returns 404 for None-owner records (no legacy-data bypass). Flow/workflow listing uses strict `owner_sub == caller_sub` equality (no None-coalescing fallback that previously surfaced legacy rows in every tenant's list).
 - **MCPClient wiring proof gate** — When a runtime is configured with `GATEWAY_URL` but `MCPClient.list_tools_sync()` returns an empty list, the runtime raises `RuntimeError("Gateway MCPClient returned 0 tools…")` at first invocation rather than letting the agent bluff a canary out of the system prompt. Coverage-audit finding #109 (9 silent-canary GW PASSes) is now structurally impossible.
+- **Cedar ENFORCE policy enforcement (fail-closed)** — When a Policy node runs in `ENFORCE` mode, the policy step builds a schema-correct Cedar policy set against the gateway's real MCP tool manifest: one `permit(principal is AgentCore::OAuthUser, action in [AgentCore::Action::"{Target}___{tool}", …], resource == AgentCore::Gateway::"<arn>")` over the **allowed** tools, with forbidden tools **denied by omission** (AgentCore is default-deny, so a lone `forbid` is rejected by Cedar analysis as "Overly Restrictive"). Three guards make the engine fail closed rather than silently deny the tool plane: (1) policy names are **engine-prefixed** because AgentCore policy names are account-global, not engine-scoped — two concurrent deploys emitting the same name no longer collide (Bug 137); (2) on a name conflict the step recovers the existing policy *from this engine* and validates it, or aborts if the name belongs to a foreign engine; (3) before attaching the engine, the step reads it back with `list_policies` and refuses to attach unless **≥1 policy is ACTIVE** — catching any empty-engine path (collision, async drop, eventual consistency) that would otherwise ship a deny-all engine the runtime sees as 0 tools. Verified across three consecutive fresh deploys: permitted tools return real data, forbidden tools are denied, and an empty engine aborts the deploy.
 - **DDB GSI NULL-key safety** — `DeploymentState` serializer omits None-valued optional fields (`runtime_id`, `gateway_url`, `completed_at`, etc.) via `model_dump(mode="json", exclude_none=True)` so the `runtime_id-index` GSI accepts the initial intake write. Pairs with the runtime_id-index GSI for cost-bounded delete/test/invoke lookups.
 - **Frontend ErrorBoundary** — `frontend/src/components/ErrorBoundary.tsx` wraps the app root. A render-time exception shows a recoverable banner with reset/reload buttons instead of a blank screen.
 - **Auto-save error toast** — `useAutoSave` exposes `lastSaveError` so a transient save failure renders a dismissable toast instead of being clobbered by a subsequent successful read.
@@ -511,7 +542,8 @@ The CDK stack (`infra/stacks/platform_stack.py`) creates:
 - **Deployment Lambda** -- Handles deploy initiation, status polling, runtime testing, runtime deletion (full cleanup), AI tool generation via Claude Sonnet on Bedrock, and CloudFormation template generation/export. 120s timeout for LLM calls.
 - **Step Functions State Machine** -- Orchestrates multi-step deployments: validate -> [mcp_server?] -> [knowledge_base?] -> [gateway?] -> [memory?] -> [policy?] -> codegen -> IAM -> runtime configure -> runtime launch -> [evaluation?] -> [auth?] -> status update. 3 retries with exponential backoff per step.
 - **Step Lambdas** -- Individual Lambda functions for each deployment step (validate, codegen, IAM, gateway, knowledge_base, mcp_server, memory, policy, evaluation, runtime_configure, runtime_launch, auth, status_update).
-- **DynamoDB Tables** -- Workflows table + Deployments table (with TTL and GSI on workflow_id).
+- **DynamoDB Tables** -- Workflows + Deployments (TTL + GSI on workflow_id/runtime_id), plus the enterprise-feature stores: `agent-versions`, `runtime-slots`, `agent-registry`, `prompt-library`, `hitl-requests` (24h TTL), `triggers`, `usage-events` (90d TTL), and `flows`. Each user-data table carries an `owner_sub` GSI for owner-scoped list queries.
+- **Cognito User Pool Groups** -- `registry-admin` and `registry-developer` for the registry two-persona approval model (see [Agent Registry — Roles & Approval](#agent-registry--roles--approval)).
 - **S3 Bucket** -- Frontend static assets (CloudFront OAI access only) + AgentCore dependency bundles + deployment code artifacts.
 - **CloudFront Distribution** -- HTTPS, SPA routing (404/403 -> index.html), API Gateway as additional origin for `/api/*`.
 - **SSM Parameters** -- CORS origins, AWS region, DynamoDB table name under `/agentcore-workflow/{env}/`.
@@ -671,6 +703,47 @@ The CFN generator supports both built-in templates (all 7) and free-form diagram
 | + Policy Engine | Policy Engine (attached to Gateway) |
 | + MCP Server | Second Runtime (MCP protocol), MCP Server code, OAuth2 Credential Provider |
 
+## Agent Registry — Roles & Approval
+
+The registry turns a deployed agent into a reusable, governed blueprint others can discover and clone. It uses a **two-persona model driven entirely by Cognito groups** — no separate auth system.
+
+### Personas
+
+| Persona | Cognito group | Can do | Cannot do |
+|---------|---------------|--------|-----------|
+| **Developer** | `registry-developer` (or any signed-in user) | Publish (entry enters `pending`); view **approved** entries + their **own** (any status); clone approved/own; edit/delete their own | Approve or reject; see other users' pending entries |
+| **Admin** | `registry-admin` (legacy `org-admin` also honored) | Everything a developer can, **plus**: see the pending-review queue, approve/reject submissions, delete any entry | — |
+
+### Entry lifecycle
+
+```
+developer publishes ──▶ pending ──▶ (admin approves) ──▶ approved ──▶ visible + clonable org-wide
+                           │
+                           └──▶ (admin rejects, optional reason) ──▶ rejected
+```
+
+- New publishes start `pending` and are invisible to other developers until approved.
+- A non-admin edit (`PUT`) of an approved entry resets it to `pending` (re-review). Admin edits preserve status.
+- Backward-compatible: entries created before this feature (no `status` attribute) deserialize as `approved`, so nothing already published disappears.
+
+### Authorization rules (enforced server-side)
+
+- Admin status is read from the caller's `cognito:groups` JWT claim (`auth.is_registry_admin`); the frontend reads the same claim to show/hide the admin "Pending review" UI.
+- **RBAC-role denial returns `403`** (e.g. a developer calling `approve`); **cross-tenant / not-visible returns `404`** (never disclosing existence). These are kept strictly distinct.
+- Before attaching, the server reads the engine/entry back from the store — a defense-in-depth ground-truth check, not a client-supplied flag.
+
+### Assigning personas
+
+```bash
+# Create the two Cognito groups (the CDK stack also defines them at deploy time)
+aws cognito-idp admin-add-user-to-group \
+  --user-pool-id <POOL_ID> --username alice@example.com --group-name registry-admin
+aws cognito-idp admin-add-user-to-group \
+  --user-pool-id <POOL_ID> --username bob@example.com   --group-name registry-developer
+```
+
+In the UI: developers click **Publish to Registry** in the Deploy panel after a deploy, and **Registry** in the component palette to browse and **Clone to Canvas**. Admins additionally see a **Pending review** tab with Approve / Reject actions.
+
 ## Deployment Templates
 
 ### Template 1: Web Search Agent (Beginner)
@@ -737,9 +810,35 @@ The CFN generator supports both built-in templates (all 7) and free-form diagram
 |   |   |   +-- workflows.py              # Workflow CRUD + import/export (owner-scoped)
 |   |   |   +-- flows.py                  # Flow CRUD (owner-scoped)
 |   |   |   +-- observability.py          # Credential bootstrap + GET /platform-defaults
+|   |   |   +-- versions.py               # Agent versioning + slots + rollback
+|   |   |   +-- evaluations.py            # Online-eval config + scores + dashboard URL
+|   |   |   +-- cost.py                   # Per-runtime token + cost rollups
+|   |   |   +-- triggers.py               # cron/eventbridge/s3/webhook triggers
+|   |   |   +-- registry.py               # Agent registry + two-persona approval (RBAC)
+|   |   |   +-- prompts.py                # Prompt library (versions + promote + resolve)
+|   |   |   +-- hitl.py                    # Human-in-the-loop approval queue
+|   |   |   +-- connectors.py             # Pre-built SaaS connector catalog (read-only)
+|   |   |   +-- workspaces.py             # Workflow sharing + workspace listing (ACL)
+|   |   |   +-- git_sync.py               # GitOps: store PAT + pull workflow spec
 |   |   +-- services/
 |   |   |   +-- config.py                 # AppConfig -- SSM Parameter Store / env var loader
-|   |   |   +-- auth.py                   # JWT sub extraction + assert_owner tenant guard
+|   |   |   +-- auth.py                   # JWT sub + assert_owner tenant guard + is_registry_admin (Cognito-group RBAC)
+|   |   |   +-- agent_versions_store.py   # Versions + RuntimeSlots store (DDB)
+|   |   |   +-- registry_store.py         # Agent registry store (status/approval, DDB)
+|   |   |   +-- prompt_library_store.py   # Prompt library store (DDB)
+|   |   |   +-- hitl_store.py             # HITL request store (DDB, 24h TTL)
+|   |   |   +-- trigger_store.py          # Trigger store (DDB)
+|   |   |   +-- cost_tracking.py          # gen_ai.usage parsing + Bedrock price table
+|   |   |   +-- observability_dashboard.py # Per-runtime CloudWatch dashboard builder
+|   |   |   +-- agent_generator.py        # NL description → validated canvas spec (Bedrock tool-use)
+|   |   |   +-- python_exporter.py        # Standalone Python project "eject" bundle
+|   |   |   +-- a2a_codegen.py            # A2A agent-card + SSRF-guarded call_a2a_peer tool
+|   |   |   +-- agentic_rag_codegen.py    # multi-hop / hybrid / reranked retrieval tools
+|   |   |   +-- per_agent_identity.py     # Per-agent least-privilege IAM role builder
+|   |   |   +-- connectors_catalog.py     # Connector definitions (tool + credential schema)
+|   |   |   +-- workspace_acl.py          # Workflow share/ACL logic
+|   |   |   +-- git_sync.py               # Git PAT (Secrets Manager) + SSRF-guarded repo fetch
+|   |   |   +-- guardrail_builders.py     # Contextual grounding / regex / injection-defense configs
 |   |   |   +-- _otel_platform.py         # Module-load OTel SDK bootstrap (imported first by every Lambda handler)
 |   |   |   +-- observability.py          # build_otel_env_vars + get_platform_observability_defaults
 |   |   |   +-- dynamodb_storage.py       # DynamoDB workflow storage adapter
@@ -780,14 +879,18 @@ The CFN generator supports both built-in templates (all 7) and free-form diagram
 +-- frontend/
 |   +-- src/
 |   |   +-- components/
-|   |   |   +-- ai/                       # ToolGeneratorPanel (AI-powered tool creation chat)
+|   |   |   +-- ai/                       # ToolGeneratorPanel + AgentGeneratorPanel (NL → canvas)
 |   |   |   +-- canvas/                   # WorkflowCanvas (React Flow)
-|   |   |   +-- deploy/                   # DeployButton, DeployPanel, DeploymentModal
-|   |   |   +-- modals/                   # Runtime/Gateway/Identity/Knowledge Base config modals
+|   |   |   +-- deploy/                   # DeployPanel + tabs: VersionsList, EvaluationResultsPanel,
+|   |   |   |                             #   ObservabilityPanel, CostPanel, TriggersPanel; Publish-to-Registry
+|   |   |   +-- modals/                   # Runtime/Gateway/Identity/KB/Policy/Guardrails/Memory/Observability/
+|   |   |   |                             #   Evaluation/A2A config modals + Registry, PromptLibrary, Hitl inbox,
+|   |   |   |                             #   ConnectorPicker
 |   |   |   |   +-- kb/                   # Knowledge Base sub-components (DataSourceFields, VectorStoreFields, AdvancedFields)
 |   |   |   +-- nodes/                    # AgentCoreNode component
-|   |   |   +-- palette/                  # ComponentPalette (drag source + AI Tool Generator button)
+|   |   |   +-- palette/                  # ComponentPalette (drag source + AI Tool Generator + Registry buttons)
 |   |   |   +-- templates/                # TemplateGallery
+|   |   +-- auth/useIsRegistryAdmin.ts    # Reads cognito:groups from the ID token for registry RBAC
 |   |   +-- data/templates.ts             # Template definitions
 |   |   +-- store/workflowStore.ts        # Zustand state management
 |   |   +-- services/api.ts               # Backend API client (configurable base URL)
@@ -858,6 +961,76 @@ The CFN generator supports both built-in templates (all 7) and free-form diagram
 |--------|----------|-------------|
 | `GET` | `/api/observability/platform-defaults` | Returns `{enabled, endpoint, sample_rate}` so the UI can render the Observability node read-only when platform OTEL is configured. Never returns the secret ARN. |
 | `POST` | `/api/observability/credentials` | Stores OTLP auth credentials in Secrets Manager and returns the secret ARN. |
+
+### Versioning & Slots
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/runtimes/{name}/versions` | List a runtime's version history (newest first) |
+| `GET` | `/api/runtimes/{name}/slots` | Get the production / staging slot pointers |
+| `POST` | `/api/runtimes/{name}/rollback` | Promote the previous production version back into production |
+
+### Evaluation, Cost & Observability (runtime-scoped)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/runtimes/{name}/evaluation-config` | Registered Online Evaluation config (evaluator IDs + sampling rate) |
+| `GET` | `/api/runtimes/{name}/evaluations?hours=` | Per-evaluator score time-series from CloudWatch Logs Insights |
+| `GET` | `/api/runtimes/{name}/dashboard-url` | Deep link to the auto-generated CloudWatch dashboard |
+| `GET` | `/api/runtimes/{name}/cost?from=&to=` | Token + estimated-cost rollup by model for the window |
+
+### Triggers (runtime-scoped)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/runtimes/{name}/triggers` | Register a `cron` / `eventbridge` / `s3` / `webhook` trigger (target ARN derived server-side; created as `registered`) |
+| `GET` | `/api/runtimes/{name}/triggers` | List the runtime's triggers |
+| `DELETE` | `/api/runtimes/{name}/triggers/{id}` | Delete a trigger |
+
+### Agent Registry
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/registry` | Publish an agent blueprint (enters `pending` review) |
+| `GET` | `/api/registry?q=&tag=&scope=all\|mine\|public\|pending` | Search/list visible entries (admins can list `pending`) |
+| `GET` | `/api/registry/{slug}` | Get one entry (visibility/approval-checked, 404 if not visible) |
+| `POST` | `/api/registry/{slug}/clone` | Clone an approved/own entry's canvas to the caller |
+| `PUT` | `/api/registry/{slug}` | Update metadata (owner only; non-admin edit resets to `pending`) |
+| `DELETE` | `/api/registry/{slug}` | Delete (owner **or** `registry-admin`) |
+| `POST` | `/api/registry/{slug}/approve` | **Admin only** — approve a pending entry (403 otherwise) |
+| `POST` | `/api/registry/{slug}/reject` | **Admin only** — reject with optional reason (403 otherwise) |
+
+### Prompt Library
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/prompts` | Create a prompt (seeds v1) |
+| `GET` | `/api/prompts` | List visible prompts |
+| `GET` / `PUT` / `DELETE` | `/api/prompts/{name}` | Get / update / delete a prompt |
+| `POST` | `/api/prompts/{name}/versions` | Append a new version |
+| `POST` | `/api/prompts/{name}/promote/{version_id}` | Pin the default version |
+| `GET` | `/api/prompts/{name}/resolve?version=` | Resolve `{version_id, body}` (used at codegen) |
+
+### HITL, Connectors, Workspaces & GitOps
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/hitl/pending` | Caller's pending human-approval queue |
+| `POST` | `/api/hitl/{request_id}/decision` | Approve / reject a pending approval |
+| `GET` | `/api/connectors` | List pre-built SaaS connector definitions |
+| `GET` | `/api/connectors/{id}` | Connector tool + credential schema |
+| `POST` | `/api/workflows/{id}/share` | Share a workflow (viewer/editor; owner only) |
+| `DELETE` | `/api/workflows/{id}/share/{sub}` | Revoke a share |
+| `GET` | `/api/workspaces` | List workspace-visible workflows with effective role |
+| `POST` | `/api/workflows/{id}/git-token` | Store a Git PAT (owner-scoped Secrets Manager) |
+| `POST` | `/api/workflows/{id}/git-sync` | Pull a workflow spec from Git (SSRF-guarded) |
+
+### NL Agent Generation & Code Export
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/api/generate-canvas` | NL description → validated canvas spec (Bedrock tool-use, clarify → generate) |
+| `POST` | `/api/export-python` | Download a standalone runnable Python agent project (presigned S3 zip) |
 
 ## Running Tests
 

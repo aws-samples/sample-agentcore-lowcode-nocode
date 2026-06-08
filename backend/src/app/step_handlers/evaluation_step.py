@@ -138,6 +138,24 @@ def handler(event: dict, context) -> dict:
                                     "logs:CreateLogGroup",
                                     "logs:PutLogEvents",
                                     "logs:CreateLogStream",
+                                    # AgentCore Online Evaluation reads X-Ray
+                                    # spans (aws/spans index) and CloudWatch
+                                    # Application Signals to extract per-step
+                                    # traces. Without these, CreateOnlineEvaluationConfig
+                                    # returns AccessDeniedException with
+                                    # "Access denied when accessing index policy
+                                    # for aws/spans". See lessons.md Bug 119.
+                                    "xray:GetIndexingRules",
+                                    "xray:GetTraceSummaries",
+                                    "xray:BatchGetTraces",
+                                    "xray:GetTraceGraph",
+                                    "xray:GetGroup",
+                                    "xray:GetGroups",
+                                    "xray:GetServiceGraph",
+                                    "xray:GetSamplingRules",
+                                    "application-signals:Get*",
+                                    "application-signals:List*",
+                                    "application-signals:BatchGet*",
                                 ],
                                 "Resource": "*",
                             }
@@ -152,8 +170,11 @@ def handler(event: dict, context) -> dict:
         # Build evaluator configs — list of dicts with evaluatorId key
         evaluators = [{"evaluatorId": ev} for ev in evaluator_list]
 
-        # Build log group name for the runtime
-        log_group_name = f"/aws/bedrock-agentcore/runtimes/{agent_id}"
+        # Build log group name for the runtime. Bug 139: AgentCore Runtime emits
+        # its invocation logs (incl. gen_ai.* spans) to the "-DEFAULT" endpoint log
+        # group — the same group cost + the dashboard read. Without the suffix the
+        # eval config watched an empty group and the evaluations panel stayed blank.
+        log_group_name = f"/aws/bedrock-agentcore/runtimes/{agent_id}-DEFAULT"
 
         # Create online evaluation config
         try:

@@ -83,6 +83,8 @@ def handler(event: dict, context) -> dict:
         gateway_config = event.get("gateway_config")
         gateway_tools = event.get("gateway_tools") or []
         custom_tools = event.get("custom_tools") or []
+        a2a_config = event.get("a2a_config") or {}
+        kb_config = event.get("knowledge_base_config") or {}
 
         # Merge gateway_result (from gateway step) into gateway_config
         # so code generator gets the real Cognito credentials + gateway URL
@@ -119,6 +121,8 @@ def handler(event: dict, context) -> dict:
             gateway_tools=gateway_tools,
             custom_tools=custom_tools,
             observability_enabled=observability_enabled,
+            a2a_config=a2a_config,
+            kb_config=kb_config,
         )
         requirements_txt = generate_requirements(
             config=config,
@@ -127,18 +131,29 @@ def handler(event: dict, context) -> dict:
             gateway_tools=gateway_tools,
         )
 
-        # Upload to S3 using a STABLE prefix keyed on the runtime name, not
-        # the per-deploy UUID. Why: AgentCore's IAM cache for the runtime exec
-        # role is keyed on (role, S3 prefix). A fresh prefix per deploy
-        # triggers a 17-20 minute cache-population race on every deploy.
-        # Same prefix across redeploys means AgentCore caches once per agent
-        # and subsequent updates skip the race entirely. See lessons Bug 61.
+        # Upload to S3 using a per-version prefix. Bug 61 originally used a
+        # stable prefix keyed on the friendly runtime name to ride out the
+        # AgentCore IAM cache, but Bug 63 isolated the real cause to an S3
+        # region cache 301 transient that the runtime_deployer retries on
+        # _create_with_transient_retry. With versioning (Phase 1 Gap 1A) we
+        # keep code.zip per-version so rollback can re-point at a previous
+        # version's code without redeploy. The retry budget covers the cache
+        # miss on the first deploy of each new version_id.
         from app.services.runtime_deployer import sanitize_runtime_name
-        runtime_name = sanitize_runtime_name(config.name or f"agent-{deployment_id[:8]}")
+
+        friendly_runtime_name = event.get("friendly_runtime_name") or sanitize_runtime_name(
+            config.name or f"agent-{deployment_id[:8]}"
+        )
+        version_id = event.get("version_id") or ""
         bucket = _get_env("ARTIFACTS_BUCKET_NAME", "")
         region = _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
         entrypoint = config.entrypoint or "agent.py"
-        s3_key = f"deployments/by-name/{runtime_name}/code.zip"
+        if version_id:
+            s3_key = f"deployments/by-name/{friendly_runtime_name}/v/{version_id}/code.zip"
+        else:
+            # Back-compat for any caller that bypasses the deployment handler
+            # (e.g. legacy direct deploys). Falls back to the pre-versioning prefix.
+            s3_key = f"deployments/by-name/{friendly_runtime_name}/code.zip"
 
         # Select bundle based on generated code: strands-mcp.zip (43MB) only
         # when code imports strands, otherwise base.zip (18MB) to stay within

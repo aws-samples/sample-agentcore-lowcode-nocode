@@ -197,6 +197,17 @@ class WorkflowDefinition(BaseModel):
     # Cognito sub of the user who created this workflow. None for pre-tenancy
     # records (legacy data). See services/auth.py + tasks/lessons.md Bug 37.
     owner_sub: Optional[str] = None
+    # Gap 2E team collaboration: optional shared-workspace id + ACL.
+    # acl shape: {"owner_sub": str, "editors": [sub], "viewers": [sub]}.
+    # None == legacy/owner-only. Parsed via services.workspace_acl.Acl.
+    workspace_id: Optional[str] = None
+    acl: Optional[dict] = None
+    # Gap 3D GitOps: {repo_url, branch, path, token_ref}. token_ref is a Secrets
+    # Manager ARN in the owner-scoped agentcore-git/ namespace; the raw PAT is
+    # NEVER stored here. None == not git-backed. Kept a loose dict (like acl) so
+    # model_validate of legacy rows never breaks; git_sync.validate_git_source
+    # does the structural validation server-side before any fetch.
+    git_source: Optional[dict] = None
 
     @model_validator(mode="after")
     def validate_edge_references(self) -> "WorkflowDefinition":

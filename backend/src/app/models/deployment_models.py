@@ -169,6 +169,19 @@ class DeploymentState(BaseModel):
     runtime_arn: Optional[str] = None  # Full ARN of the deployed runtime
     error_details: Optional[str] = None
     ttl: Optional[int] = None  # Unix epoch for DynamoDB TTL (30 days from started_at)
+    # Phase 1 Gap 1A — versioning. Every deploy mints a sortable version_id.
+    # ``parent_version_id`` is the version this deploy supersedes (None for the
+    # first deploy of a friendly runtime name). ``deployment_slot`` is the
+    # slot the user requested for this version; the actual production slot is
+    # the source-of-truth in RuntimeSlotsTable, mutable via /promote /rollback.
+    version_id: Optional[str] = None
+    parent_version_id: Optional[str] = None
+    deployment_slot: Optional[Literal["staging", "production"]] = None
+    # The AgentCore-side runtime name (friendly + version suffix). Distinct
+    # from ``runtime_id`` (the AgentCore-assigned id) and ``RuntimeConfig.name``
+    # (the user-facing friendly name). Stored explicitly so the delete path
+    # can resolve it without reconstructing the suffix.
+    agentcore_runtime_name: Optional[str] = None
 
 
 # ============================================================================
@@ -315,6 +328,12 @@ class IdentityConfig(BaseModel):
 
     provider: str = "cognito"
     client_id: str = Field(alias="clientId", default="")
+    # Gap P3.3B — per-agent identity. mode == 'per_agent' opts this runtime into
+    # a least-privilege per-runtime IAM execution role (minted by iam_step);
+    # mode == 'shared' (the default) keeps the Bug-60 stack shared role. The
+    # 'shared' default guarantees absent/legacy callers are unaffected.
+    mode: Literal["shared", "per_agent"] = "shared"
+    scope: Optional[str] = None
     client_secret_ref: str = Field(alias="clientSecretRef", default="")
     discovery_url: str = Field(alias="discoveryUrl", default="")
     scopes: list[str] = Field(default_factory=list)
@@ -353,6 +372,17 @@ class DeployRequest(BaseModel):
     knowledge_base_config: Optional[dict] = Field(alias="knowledgeBaseConfig", default=None)
     guardrails_config: Optional[dict] = Field(alias="guardrailsConfig", default=None)
     observability_config: Optional[dict] = Field(alias="observabilityConfig", default=None)
+    a2a_config: Optional[dict] = Field(alias="a2aConfig", default=None)
+    # Phase 1 Gap 1A — versioning. Caller can pin the slot this deploy lands
+    # on; default is "production". Version_id is server-minted (we never trust
+    # client-supplied ids) but ``description`` is captured for the version
+    # history UI.
+    deployment_slot: Optional[Literal["staging", "production"]] = Field(
+        alias="deploymentSlot", default="production"
+    )
+    version_description: Optional[str] = Field(
+        alias="versionDescription", default=None, max_length=500
+    )
 
     @model_validator(mode="after")
     def _check_kb_config(self) -> "DeployRequest":

@@ -172,6 +172,127 @@ def _validate_discovery_url(url: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_gateway_tool_actions(
+    agentcore_ctrl, gateway_id: str, timeout: int = 180
+) -> tuple[list, int]:
+    """Return (qualified Cedar action names, expected_tool_count) for a gateway,
+    waiting up to *timeout*s for EACH target to be truly SYNCED into the gateway's
+    servable MCP tool plane.
+
+    Bug 134/race-A: `inlinePayload` is the CONFIGURED schema (echoed back the
+    instant the target exists) — it does NOT prove the gateway has synced those
+    tools into the plane the agent discovers via tools/list. The authoritative
+    per-target signal is `lastSynchronizedAt` (only on get_gateway_target, not on
+    list_gateway_targets items). We synchronize, then poll each target until
+    status==READY AND lastSynchronizedAt has advanced past its pre-sync value, so
+    the manifest the Cedar policy is built from == the plane the agent will
+    discover. We also return how many tools the gateway CONFIGURED so the policy
+    step can fail-closed on a partial (synced < configured) plane.
+    """
+    import time as _t
+
+    def _list_target_ids() -> list:
+        try:
+            resp = agentcore_ctrl.list_gateway_targets(
+                gatewayIdentifier=gateway_id, maxResults=50
+            )
+            items = resp.get("items", resp.get("gatewayTargetSummaries", []))
+            return [
+                (t.get("name", ""), t.get("targetId") or t.get("gatewayTargetId"))
+                for t in items
+                if t.get("name") and (t.get("targetId") or t.get("gatewayTargetId"))
+            ]
+        except Exception as e:  # noqa: BLE001
+            logger.warning("list_gateway_targets failed (will retry): %s", e)
+            return []
+
+    def _configured_tools(detail: dict) -> list:
+        tc = detail.get("targetConfiguration", {}) or {}
+        mcp = tc.get("mcp", {}) or {}
+        schema = (mcp.get("lambda", {}) or {}).get("toolSchema", {}) or {}
+        return schema.get("inlinePayload", []) or []
+
+    # Snapshot pre-sync timestamps so we can require lastSynchronizedAt to ADVANCE
+    # (a target may carry a stale sync time from a prior deploy of a reused gw).
+    pre_sync = {}
+    for _tname, tid in _list_target_ids():
+        try:
+            d = agentcore_ctrl.get_gateway_target(
+                gatewayIdentifier=gateway_id, targetId=tid
+            )
+            pre_sync[tid] = d.get("lastSynchronizedAt")
+        except Exception:  # noqa: BLE001
+            pre_sync[tid] = None
+
+    try:
+        agentcore_ctrl.synchronize_gateway_targets(gatewayIdentifier=gateway_id)
+    except Exception as e:  # noqa: BLE001
+        logger.info("synchronize_gateway_targets (non-fatal) for %s: %s", gateway_id, e)
+
+    deadline = _t.time() + timeout
+    actions = []
+    expected = 0
+    while _t.time() < deadline:
+        actions = []
+        expected = 0
+        all_synced = True
+        ids = _list_target_ids()
+        if not ids:
+            all_synced = False
+        for tname, tid in ids:
+            try:
+                detail = agentcore_ctrl.get_gateway_target(
+                    gatewayIdentifier=gateway_id, targetId=tid
+                )
+            except Exception:  # noqa: BLE001
+                all_synced = False
+                continue
+            tools = _configured_tools(detail)
+            expected += len(tools)
+            tstatus = (detail.get("status") or "").upper()
+            synced_at = detail.get("lastSynchronizedAt")
+            # Readiness depends on the target TYPE:
+            #  - INLINE-payload Lambda targets declare their tools inline, so they
+            #    are servable as soon as status==READY. They NEVER get a
+            #    lastSynchronizedAt (that timestamp is only set for targets whose
+            #    tool list is CRAWLED — OpenAPI specs / external MCP servers).
+            #    Requiring lastSynchronizedAt here was the bug: an inline-Lambda
+            #    target stays READY with lastSynchronizedAt=None forever, so the
+            #    poll always timed out at 0/N (verified live).
+            #  - CRAWLED targets (no inlinePayload) ARE only servable once
+            #    lastSynchronizedAt is present and (for reused gateways) advanced.
+            is_inline = bool(tools)
+            if is_inline:
+                target_synced = tstatus == "READY"
+            else:
+                target_synced = (
+                    tstatus in ("READY", "ACTIVE")
+                    and synced_at is not None
+                    and synced_at != pre_sync.get(tid)
+                )
+            if not target_synced:
+                all_synced = False
+                continue
+            for tool in tools:
+                nm = tool.get("name")
+                if nm:
+                    actions.append(f"{tname}___{nm}")
+        # Done when every configured target is synced AND every configured tool
+        # is present in the action list.
+        if ids and all_synced and len(actions) == expected and expected > 0:
+            logger.warning(
+                "Gateway %s tool plane synced: %d/%d tools", gateway_id, len(actions), expected
+            )
+            return actions, expected
+        _t.sleep(5)
+
+    logger.warning(
+        "Gateway %s tool plane not fully synced within %ds; %d/%d tools synced",
+        gateway_id, timeout, len(actions), expected,
+    )
+    return actions, expected
+
+
 def _get_targets_from_response(response: dict) -> list:
     """Extract targets list from list_gateway_targets response.
 
@@ -826,7 +947,24 @@ def _create_or_update_lambda(
     description: str,
     gateway_role_arn: Optional[str] = None,
 ) -> str:
-    """Create or update a Lambda function. Returns the function ARN."""
+    """Create or update a Lambda function. Returns the function ARN.
+
+    These tool Lambdas (AgentCoreCustomerSupportTools / AgentCoreDynamicTools) are
+    SHARED SINGLETONS reused across every gateway deploy. Each gateway has its OWN
+    execution role (AgentCoreGateway-<gatewayId>), and the gateway invokes the
+    Lambda using that role — so the Lambda's resource policy MUST grant
+    lambda:InvokeFunction to EVERY gateway role that uses it, not just the first
+    one that created the function.
+
+    Bug 134/stability: previously the invoke permission was added ONLY on the
+    create path. The 2nd+ gateway hit ResourceConflictException (function exists),
+    updated the code, and NEVER added its own role to the policy — so its
+    gateway could not invoke the Lambda, the gateway served 0 tools over MCP, and
+    the agent's tools/list came up empty (the "works on run #1, 0 tools on run
+    #2/#3" flake — same target config, different gateway role missing from the
+    Lambda policy). Fix: ALWAYS add the per-gateway-role permission (unique
+    StatementId per role), on both create and reuse paths.
+    """
     try:
         resp = lambda_client.create_function(
             FunctionName=function_name,
@@ -839,20 +977,27 @@ def _create_or_update_lambda(
             MemorySize=256,
         )
         lambda_arn = resp["FunctionArn"]
-        if gateway_role_arn:
-            try:
-                lambda_client.add_permission(
-                    FunctionName=function_name,
-                    StatementId="AllowAgentCoreInvoke",
-                    Action="lambda:InvokeFunction",
-                    Principal=gateway_role_arn,
-                )
-            except lambda_client.exceptions.ResourceConflictException:
-                pass
     except lambda_client.exceptions.ResourceConflictException:
         lambda_client.update_function_code(FunctionName=function_name, ZipFile=zip_bytes)
         resp = lambda_client.get_function(FunctionName=function_name)
         lambda_arn = resp["Configuration"]["FunctionArn"]
+
+    # ALWAYS grant the invoking gateway role (idempotent, per-role StatementId) so
+    # a shared Lambda reused by a NEW gateway still authorizes that gateway.
+    if gateway_role_arn:
+        # StatementId must be unique per principal + match ^[A-Za-z0-9-_]+$.
+        role_name = gateway_role_arn.rsplit("/", 1)[-1]
+        stmt_id = re.sub(r"[^A-Za-z0-9_-]", "-", f"AllowAgentCoreInvoke-{role_name}")[:100]
+        try:
+            lambda_client.add_permission(
+                FunctionName=function_name,
+                StatementId=stmt_id,
+                Action="lambda:InvokeFunction",
+                Principal=gateway_role_arn,
+            )
+            logger.info("Granted %s invoke on %s", role_name, function_name)
+        except lambda_client.exceptions.ResourceConflictException:
+            pass  # this gateway role is already permitted — fine
 
     for _ in range(30):
         fn = lambda_client.get_function(FunctionName=function_name)
@@ -1107,6 +1252,84 @@ def get_cognito_token(client_info: dict) -> str:
     raise RuntimeError(f"Token request failed: {resp.status} {resp.data.decode()}")
 
 
+def _count_served_tools(gateway_url: str, client_info: dict) -> int:
+    """Return how many tools the gateway ACTUALLY serves over MCP tools/list.
+
+    Bug 134: a Lambda gateway target can reach status=READY with a fully
+    configured inlinePayload, yet the gateway's MCP plane serves an EMPTY tool
+    list (a service-side propagation flake confirmed live — identical configs,
+    one gateway serves tools forever, another serves 0 forever). The ONLY
+    client-observable truth is the gateway's own tools/list. We probe it with the
+    gateway's M2M token (the same path the agent uses) so deploy-time readiness
+    means "the agent will see tools", not just "status READY". Returns -1 on a
+    transport/auth error (caller treats as not-yet-ready, keeps polling).
+    """
+    import urllib3
+    try:
+        import certifi
+        http = urllib3.PoolManager(ca_certs=certifi.where())
+    except ImportError:
+        http = urllib3.PoolManager()
+    try:
+        token = get_cognito_token(client_info)
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+        resp = http.request(
+            "POST", gateway_url, body=body,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+            },
+            timeout=20.0,
+        )
+        if resp.status != 200:
+            return -1
+        text = resp.data.decode()
+        # streamable-http may wrap the JSON in SSE "data: " frames
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if line.startswith("{"):
+                try:
+                    obj = json.loads(line)
+                    tools = obj.get("result", {}).get("tools")
+                    if tools is not None:
+                        return len(tools)
+                except Exception:  # noqa: BLE001
+                    continue
+        try:
+            return len(json.loads(text).get("result", {}).get("tools", []))
+        except Exception:  # noqa: BLE001
+            return -1
+    except Exception as e:  # noqa: BLE001
+        logger.info("tools/list probe error (will retry): %s", str(e)[:120])
+        return -1
+
+
+def _wait_for_gateway_to_serve_tools(
+    gateway_url: str, client_info: dict, expected: int, timeout: int = 90
+) -> int:
+    """Poll the gateway's MCP tools/list until it serves >= 1 tool (ideally
+    `expected`), or *timeout*. Returns the served count (0 if it never serves).
+    This is the authoritative deploy-time readiness signal — it matches exactly
+    what the deployed agent will discover.
+    """
+    import time as _t
+    deadline = _t.time() + timeout
+    served = 0
+    while _t.time() < deadline:
+        served = _count_served_tools(gateway_url, client_info)
+        if served >= expected and expected > 0:
+            logger.warning("Gateway serves %d/%d tools over MCP", served, expected)
+            return served
+        if served > 0:
+            logger.warning("Gateway serves %d tools over MCP (expected %d)", served, expected)
+        _t.sleep(8)
+    logger.warning("Gateway served %d/%d tools within %ds", max(served, 0), expected, timeout)
+    return max(served, 0)
+
+
 # ---------------------------------------------------------------------------
 # JWT auth configuration
 # ---------------------------------------------------------------------------
@@ -1189,20 +1412,24 @@ def _cleanup_old_cognito_pool(gw_detail: dict, cognito_client) -> None:
         jwt_cfg = auth_cfg.get("customJWTAuthorizer", {})
         discovery_url = jwt_cfg.get("discoveryUrl", "")
         # Format: https://cognito-idp.{region}.amazonaws.com/{pool_id}/.well-known/...
-        if "cognito-idp" in discovery_url and "/" in discovery_url:
-            parts = discovery_url.split("/")
-            # pool_id is after amazonaws.com/ and before /.well-known
-            for i, part in enumerate(parts):
-                if part.endswith("amazonaws.com") and i + 1 < len(parts):
-                    old_pool_id = parts[i + 1]
-                    if old_pool_id and "_" in old_pool_id:
-                        pool_detail = cognito_client.describe_user_pool(UserPoolId=old_pool_id)
-                        domain = pool_detail.get("UserPool", {}).get("Domain")
-                        if domain:
-                            cognito_client.delete_user_pool_domain(UserPoolId=old_pool_id, Domain=domain)
-                        cognito_client.delete_user_pool(UserPoolId=old_pool_id)
-                        logger.info("Cleaned up old Cognito pool: %s", old_pool_id)
-                    break
+        # Parse with urlparse and validate the host EXACTLY (netloc) rather than a
+        # substring/endswith check on the raw URL — a substring like "amazonaws.com"
+        # can appear at an arbitrary position (py/incomplete-url-substring-sanitization).
+        from urllib.parse import urlparse as _urlparse
+
+        _parsed = _urlparse(discovery_url)
+        _host = _parsed.hostname or ""
+        if _host.startswith("cognito-idp.") and _host.endswith(".amazonaws.com"):
+            # path is /{pool_id}/.well-known/... — pool_id is the first segment.
+            _segments = [s for s in _parsed.path.split("/") if s]
+            old_pool_id = _segments[0] if _segments else ""
+            if old_pool_id and "_" in old_pool_id:
+                pool_detail = cognito_client.describe_user_pool(UserPoolId=old_pool_id)
+                domain = pool_detail.get("UserPool", {}).get("Domain")
+                if domain:
+                    cognito_client.delete_user_pool_domain(UserPoolId=old_pool_id, Domain=domain)
+                cognito_client.delete_user_pool(UserPoolId=old_pool_id)
+                logger.info("Cleaned up old Cognito pool: %s", old_pool_id)
     except Exception as e:
         logger.warning("Could not clean up old Cognito pool: %s", e)
 
@@ -1318,6 +1545,7 @@ def deploy_gateway(
     mcp_oauth: Optional[dict] = None,
     knowledge_base_result: Optional[dict] = None,
     deployment_id: Optional[str] = None,
+    gateway_retry: int = 0,
 ) -> dict:
     """Deploy a Gateway using pure boto3 APIs.
 
@@ -1785,40 +2013,162 @@ def deploy_gateway(
             except Exception as kb_err:
                 logger.error("Failed to deploy KB tool: %s", kb_err)
 
-        # Step 5: Synchronize gateway for semantic tool discovery (generates embeddings)
+        # Step 5: Synchronize NON-LAMBDA targets (OpenAPI / external MCP) for
+        # semantic discovery. Bug 134: synchronize_gateway_targets REQUIRES a
+        # targetIdList (the old call omitted it → silent failure) AND rejects
+        # LAMBDA targets ("Target type LAMBDA is not supported for
+        # synchronization") — Lambda targets serve their inline tools directly.
+        # So only sync targets that actually need crawling.
         if gateway_config.get("semanticSearchEnabled"):
             try:
-                logger.warning("Synchronizing gateway %s for semantic tool discovery...", gateway["gatewayId"])
-                agentcore_ctrl.synchronize_gateway(gatewayIdentifier=gateway["gatewayId"])
-                # Poll sync status (max 60s)
-                for _sync_attempt in range(12):
-                    time.sleep(5)
-                    gw_status = agentcore_ctrl.get_gateway(gatewayIdentifier=gateway["gatewayId"])
-                    sync_status = gw_status.get("synchronizationStatus", "")
-                    if sync_status in ("COMPLETED", "READY"):
-                        logger.warning("Gateway semantic sync completed")
-                        break
-                    logger.info("Gateway sync status: %s (attempt %d)", sync_status, _sync_attempt + 1)
-                else:
-                    logger.warning("Gateway sync did not complete within 60s, proceeding anyway")
+                _sync_ids = []
+                for _t in _get_targets_from_response(
+                    agentcore_ctrl.list_gateway_targets(gatewayIdentifier=gateway["gatewayId"])
+                ):
+                    _tid = _t.get("targetId") or _t.get("gatewayTargetId")
+                    _tc = (_t.get("targetConfiguration", {}) or {}).get("mcp", {}) or {}
+                    # crawled targets = NOT lambda (openApiSchema / mcpServer)
+                    if _tid and "lambda" not in _tc:
+                        _sync_ids.append(_tid)
+                if _sync_ids:
+                    logger.warning("Synchronizing %d non-lambda target(s) on gateway %s", len(_sync_ids), gateway["gatewayId"])
+                    agentcore_ctrl.synchronize_gateway_targets(
+                        gatewayIdentifier=gateway["gatewayId"], targetIdList=_sync_ids
+                    )
             except Exception as sync_err:
-                logger.warning("Gateway semantic sync failed (non-fatal): %s", sync_err)
+                logger.warning("Gateway target sync (non-fatal): %s", sync_err)
+
+        # Bug 138: if the caller asked for tools (built-in and/or custom) but the
+        # gateway ended up with ZERO targets, the agent would deploy against an
+        # empty gateway and break at first invocation ("returned 0 tools ...
+        # gateway wiring is broken"). This happens when an AI-generated spec
+        # passes an unknown built-in toolId (no schema match → DynamicTools target
+        # skipped) or every custom tool failed validation. FAIL LOUDLY here with a
+        # message the user can act on, instead of silently shipping a dead gateway.
+        tools_requested = bool(gateway_tools) or bool(custom_tools)
+        if tools_requested:
+            try:
+                _existing_targets = _get_targets_from_response(
+                    agentcore_ctrl.list_gateway_targets(gatewayIdentifier=gateway["gatewayId"])
+                )
+            except Exception:  # noqa: BLE001
+                _existing_targets = []
+            if not _existing_targets:
+                _known = sorted(GATEWAY_TOOL_SCHEMAS.keys())
+                _unknown = [t for t in (gateway_tools or []) if t not in GATEWAY_TOOL_SCHEMAS]
+                detail = ""
+                if _unknown:
+                    detail = (
+                        f" None of the requested tools {_unknown} are built-in "
+                        f"tools (valid: {_known}). A custom tool needs lambdaCode + "
+                        "an inputSchema to be deployable."
+                    )
+                raise RuntimeError(
+                    "Gateway was created but no tool targets could be deployed, so "
+                    "the agent would have no tools." + detail
+                )
+
+        # Bug 134: the policy step needs the gateway ARN + the fully-qualified
+        # tool action names ("{TargetName}___{tool}") to generate schema-valid
+        # Cedar. The control plane's get_gateway returns the ARN; the target
+        # manifests give the tool names. Resolve them here (the gateway+targets
+        # are freshly created, so this is the authoritative point) and return
+        # them so policy_step doesn't have to re-query a possibly-unsynced gateway.
+        gateway_arn = gateway.get("gatewayArn", "")
+        if not gateway_arn:
+            try:
+                _gw = agentcore_ctrl.get_gateway(gatewayIdentifier=gateway["gatewayId"])
+                gateway_arn = _gw.get("gatewayArn", "")
+            except Exception:  # noqa: BLE001
+                pass
+        qualified_tools, expected_tool_count = _resolve_gateway_tool_actions(
+            agentcore_ctrl, gateway["gatewayId"]
+        )
+
+        gateway_url = gateway.get("gatewayUrl", "")
+        client_info = cognito_response["client_info"]
+
+        # Bug 134 (THE stability fix): a Lambda gateway target can be status=READY
+        # with a full inline schema yet the gateway's MCP plane serves an EMPTY
+        # tool list — a confirmed AgentCore service-side provisioning flake with
+        # NO control-plane signal and NO client action to force it (sync rejects
+        # Lambda targets; recreate-target doesn't help). The ONLY deterministic
+        # cure is to PROBE the gateway's real MCP tools/list (what the agent will
+        # see) and, if it doesn't serve the configured tools, DELETE THE WHOLE
+        # GATEWAY and retry from scratch — a fresh gateway usually provisions a
+        # working tool plane. Bounded retries; if none serve, fail the deploy
+        # (never ship a runtime against a 0-tool gateway).
+        if expected_tool_count > 0:
+            served = _wait_for_gateway_to_serve_tools(
+                gateway_url, client_info, expected_tool_count, timeout=90
+            )
+            if served < expected_tool_count:
+                if gateway_retry < 2:
+                    logger.warning(
+                        "Gateway %s serves %d/%d tools over MCP — likely the "
+                        "AgentCore empty-tool-plane flake. Tearing it down and "
+                        "recreating (attempt %d/3).",
+                        gateway["gatewayId"], served, expected_tool_count, gateway_retry + 2,
+                    )
+                    try:
+                        for _t in _get_targets_from_response(
+                            agentcore_ctrl.list_gateway_targets(gatewayIdentifier=gateway["gatewayId"])
+                        ):
+                            _tid = _t.get("targetId") or _t.get("gatewayTargetId")
+                            if _tid:
+                                agentcore_ctrl.delete_gateway_target(
+                                    gatewayIdentifier=gateway["gatewayId"], targetId=_tid
+                                )
+                        time.sleep(5)
+                        agentcore_ctrl.delete_gateway(gatewayIdentifier=gateway["gatewayId"])
+                    except Exception as del_err:  # noqa: BLE001
+                        logger.warning("Cleanup before gateway retry (non-fatal): %s", del_err)
+                    time.sleep(8)
+                    return deploy_gateway(
+                        gateway_config, region, template_id=template_id,
+                        gateway_tools=gateway_tools, identity_config=identity_config,
+                        custom_tools=custom_tools, mcp_server_runtime_arn=mcp_server_runtime_arn,
+                        mcp_oauth=mcp_oauth, knowledge_base_result=knowledge_base_result,
+                        deployment_id=deployment_id, gateway_retry=gateway_retry + 1,
+                    )
+                # Exhausted retries — fail closed rather than ship a broken gateway.
+                return {
+                    "success": False,
+                    "error": (
+                        f"Gateway {gateway['gatewayId']} never served its tools over "
+                        f"MCP ({served}/{expected_tool_count}) after 3 gateway recreations "
+                        "— AgentCore empty-tool-plane provisioning flake. Aborting."
+                    ),
+                }
+            # Servable plane confirmed — qualified_tools should reflect it.
+            logger.warning("Gateway %s confirmed serving %d tools over MCP", gateway["gatewayId"], served)
 
         result = {
             "success": True,
-            "gateway_url": gateway.get("gatewayUrl", ""),
+            "gateway_url": gateway_url,
             "gateway_id": gateway["gatewayId"],
+            "gateway_arn": gateway_arn,
             "gateway_name": gateway_name,
-            "client_info": cognito_response["client_info"],
+            "client_info": client_info,
             "lambda_function_name": lambda_function_name,
             "custom_tool_lambdas": custom_tool_lambdas,
             "custom_tool_roles": custom_tool_roles,
             "kb_lambda_name": kb_lambda_name,
+            # Fully-qualified tool action names for Cedar policy generation, plus
+            # how many tools the gateway CONFIGURED so the policy step can
+            # fail-closed on a partial (synced < configured) tool plane.
+            "qualified_tools": qualified_tools,
+            "expected_tool_count": expected_tool_count,
         }
+        # Log the gateway id/arn (stable identifiers) rather than the full
+        # gateway_url. The URL is a public MCP endpoint (not a secret), but
+        # logging a url-typed value trips py/clear-text-logging-sensitive-data's
+        # heuristic; the id+arn are sufficient to correlate and carry no such flag.
         logger.info(
-            "Gateway deployed: url=%s, id=%s",
-            result["gateway_url"],
+            "Gateway deployed: id=%s, arn=%s, tools=%d",
             result["gateway_id"],
+            gateway_arn,
+            len(qualified_tools),
         )
         return result
 

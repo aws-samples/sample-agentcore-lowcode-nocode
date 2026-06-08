@@ -200,6 +200,23 @@ async def publish(
     if existing is not None and existing.owner_sub != caller_sub:
         # Collision with another owner — disambiguate with a sub-derived suffix.
         slug = f"{base_slug}-{caller_sub[:6]}"[:128]
+        existing = store.get(org_id, slug)  # re-check the disambiguated slug
+
+    own_existing = existing if (existing and existing.owner_sub == caller_sub) else None
+
+    # Status on (re)publish (PR #3 review — mNemlaghi):
+    #   * brand-new entry            -> pending (needs approval)
+    #   * owner re-publishes, content UNCHANGED -> PRESERVE existing status, so a
+    #     no-op/metadata re-publish never silently un-publishes an approved agent
+    #     (which would 404 clones until an admin re-approves).
+    #   * owner re-publishes, canvas snapshot CHANGED -> reset to pending (the
+    #     deployed blueprint differs from what was approved, so re-review).
+    if own_existing is None:
+        status = "pending"
+    elif own_existing.canvas_snapshot == body.canvas_snapshot:
+        status = own_existing.status or "pending"
+    else:
+        status = "pending"
 
     entry = RegistryEntry(
         org_id=org_id,
@@ -212,9 +229,11 @@ async def publish(
         latest_version_id=body.latest_version_id,
         canvas_snapshot=body.canvas_snapshot,
         source_runtime_name=body.source_runtime_name,
-        usage_count=(existing.usage_count if existing and existing.owner_sub == caller_sub else 0),
-        # New/re-published entries require admin approval before non-owners see them.
-        status="pending",
+        usage_count=(own_existing.usage_count if own_existing else 0),
+        status=status,
+        # Preserve review provenance when status is carried over unchanged.
+        reviewed_by=(own_existing.reviewed_by if (own_existing and status == own_existing.status) else None),
+        reviewed_at=(own_existing.reviewed_at if (own_existing and status == own_existing.status) else None),
     )
     store.put(entry)
     return RegistryEntryResponse.from_entry(entry, caller_sub)

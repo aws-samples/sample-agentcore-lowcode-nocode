@@ -156,6 +156,52 @@ def test_publish_sets_status_pending(store: RegistryStore):
     assert store.get(DEFAULT_ORG_ID, "fresh-bot").status == "pending"
 
 
+def test_republish_unchanged_preserves_approved_status(store: RegistryStore):
+    """PR #3 review (mNemlaghi): re-publishing an APPROVED entry with the SAME
+    canvas must NOT silently reset it to pending (which would un-publish it and
+    404 clones until re-approval). Status + review provenance are preserved."""
+    alice = _client("alice")
+    _publish(alice, "Stable Bot")
+    # Admin approves it.
+    admin = _client("carol", admin=True)
+    approved = admin.post("/api/registry/stable-bot/approve").json()
+    assert approved["status"] == "approved"
+    assert approved["reviewed_by"]
+
+    # Owner re-publishes the EXACT same canvas (e.g. a metadata refresh / no-op).
+    body = alice.post(
+        "/api/registry",
+        json={
+            "display_name": "Stable Bot",
+            "visibility": "org",
+            "canvas_snapshot": {"nodes": [{"type": "runtime"}], "edges": []},
+        },
+    ).json()
+    assert body["status"] == "approved", "unchanged re-publish must stay approved"
+    # Still visible + clonable by a different developer (not un-published).
+    bob = _client("bob")
+    assert bob.get("/api/registry/stable-bot").status_code == 200
+    assert bob.post("/api/registry/stable-bot/clone").status_code == 200
+
+
+def test_republish_changed_canvas_resets_to_pending(store: RegistryStore):
+    """If the canvas snapshot actually changes, the approved blueprint no longer
+    matches what was reviewed → reset to pending for re-review."""
+    alice = _client("alice")
+    _publish(alice, "Evolving Bot")
+    _client("carol", admin=True).post("/api/registry/evolving-bot/approve")
+
+    body = alice.post(
+        "/api/registry",
+        json={
+            "display_name": "Evolving Bot",
+            "visibility": "org",
+            "canvas_snapshot": {"nodes": [{"type": "runtime"}, {"type": "memory"}], "edges": []},
+        },
+    ).json()
+    assert body["status"] == "pending", "a changed canvas must require re-review"
+
+
 # ---------------------------------------------------------------------------
 # Approve / reject RBAC
 # ---------------------------------------------------------------------------

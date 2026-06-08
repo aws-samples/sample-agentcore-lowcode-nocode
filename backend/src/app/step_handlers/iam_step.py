@@ -128,6 +128,12 @@ def handler(event: dict, context) -> dict:
             otel_secret_arn = _resolve_otel_secret_arn(event)
             artifacts_bucket = _get_env("ARTIFACTS_BUCKET_NAME", "") or None
 
+            # Tag the per-agent role ManagedBy=agentcore-flows (same as the
+            # shared/runtime roles in runtime_deployer.create_runtime_iam_role) so
+            # the tag-scoped delete grant can clean it up on teardown. Without the
+            # tag, a future tightening of the role/AgentCore* grant would orphan
+            # per-agent roles on deletion. (PR #3 review — mNemlaghi.)
+            _managed_tag = [{"Key": "ManagedBy", "Value": "agentcore-flows"}]
             try:
                 iam_client.create_role(
                     RoleName=pa_role_name,
@@ -137,9 +143,18 @@ def handler(event: dict, context) -> dict:
                     Description=(
                         f"Per-agent least-privilege role for {agentcore_runtime_name}"
                     ),
+                    Tags=_managed_tag,
                 )
             except iam_client.exceptions.EntityAlreadyExistsException:
-                pass
+                # Reused role — ensure the tag is present (idempotent).
+                try:
+                    iam_client.tag_role(RoleName=pa_role_name, Tags=_managed_tag)
+                except Exception as _tag_err:  # noqa: BLE001
+                    logger.warning(
+                        "Could not tag reused per-agent role %s: %s",
+                        pa_role_name,
+                        _tag_err,
+                    )
             pa_role_arn = iam_client.get_role(RoleName=pa_role_name)["Role"]["Arn"]
             iam_client.put_role_policy(
                 RoleName=pa_role_name,

@@ -1372,3 +1372,26 @@ single-char-class regexes ([^\n]*$) are linear, and the gateway_deployer
 discoveryUrl "in" check is trusted self-constructed parsing, not a boundary.
 CodeQL scans run per-commit and surface alerts one at a time, so sweep proactively
 for the whole vuln class when one instance is flagged rather than waiting.
+
+## Bug 143 — PR #3 review feedback (mNemlaghi)
+
+Two real bugs a human reviewer caught that the audit/tests had missed:
+
+143a — per-agent IAM role (iam_step.py) was created WITHOUT the
+ManagedBy=agentcore-flows tag that runtime_deployer applies. The tag-scoped delete
+grant (Bug 140c) keys cleanup on that tag, so per-agent roles would be orphaned on
+teardown once the role/AgentCore* grant is tightened. FIX: pass Tags= on create_role
+and tag_role on the reuse path. LESSON: when one code path adds a tag/marker that
+another path's cleanup/authz depends on, EVERY creation path must add it — grep all
+create_role sites when introducing a tag-based scheme.
+
+143b — registry publish() always set status="pending" on (re)publish, silently
+un-publishing an already-APPROVED agent (clones 404 until re-approval). FIX: preserve
+existing status (+ reviewed_by/at) when an owner re-publishes the SAME canvas; reset
+to pending only when the canvas snapshot actually changed. Added 2 regression tests.
+LESSON: a "create or overwrite" handler must not blindly reset state-machine fields
+(status/approval) on overwrite — branch on whether the meaningful content changed.
+
+Both were correctness issues invisible to unit tests because no test re-published an
+already-approved entry. Human review catches state-transition bugs that
+single-shot tests don't — add the regression test for the exact reported scenario.

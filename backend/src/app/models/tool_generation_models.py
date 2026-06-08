@@ -85,3 +85,35 @@ class ToolGenerateResponse(BaseModel):
     error: Optional[str] = None
     response_type: str = Field(alias="responseType", default="generation")
     test_cases: Optional[list[TestCase]] = Field(alias="testCases", default=None)
+
+
+# ============================================================================
+# Phase 1 Gap 1E — NL agent (canvas) generation
+# ============================================================================
+
+
+class AgentGenerateRequest(BaseModel):
+    """Request body for POST /api/generate-canvas."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    prompt: str = Field(min_length=1, max_length=4000)
+    conversation_history: list[dict] = Field(
+        alias="conversationHistory", default_factory=list, max_length=20
+    )
+
+
+class AgentGenerateResponse(BaseModel):
+    """Response body for POST /api/generate-canvas.
+
+    Returns either a clarification message (first turn) or a canvas spec
+    suitable for the frontend's ``instantiateTemplate`` helper.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    success: bool
+    response_type: str = Field(alias="responseType", default="spec")
+    message: Optional[str] = None
+    spec: Optional[dict] = None
+    error: Optional[str] = None

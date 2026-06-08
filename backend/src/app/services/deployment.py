@@ -972,6 +972,10 @@ class WorkflowExecutor:
                             "protocolType": gw_detail.get("protocolType", "MCP"),
                             "policyEngineConfiguration": {
                                 "arn": engine_arn,
+                                # Bug 134 (proper fix): ENFORCE works now that the
+                                # baseline permit + schema-correct principal/action
+                                # let the principal discover+call tools. ENFORCE is
+                                # the default; LOG_ONLY available for audit dry-runs.
                                 "mode": _pc.get("mode", "ENFORCE"),
                             },
                         }

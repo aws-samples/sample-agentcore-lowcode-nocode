@@ -7,3 +7,4 @@ export { RuntimeConfigurationModal, type RuntimeConfigurationModalProps } from '
 export { GatewayConfigurationModal, type GatewayConfigurationModalProps } from './GatewayConfigurationModal';
 export { IdentityConfigurationModal, type IdentityConfigurationModalProps } from './IdentityConfigurationModal';
 export { KnowledgeBaseConfigModal, type KnowledgeBaseConfigModalProps } from './KnowledgeBaseConfigModal';
+export { ConnectorPickerModal, type ConnectorPickerModalProps } from './ConnectorPickerModal';

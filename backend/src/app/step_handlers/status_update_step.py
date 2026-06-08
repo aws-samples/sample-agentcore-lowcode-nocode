@@ -14,6 +14,11 @@ import os
 from datetime import datetime, timezone
 
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
+from app.services.agent_versions_store import (
+    RuntimeSlots,
+    get_slots_store,
+    get_versions_store,
+)
 from app.services.deployment_state_store import DeploymentStateStore
 
 logger = logging.getLogger(__name__)
@@ -96,10 +101,30 @@ def handler(event: dict, context) -> dict:
                 guardrails_result=guardrails_result if guardrails_result else None,
                 mcp_server_runtime_id=mcp_server_runtime_id,
             )
+            # Best-effort: flip the AgentVersion row to failed so version
+            # history reflects the partial deploy.
+            version_id = event.get("version_id")
+            friendly_runtime_name = event.get("friendly_runtime_name")
+            if version_id and friendly_runtime_name:
+                try:
+                    get_versions_store().update_status(
+                        runtime_name=friendly_runtime_name,
+                        version_id=version_id,
+                        status="failed",
+                        runtime_id=runtime_id,
+                        runtime_arn=runtime_arn,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to mark AgentVersion %s/%s failed",
+                        friendly_runtime_name,
+                        version_id,
+                    )
             return {
                 "deployment_id": deployment_id,
                 "status": DeploymentStatusEnum.FAILED.value,
                 "error_details": str(error_details),
+                "version_id": version_id,
             }
 
         store.update_status(
@@ -117,12 +142,95 @@ def handler(event: dict, context) -> dict:
             mcp_server_runtime_id=mcp_server_runtime_id,
         )
 
+        # Phase 1 Gap 1A — flip the AgentVersion row to succeeded and update
+        # the runtime's production slot if this deploy targeted production.
+        # Both writes are best-effort; a failure here doesn't fail the deploy
+        # because the deployment record itself is already marked succeeded.
+        version_id = event.get("version_id")
+        friendly_runtime_name = event.get("friendly_runtime_name")
+        deployment_slot = (event.get("deployment_slot") or "production").lower()
+        owner_sub = event.get("owner_sub") or ""
+        if version_id and friendly_runtime_name:
+            try:
+                get_versions_store().update_status(
+                    runtime_name=friendly_runtime_name,
+                    version_id=version_id,
+                    status="succeeded",
+                    runtime_id=runtime_id,
+                    runtime_arn=runtime_arn,
+                    runtime_endpoint=runtime_endpoint,
+                    code_s3_key=event.get("s3_key"),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to mark AgentVersion %s/%s succeeded",
+                    friendly_runtime_name,
+                    version_id,
+                )
+            try:
+                slots_store = get_slots_store()
+                existing = slots_store.get(friendly_runtime_name)
+                # SECURITY (H-1, security review 2026-05-28): defense-in-depth
+                # against cross-tenant slot hijack. deployment_handler already
+                # rejects mismatched-owner deploys at the API boundary, but in
+                # case a bug or race lets one through, refuse to overwrite a
+                # slot row owned by a different sub. See lessons.md Bug 122.
+                if (
+                    existing is not None
+                    and existing.owner_sub
+                    and existing.owner_sub != owner_sub
+                ):
+                    logger.warning(
+                        "Refusing to update RuntimeSlots for %s/%s: existing "
+                        "slot owned by %s, deploy caller is %s. This should "
+                        "have been caught at the API boundary (Bug 122).",
+                        friendly_runtime_name,
+                        version_id,
+                        existing.owner_sub,
+                        owner_sub,
+                    )
+                else:
+                    # On the very first deploy of a friendly name, create the slot
+                    # row. On subsequent deploys, preserve the previous-production
+                    # pointer so rollback() can flip back without bookkeeping.
+                    if existing is None:
+                        new_slots = RuntimeSlots(
+                            runtime_name=friendly_runtime_name,
+                            owner_sub=owner_sub,
+                            production_version_id=(
+                                version_id if deployment_slot == "production" else None
+                            ),
+                            staging_version_id=(
+                                version_id if deployment_slot == "staging" else None
+                            ),
+                            last_promoted_at=now.isoformat(),
+                        )
+                    else:
+                        new_slots = existing
+                        if deployment_slot == "production":
+                            new_slots.previous_production_version_id = (
+                                existing.production_version_id
+                            )
+                            new_slots.production_version_id = version_id
+                            new_slots.last_promoted_at = now.isoformat()
+                        elif deployment_slot == "staging":
+                            new_slots.staging_version_id = version_id
+                    slots_store.upsert(new_slots)
+            except Exception:
+                logger.exception(
+                    "Failed to update RuntimeSlots for %s/%s",
+                    friendly_runtime_name,
+                    version_id,
+                )
+
         return {
             "deployment_id": deployment_id,
             "status": DeploymentStatusEnum.SUCCEEDED.value,
             "runtime_id": runtime_id,
             "runtime_endpoint": runtime_endpoint,
             "gateway_url": gateway_url,
+            "version_id": version_id,
+            "deployment_slot": deployment_slot,
         }
 
     except Exception as exc:

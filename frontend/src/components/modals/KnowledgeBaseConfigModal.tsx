@@ -97,6 +97,7 @@ function createDefaultKBConfig(): KnowledgeBaseToolConfig {
     vectorStoreType: 's3_vectors',
     parsingStrategy: 'default',
     dataDeletionPolicy: 'DELETE',
+    retrievalStrategy: 'simple',
   };
 }
 
@@ -433,6 +434,24 @@ export function KnowledgeBaseConfigModal({
             generates a comprehensive answer with source citations.
           </p>
         </div>
+      </FormSection>
+
+      <FormSection
+        title="Retrieval Strategy"
+        description="How the agent searches the knowledge base. Multi-hop and Reranked add extra Bedrock calls per query (bounded by max_hops / top_n) for higher answer quality."
+      >
+        <SelectField
+          label="Strategy"
+          id="kb-retrieval-strategy"
+          value={config.retrievalStrategy || 'simple'}
+          onChange={(v) => updateField('retrievalStrategy', v as 'simple' | 'multi_hop' | 'hybrid' | 'reranked')}
+          options={[
+            { value: 'simple', label: 'Simple (single-shot)' },
+            { value: 'multi_hop', label: 'Multi-hop (decompose + chain lookups)' },
+            { value: 'hybrid', label: 'Hybrid (vector + keyword)' },
+            { value: 'reranked', label: 'Reranked (judge-reordered)' },
+          ]}
+        />
       </FormSection>
     </div>
   );

@@ -114,6 +114,16 @@ check_prerequisites() {
 
 check_aws_credentials() {
   log_info "Checking AWS credentials..."
+  # The stack creates a CLOUDFRONT-scoped WAFv2 WebACL, which AWS only
+  # accepts in us-east-1. Deploying elsewhere also collides with the
+  # account-global CloudFront OAC / response-headers-policy / IAM role
+  # names of an existing deployment. Fail fast (AWS_REGION env vars from
+  # the calling shell silently override the us-east-1 default).
+  if [[ "${AWS_REGION}" != "us-east-1" ]]; then
+    log_error "AWS_REGION is '${AWS_REGION}', but this stack requires us-east-1"
+    log_error "(CLOUDFRONT-scoped WAF WebACL). Unset AWS_REGION or set AWS_REGION=us-east-1."
+    exit 1
+  fi
   if ! aws sts get-caller-identity --region "${AWS_REGION}" > /dev/null 2>&1; then
     log_error "AWS credentials are not configured or are invalid."
     log_error "Please configure credentials with 'aws configure' or set AWS_PROFILE."
@@ -201,6 +211,21 @@ bootstrap_cdk() {
   else
     log_success "CDK already bootstrapped in ${AWS_REGION}."
   fi
+}
+
+# ── Step 5b: Preflight — heal tables deleted out-of-band ─────────────
+# If a DynamoDB table in the deployed stack was deleted outside CloudFormation
+# (e.g. by an account-level resource reaper), CFN still believes it exists and
+# the next update fails with "Unable to retrieve Arn attribute ... Table X
+# does not exist". Recreate any such tables empty (exact deployed schema)
+# before deploying. No-op on fresh deploys and healthy stacks.
+
+preflight_restore_tables() {
+  log_info "Preflight: verifying stack DynamoDB tables exist..."
+  python3 "${SCRIPT_DIR}/preflight-ddb-restore.py" \
+    --stack-name "${STACK_NAME}" \
+    --region "${AWS_REGION}"
+  log_success "DynamoDB preflight complete."
 }
 
 # ── Step 6: Run CDK deploy ────────────────────────────────────────────
@@ -325,6 +350,7 @@ main() {
   install_lambda_dependencies
   install_agentcore_deps
   bootstrap_cdk
+  preflight_restore_tables
   run_cdk_deploy
   extract_stack_outputs
   build_frontend

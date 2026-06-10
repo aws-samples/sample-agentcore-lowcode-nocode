@@ -1395,3 +1395,46 @@ LESSON: a "create or overwrite" handler must not blindly reset state-machine fie
 Both were correctness issues invisible to unit tests because no test re-published an
 already-approved entry. Human review catches state-transition bugs that
 single-shot tests don't — add the regression test for the exact reported scenario.
+
+### INCIDENT (2026-06-10): SpringClean reaped ALL 10 DDB tables; recovery + two deploy traps
+
+Repeat of the 2026-05-29 incident but worse: the SpringClean reaper deleted ALL 10
+`agentcore-workflow-dev-*` DynamoDB tables (CloudTrail: 2026-06-05 and 2026-06-06
+18:46 runs). The user's `cdk deploy` then failed at `StateMachineRole/DefaultPolicy`
+with `Unable to retrieve Arn attribute ... agentcore-workflow-dev-agent-versions does
+not exist` → UPDATE_ROLLBACK_COMPLETE. The reaper "spares recently-created tables"
+theory is now disproven — it eventually takes everything; assume any table older than
+~1 week is at risk.
+
+**Permanent fix — self-healing preflight (no more manual recovery):**
+`scripts/preflight-ddb-restore.py`, wired into deploy.sh between bootstrap and
+`cdk deploy`. It reads the DEPLOYED stack template via `cfn.get_template`
+(TemplateStage=Processed), maps logical→physical names via `list_stack_resources`
+(never trust Properties.TableName), recreates any physically-missing table empty with
+the exact schema (keys/GSIs/SSE/tags), waits ACTIVE, then re-applies TTL + PITR.
+No-op on healthy stacks and fresh deploys. Gotchas baked in:
+- `update_continuous_backups` right after table-ACTIVE throws
+  `ContinuousBackupsUnavailableException` — retry with backoff (~10-60s).
+- CFN GSI property block ≈ create_table kwargs for PAY_PER_REQUEST, but strip any
+  non-create keys; TTL and PITR cannot be set at create time.
+
+**Trap 2 discovered during recovery — AWS_REGION env var hijacks deploy.sh:**
+My shell had `AWS_REGION=us-west-2` exported; deploy.sh's `AWS_REGION:-us-east-1`
+default deferred to it, so `cdk deploy` targeted us-west-2 — where no stack exists —
+and attempted a FULL STACK CREATE. It failed (good!) only because of account-global
+name collisions (CloudFront OAC, ResponseHeadersPolicy, IAM role
+`AgentCoreRuntime-agentcore-workflow-dev-shared`) and the CLOUDFRONT-scoped WAFv2
+WebACL being us-east-1-only. Deleted the ROLLBACK_COMPLETE us-west-2 stack. FIX:
+deploy.sh now fails fast if AWS_REGION != us-east-1. LESSON: a `${VAR:-default}`
+pattern in a deploy script silently inherits CI/shell env; validate region/account
+preconditions explicitly instead of assuming the default applied.
+
+**Verification (full e2e, main loop, 2026-06-10):** preflight restored 10/10 tables →
+deploy.sh end-to-end green (UPDATE_COMPLETE, preflight logged "All 10 tables present"
+on the second run) → pycognito SRP auth as uitest@agentcore.dev → API smoke
+(/api/workflows, /api/flows, /api/prompts, /api/registry, /api/hitl/pending all 200;
+unauthenticated → 401) → flow create/get/delete round-trip → POST /api/deploy minimal
+Bedrock agent → SFN SUCCEEDED → /api/test-runtime returned a REAL model answer
+("Paris.") → DELETE /api/runtime cleaned up. Note /api/health is mounted WITHOUT the
+/api prefix (it's /health on the Lambda, not routed via CloudFront) and registry list
+is /api/registry (not /api/registry/agents); hitl is /api/hitl/pending.

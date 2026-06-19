@@ -1438,3 +1438,69 @@ Bedrock agent → SFN SUCCEEDED → /api/test-runtime returned a REAL model answ
 ("Paris.") → DELETE /api/runtime cleaned up. Note /api/health is mounted WITHOUT the
 /api prefix (it's /health on the Lambda, not routed via CloudFront) and registry list
 is /api/registry (not /api/registry/agents); hitl is /api/hitl/pending.
+
+## Bug 144 — AI agent generator wires tools straight to the runtime (2026-06-19)
+
+Symptom: "Generate Agent" produced a Slack→Jira agent with two tool nodes; "Apply
+to Canvas" showed "2 Errors — edge-...: Cannot connect tool to runtime".
+
+Root cause: `agent_generator.py` `GENERATION_PROMPT` said EVERY non-runtime node
+must edge to the runtime. That's true for memory/guardrails/etc. but NOT for
+`tool` nodes — the frontend connection matrix (`frontend/src/types/validation.ts`,
+`CONNECTION_COMPATIBILITY`) only allows `tool -> gateway`. Tools attach to a
+gateway, and the gateway attaches to the runtime (`tool -> gateway -> runtime`).
+The generator also emitted no gateway node at all, so the spec was undeployable
+regardless of edge direction (deploy-time tool extraction walks gateway edges).
+
+Rule for myself: when the NL generator's prompt encodes graph-wiring rules, they
+MUST mirror the canvas `CONNECTION_COMPATIBILITY` matrix exactly. `tool` is the
+exception to "everything edges to runtime" — it edges to a gateway, and a gateway
+is REQUIRED whenever any tool exists. `_validate_spec` now enforces this so bad
+specs self-correct via the retry loop instead of reaching the canvas.
+
+## Bug 145 — custom tool "Configure" button did nothing (2026-06-19)
+
+Root cause: `App.tsx` only rendered a modal for `componentType === 'tool'` when
+`isKnowledgeBase` was truthy (KnowledgeBaseConfigModal). Custom tools (isCustom)
+and plain built-in tools had NO modal, so Configure / double-click opened nothing.
+
+Fix: added `frontend/src/components/modals/ToolConfigModal.tsx` (edit
+name/description/enabled; read-only inputSchema + lambdaCode for custom tools) and
+rendered it for non-KB tool nodes. Preserve all unsurfaced fields (toolId,
+isCustom, lambdaCode, inputSchema) on save — spread initialConfig as the base, then
+backfill only missing fields (a defaults-first spread trips TS2783 under `tsc -b`).
+
+Rule for myself: when adding a node type to a config-modal switch, check EVERY
+branch of the modal render block in App.tsx — a node type can match `componentType`
+but still fall through to no modal if every branch has an extra guard.
+
+## Bug 146 — don't run backend + frontend suites concurrently; isolate before calling a test "flaky" (2026-06-19)
+
+While verifying a fix I ran `pytest` (backend) and `vitest` (frontend) at the same
+time. The machine starved: vitest import times ballooned to 800s+ and tests hit
+their 5s timeouts; pytest's slow Hypothesis property test
+(test_session_properties) also timed out. The failing SET changed between two
+identical runs (6 then 3 failures, different files), which I wrongly called
+"flaky." Run in ISOLATION (single suite, single-threaded) before characterizing a
+failure: backend alone finished in 4:18 (vs 22:00 concurrent) with 0 failures, and
+the real frontend failures turned out to be deterministic test DRIFT, not timing.
+
+Rule for myself: (1) never run the two heavy suites concurrently on this machine;
+(2) "flaky" is a claim that requires evidence — reproduce in isolation and read the
+actual assertion error before using the word. Stale tests that assert old behavior
+look like flakiness under load but are deterministic and must be fixed, not retried.
+
+## Bug 147 — test drift: window.prompt → inline-edit migration left stale tests (2026-06-19)
+
+flow-sidebar was refactored from `window.prompt()` rename/create to inline-edit
+inputs, and `createNodeFromDrop` was changed to return `validationStatus: 'valid'`
+for pre-configured node types — but their tests (from the initial import) were
+never updated, so they failed against current source. Fixes: assert the real
+inline-edit contract (pen reveals input; onRename fires on confirm with
+(id, oldName, newName); Escape cancels), the real create flow (type + Enter), and
+the documented validation-status contract (code_interpreter/browser/observability
+start 'valid', others 'pending'). Also wrapped the async-effect mount in act().
+
+Rule for myself: when a test asserts UI mechanics (window.prompt, a specific
+callback arity), check the SOURCE's current behavior before trusting the test —
+a green test suite that excludes drifted files hides real regressions in CI.

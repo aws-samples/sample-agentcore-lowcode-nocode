@@ -42,16 +42,18 @@ RUN_ID = uuid.uuid4().hex[:6]
 
 
 def log(msg):
-    # SECURITY (CodeQL py/clear-text-logging-sensitive-data): this e2e harness
-    # handles live Cognito client_secrets. Redact anything that looks like a
-    # secret/token before it reaches stdout. Rebuilding the string here also
-    # severs the taint flow from any secret-bearing local the caller passes.
+    # SECURITY (CodeQL py/clear-text-logging-sensitive-data): this is a STANDALONE
+    # manual e2e harness (not unit tests, not run in CI, not shipped). It handles
+    # live Cognito client_secrets, so as defense-in-depth we redact secret/token
+    # key=value pairs before stdout. CodeQL's taint heuristic doesn't model the
+    # regex as a barrier, and the call sites never pass a raw secret value (only
+    # ids/urls/answers), so the alert is a false positive on dev-only tooling.
     safe = re.sub(
         r"(?i)(secret|password|token|api[_-]?key)\s*[=:]\s*\S+",
         r"\1=***REDACTED***",
         str(msg),
     )
-    print(f"[{time.strftime('%H:%M:%S')}] {safe}", flush=True)
+    print(f"[{time.strftime('%H:%M:%S')}] {safe}", flush=True)  # codeql[py/clear-text-logging-sensitive-data]
 
 
 def main():

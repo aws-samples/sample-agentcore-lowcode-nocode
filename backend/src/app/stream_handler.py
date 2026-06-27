@@ -361,7 +361,10 @@ def _stream_invoke(write, body: dict, caller_sub: Optional[str]) -> None:
             return
         result = invoke_harness(region, harness_arn, prompt, session_id or runtime_id)
         if not result.get("success"):
-            write(_sse({"type": "error", "error": result.get("error") or "Harness invocation failed"}))
+            # SECURITY (CodeQL py/stack-trace-exposure): never surface
+            # invoke_harness's raw exception text to the external caller.
+            logger.warning("Harness stream invoke failed: %s", result.get("error"))
+            write(_sse({"type": "error", "error": "Harness invocation failed"}))
             return
         output = result.get("output", "")
         _emit_tokens(write, output)

@@ -732,10 +732,16 @@ async def handle_test_runtime(request: TestRequest, raw_request: Request) -> Tes
                 return TestResponse(success=False, error="Harness ARN not found for this deployment")
             session_id = request.session_id or runtime_id
             result = invoke_harness(region, harness_arn, prompt, session_id)
+            # SECURITY (CodeQL py/stack-trace-exposure): invoke_harness returns
+            # raw exception text in `error`; log it server-side and return a
+            # generic message rather than leaking internals to the caller.
+            harness_ok = bool(result.get("success"))
+            if not harness_ok:
+                logger.warning("Harness invoke failed: %s", result.get("error"))
             return TestResponse(
-                success=bool(result.get("success")),
+                success=harness_ok,
                 response=result.get("output", ""),
-                error=result.get("error") or None,
+                error=None if harness_ok else "Harness invocation failed",
                 session_id=session_id,
                 arn=harness_arn,
             )
@@ -842,7 +848,10 @@ async def handle_test_runtime(request: TestRequest, raw_request: Request) -> Tes
                         "take longer than 30 seconds to respond."
                     ),
                 )
-            return TestResponse(success=False, error=f"Runtime invocation error: {error_msg}")
+            # SECURITY (CodeQL py/stack-trace-exposure): don't return the raw
+            # exception text to the client — log it, return a generic message.
+            logger.warning("Runtime invocation error: %s", error_msg)
+            return TestResponse(success=False, error="Runtime invocation failed.")
 
     except Exception:
         logger.exception("Unexpected error in test-runtime")
@@ -918,8 +927,12 @@ async def handle_test_runtime_stream(request: TestRequest):
             )
         result = invoke_harness(region, harness_arn, prompt, request.session_id or runtime_id)
         if not result.get("success"):
+            # SECURITY (CodeQL py/stack-trace-exposure): invoke_harness surfaces
+            # raw exception text in `error`; never return that to the external
+            # SSE client. Log the detail server-side, emit a generic message.
+            logger.warning("Harness stream invoke failed: %s", result.get("error"))
             return PlainTextResponse(
-                f"data: {json.dumps({'type': 'error', 'error': result.get('error') or 'Harness invocation failed'})}\n\n",
+                f"data: {json.dumps({'type': 'error', 'error': 'Harness invocation failed'})}\n\n",
                 media_type="text/event-stream",
             )
         out = result.get("output", "")
@@ -1763,10 +1776,13 @@ async def handle_generate_tool(request: ToolGenerateRequest):
     except Exception as e:
         # Catch-all so the client gets structured JSON instead of plaintext
         # "Internal Server Error" 500. See tasks/lessons.md Bug 33.
+        # SECURITY (CodeQL py/stack-trace-exposure): log the exception detail
+        # server-side; return a generic message (no exception type/text) to the
+        # client.
         logger.exception("handle_generate_tool failed")
         raise HTTPException(
             status_code=500,
-            detail={"error": f"Tool generation failed: {type(e).__name__}: {e}"},
+            detail={"error": "Tool generation failed."},
         ) from e
 
 

@@ -3238,16 +3238,12 @@ def deploy_gateway(
             "qualified_tools": qualified_tools,
             "expected_tool_count": expected_tool_count,
         }
-        # Log the gateway id/arn (stable identifiers) rather than the full
-        # gateway_url. The URL is a public MCP endpoint (not a secret), but
-        # logging a url-typed value trips py/clear-text-logging-sensitive-data's
-        # heuristic; the id+arn are sufficient to correlate and carry no such flag.
-        logger.info(
-            "Gateway deployed: id=%s, arn=%s, tools=%d",
-            result["gateway_id"],
-            gateway_arn,
-            len(qualified_tools),
-        )
+        # SECURITY (CodeQL py/clear-text-logging-sensitive-data): the `result`
+        # dict nests client_info.client_secret, so it is taint-tracked — do NOT
+        # read any field from it in a log call (even gateway_id). Log only the
+        # tool count (an int) and a constant; the gateway id/arn are returned to
+        # the caller and recorded in the deployment manifest for correlation.
+        logger.info("Gateway deployed (%d tools)", len(qualified_tools))
         return result
 
     except Exception as e:

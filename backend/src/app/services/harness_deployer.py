@@ -414,13 +414,16 @@ def create_harness(
         "executionRoleArn": role_arn,
     }
     if model_id:
-        create_params["model"] = {
-            "bedrockModelConfig": {
-                "modelId": model_id,
-                "maxTokens": max_tokens,
-                "temperature": temperature,
-            }
+        model_config = {
+            "modelId": model_id,
+            "maxTokens": max_tokens,
         }
+        # Claude Sonnet 5 and later models reject the temperature parameter
+        # with ValidationException: "temperature is deprecated for this model".
+        # Only include temperature for older models.
+        if not any(m in model_id.lower() for m in ("claude-sonnet-5", "claude-opus-5")):
+            model_config["temperature"] = temperature
+        create_params["model"] = {"bedrockModelConfig": model_config}
     if system_prompt:
         create_params["systemPrompt"] = [{"text": system_prompt}]
 

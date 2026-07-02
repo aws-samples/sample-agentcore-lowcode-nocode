@@ -1,3 +1,17 @@
+# Blocker batch — production-readiness fixes (2026-07-02)
+
+Verdict from full verification: NOT production ready. This batch fixes the blockers.
+
+- [ ] 1. Commit the verified 25-file working-tree diff (model modernization + guardrail kwarg wiring + -v1:0 transform fix). All gates green, byte-verified against deployed bundle.
+- [ ] 2. [SECURITY] Cedar ENFORCE fail-closed (P-PLAT-027): policy step downgrades ENFORCE→LOG_ONLY on "Insufficient permissions to call gateway" validation failure and the restricted tool leaks. Root-cause the permission failure; make ENFORCE fail the deploy (or block the tool plane) instead of silently degrading.
+- [ ] 3. [SECURITY] Guardrail regex ANONYMIZE leak (P-PLAT-012): live probe returned `{MTX_REDACT}TX-SECRET-778899` — tag emitted but secret retained. Root-cause (regex pattern generation vs Bedrock apply-output offsets) and fix.
+- [ ] 4. Cascade teardown: (a) flow DELETE leaks gateway OAuth2 credential provider + backing secret + AgentCoreGateway-* IAM role; (b) failed KB deploy leaves orphaned ACTIVE KB + data source + corpus bucket; (c) Cognito pools leak on gateway/harness teardown.
+- [ ] 5. Model straggler: platform_stack.py:1365 TOOL_GENERATOR_MODEL_ID still retired sonnet-4-5; README.md:293 stale; validator allowlist still admits retired sonnet-4-5/opus-4-5 and unpriced opus-4-7/4-6.
+- [ ] 6. Clean leaked mtx* residue in account 166827918465 us-east-1 (5 guardrails, 6 KBs, 1 S3 bucket, 36 IAM roles, 7 Cognito pools, 1 OAuth2 provider + secret, ~165 DDB rows).
+- [ ] 7. Redeploy dev stack; live re-verify P-PLAT-027 (ENFORCE fail-closed) and P-PLAT-012 (redaction complete) + teardown leaves no new residue.
+
+---
+
 # TODO: Real SaaS Connectors + AgentCore Harness (2026-06-24)
 
 Ref plan: ~/.claude/plans/lively-popping-sparkle.md

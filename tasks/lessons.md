@@ -3065,3 +3065,19 @@ Confirmed product bugs found by the run (each with evidence under tasks/matrix-t
 Minor: P-SWARM-001 canary spec invites hyphenation (spec flaw, not platform); runcell.py lacks
 expect_redacted/expect_intervened gates; kb delete first attempt 503 (retry worked); GET
 /api/runtime/{rid} is 405 (no GET route) which breaks gone-checks.
+9. Bug 195 — Harness temperature parameter: Claude Sonnet 5 rejects the `temperature` parameter
+   with `ValidationException: temperature is deprecated for this model`. FIX: harness_deployer.py
+   now conditionally excludes `temperature` for models containing "claude-sonnet-5" or
+   "claude-opus-5" in their model ID (2026-07-02).
+10. Bug 196 — Failed deployments orphan AWS resources: KB, Cognito pools, gateways, and other
+    resources created before a step failure were not automatically cleaned up. Users had to
+    manually call DELETE /api/runtime/{id} to trigger cleanup.
+    **Part 1 FIX**: status_update_step.py now runs _auto_cleanup_on_failure() when a deployment
+    fails, iterating the created_resources manifest in dependency order and deleting each
+    resource. The code was initially broken (used `store.get_deployment()` instead of
+    `store.get().model_dump()`) — fixed and verified (2026-07-02).
+    **Part 2 FIX**: The status_update Lambda IAM role lacked cleanup permissions. Added
+    bedrock:DeleteKnowledgeBase, s3vectors:DeleteVectorBucket, iam:DeleteRole,
+    cognito-idp:DeleteUserPool, bedrock-agentcore:DeleteGateway, lambda:DeleteFunction (and
+    supporting read verbs) to the _create_step_role() function in platform_stack.py. This is
+    best-effort — cleanup errors are logged but don't change the failure status (2026-07-02).

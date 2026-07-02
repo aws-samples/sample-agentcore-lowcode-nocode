@@ -31,12 +31,8 @@ _BEDROCK_ACTIVE_MODEL_SUBSTRINGS = (
     "anthropic.claude-sonnet-5",
     "anthropic.claude-sonnet-4-6",
     "anthropic.claude-opus-4-8",
-    "anthropic.claude-opus-4-7",
-    "anthropic.claude-opus-4-6",
-    # Anthropic Claude 4.5 (Bedrock GA Sep–Nov 2025)
-    "anthropic.claude-sonnet-4-5",
+    # Anthropic Claude Haiku 4.5 (Bedrock GA Oct 2025; dated ID with -v1:0)
     "anthropic.claude-haiku-4-5",
-    "anthropic.claude-opus-4-5",
     # Amazon Nova 2 (Bedrock GA Q4 2025)
     "amazon.nova-2-",
     "amazon.nova-premier",

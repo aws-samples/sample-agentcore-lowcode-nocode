@@ -1362,7 +1362,7 @@ class PlatformStack(cdk.Stack):
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
                 "POWERTOOLS_SERVICE_NAME": "deployment",
-                "TOOL_GENERATOR_MODEL_ID": f"{'eu' if self.region.startswith('eu-') else 'ap' if self.region.startswith('ap-') else 'us'}.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                "TOOL_GENERATOR_MODEL_ID": f"{'eu' if self.region.startswith('eu-') else 'ap' if self.region.startswith('ap-') else 'us'}.anthropic.claude-sonnet-5",
                 "PYTHONPATH": "/var/task/src:/var/task:/var/task/lib",
                 # Needed by destroy_runtime to skip cascade-deletion of the
                 # stack-managed shared runtime role (Bug 62).

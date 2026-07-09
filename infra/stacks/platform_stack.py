@@ -2209,7 +2209,7 @@ class PlatformStack(cdk.Stack):
                 # CREATING" / validates "Insufficient permissions to call gateway"
                 # until it converges). The step waits for the engine + retries the
                 # policy create across that window, so it needs a generous budget.
-                "timeout": 300,
+                "timeout": 600,
             },
             "knowledge_base": {
                 "handler": "src/app/step_handlers/knowledge_base_step.handler",
@@ -2390,9 +2390,11 @@ class PlatformStack(cdk.Stack):
         policy_step = self._create_step_task(
             "CreatePolicy",
             self.step_lambdas["policy"],
-            # Bug 177: matched to the 300s Lambda budget — the policy engine's
-            # CREATING->ACTIVE convergence + policy-create retry can take minutes.
-            timeout_seconds=300,
+            # Bug 177 + Cedar IGNORE_ALL_FINDINGS convergence: matched to the 600s
+            # Lambda budget — the engine CREATING->ACTIVE + up to 12 policy-create
+            # retries (as the engine<->gateway authorization converges) can take
+            # several minutes on a freshly-created gateway.
+            timeout_seconds=600,
             result_path="$",
         )
         policy_step.add_retry(**self._retry_kwargs())

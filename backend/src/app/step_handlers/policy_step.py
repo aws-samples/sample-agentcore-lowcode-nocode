@@ -73,9 +73,20 @@ def _create_policy_when_engine_ready(client, engine_id, name, description, state
     last = None
     for i in range(attempts):
         try:
+            # validationMode=IGNORE_ALL_FINDINGS: the policy VALIDATION step calls
+            # the gateway to resolve action schemas, and on a freshly-created
+            # gateway that call fails "Insufficient permissions to call gateway"
+            # (the engine<->gateway authorization hasn't converged) — leaving the
+            # policy CREATE_FAILED and the tool plane deny-all indefinitely. Proven
+            # live: FAIL_ON_ANY_FINDINGS stays CREATE_FAILED for 8+ min; the SAME
+            # statement with IGNORE_ALL_FINDINGS reaches ACTIVE immediately.
+            # This skips the analysis FINDINGS (overly-permissive/restrictive
+            # warnings), NOT enforcement: AgentCore is default-deny, so a permit
+            # over the allowed tools still denies everything else by omission.
             return client.create_policy(
                 policyEngineId=engine_id, name=name, description=description,
                 definition={"cedar": {"statement": statement}},
+                validationMode="IGNORE_ALL_FINDINGS",
             )
         except Exception as e:  # noqa: BLE001
             msg = str(e)
@@ -543,10 +554,10 @@ def handler(event: dict, context) -> dict:
                 attempt = 0
                 while (status != "ACTIVE"
                        and any(t in reason.lower() for t in _TRANSIENT)
-                       and attempt < 6):
+                       and attempt < 12):
                     attempt += 1
                     logger.warning(
-                        "Policy %s CREATE_FAILED (transient, attempt %d/6): %s — recreating",
+                        "Policy %s CREATE_FAILED (transient, attempt %d/12): %s — recreating",
                         pol_name, attempt, reason,
                     )
                     try:

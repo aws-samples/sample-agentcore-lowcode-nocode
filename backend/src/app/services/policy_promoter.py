@@ -91,6 +91,10 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
                 # yet" even after the gateway converged). Default to a meaningful one.
                 description=(pol.get("description") or "Auto-permit for allowed gateway tools (ENFORCE)."),
                 definition={"cedar": {"statement": stmt}},
+                # IGNORE_ALL_FINDINGS: skip the gateway-calling validation that fails
+                # "Insufficient permissions to call gateway" on fresh gateways (proven
+                # live). Enforcement preserved via AgentCore default-deny.
+                validationMode="IGNORE_ALL_FINDINGS",
             )
             pid = cp.get("policyId")
             # Poll THIS policy's own status to terminal — do NOT rely on a fresh

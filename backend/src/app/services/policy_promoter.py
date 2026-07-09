@@ -75,13 +75,24 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
         if status == "ACTIVE":
             active += 1
             continue
-        # Drop a stale/failed one, then (re)create.
+        # Drop a stale/failed one, then (re)create. Policy names are account-global
+        # and delete_policy is ASYNC — recreating with the SAME name too soon hits
+        # ConflictException ("policy name already exists") which the create's
+        # except swallows, so the policy silently never gets recreated and stays
+        # CREATE_FAILED forever (root cause: promoter never converged the permit).
+        # POLL until the old policy is actually gone before reusing the name.
         if cur:
+            _old_pid = cur.get("policyId") or cur.get("id")
             try:
-                ctrl.delete_policy(policyEngineId=engine_id, policyId=cur.get("policyId") or cur.get("id"))
+                ctrl.delete_policy(policyEngineId=engine_id, policyId=_old_pid)
             except Exception:  # noqa: BLE001
                 pass
-            time.sleep(2)  # let the name free up before reuse
+            for _ in range(15):  # up to ~45s for async deletion to free the name
+                try:
+                    ctrl.get_policy(policyEngineId=engine_id, policyId=_old_pid)
+                    time.sleep(3)
+                except Exception:  # noqa: BLE001
+                    break  # get_policy 404 => deletion complete, name is free
         try:
             cp = ctrl.create_policy(
                 policyEngineId=engine_id, name=name,

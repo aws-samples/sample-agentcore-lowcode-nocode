@@ -143,11 +143,16 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
             else:
                 logger.info("promote: policy %s still %s (gateway converging)", name, final)
         except Exception as e:  # noqa: BLE001
-            # ConflictException == a concurrent promoter run already recreated
-            # this name. That is BENIGN — do NOT delete it (that would restart the
-            # clobber race). Leave it; the next poll will see it CREATING/ACTIVE.
+            # ConflictException is BENIGN and self-healing — a concurrent promoter
+            # run (Lambda scale-out on overlapping status polls) is already acting
+            # on this policy. Two forms seen live: "already exists" (concurrent
+            # create) and "Concurrent modification ... / cannot be updated while it
+            # is in UPDATING status" (concurrent update). In BOTH cases another run
+            # owns the transition — do NOT delete or retry destructively here; the
+            # next poll sees it CREATING/UPDATING/ACTIVE and converges.
             if "ConflictException" in type(e).__name__ or "already exists" in str(e):
-                logger.info("promote: %s already (re)created by a concurrent run — leaving it", name)
+                logger.info("promote: %s owned by a concurrent run (%s) — leaving it",
+                            name, str(e)[:80])
             else:
                 logger.info("promote: recreate of %s not yet valid: %s", name, str(e)[:120])
 

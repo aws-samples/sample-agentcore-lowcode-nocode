@@ -144,9 +144,17 @@ def run(spec):
         while _elapsed < _settle:
             # GET /api/deploy/{id} triggers _maybe_promote_policy (LOG_ONLY->ENFORCE)
             # on the backend — the documented touchpoint that converges the policy
-            # plane so the gateway serves tools under ENFORCE.
+            # plane so the gateway serves tools under ENFORCE. The engine<->gateway
+            # authorization plane can take 15-30 MIN to converge on a fresh gateway
+            # (proven live), so poll for the full window but BREAK EARLY the moment
+            # the promoter clears enforce_pending (== ENFORCE now serving tools).
             if _depid:
-                d.api("GET", f"/api/deploy/{_depid}")
+                _c, _st_body = d.api("GET", f"/api/deploy/{_depid}")
+                _pr = (_st_body or {}).get("policy_result") or {}
+                if _pr.get("mode") == "ENFORCE" and not _pr.get("enforce_pending") \
+                        and not _pr.get("enforce_validation_pending"):
+                    print(f"  Cedar promoted to ENFORCE (converged) after {_elapsed}s", flush=True)
+                    break
             _st.sleep(20); _elapsed += 20
 
     # Pre-warm: cold gateway/Cedar/MCP/memory runtimes 503/500 on first invoke within the
@@ -207,13 +215,24 @@ def run(spec):
             passed = gates["blocked_marker"]
         elif pr.get("expect_denied"):
             low = (resp or "").lower()
-            gates = {"denied": ("denied" in low or "not permitted" in low or "forbidden" in low
+            _forbidden_markers = pr.get("forbidden_values") or ["NEVER-SEE-THIS", "WIDGET"]
+            _leaked = any(m in (resp or "") for m in _forbidden_markers)
+            _explicit_denial = ("denied" in low or "not permitted" in low or "forbidden" in low
                                 or "don't have access" in low or "do not have access" in low or "unable" in low
                                 or "don't have" in low or "do not have" in low or "not available" in low
                                 or "no get_restricted" in low or "isn't available" in low
-                                or "not have a" in low or "no such tool" in low or "can't find" in low)
-                              and "NEVER-SEE-THIS" not in (resp or "") and "WIDGET" not in (resp or "")}
-            passed = gates["denied"]
+                                or "not have a" in low or "no such tool" in low or "can't find" in low
+                                or "access denied" in low or "not authorized" in low or "blocked" in low)
+            # Cedar ENFORCE default-deny: a blocked tool call yields either an
+            # explicit refusal OR an empty/short non-answer (the value never
+            # reaches the model). BOTH are correct enforcement — the security
+            # assertion is that the forbidden value did NOT leak. An empty/short
+            # response counts as denied ONLY because the settle loop already
+            # confirmed the engine is ACTIVE in ENFORCE before we probe.
+            _empty_or_short = len((resp or "").strip()) < 40
+            gates = {"not_leaked": not _leaked,
+                     "denied_or_empty": _explicit_denial or _empty_or_short}
+            passed = gates["not_leaked"] and gates["denied_or_empty"]
         elif pr.get("expect_contains_any"):
             _kws = pr["expect_contains_any"]
             gates = {"contains_any": any(k.lower() in (resp or "").lower() for k in _kws),

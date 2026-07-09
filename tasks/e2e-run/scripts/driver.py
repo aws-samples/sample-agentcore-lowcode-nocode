@@ -185,8 +185,13 @@ def invoke_direct(runtime_id, prompt, session_id=None, arn=None, timeout=300):
     import boto3
     if not arn:
         arn = f"arn:aws:bedrock-agentcore:{REGION}:{boto3.client('sts').get_caller_identity()['Account']}:runtime/{runtime_id}"
+    # retries=0 + explicit connect_timeout so a slow/cold runtime can't stack
+    # botocore's default 3 retries on top of `timeout` and hang for many minutes
+    # (observed live: a cold gateway turn exceeding read_timeout retried silently).
+    _Config = __import__("botocore.config", fromlist=["Config"]).Config
     dp = boto3.client("bedrock-agentcore", region_name=REGION,
-                      config=__import__("botocore.config", fromlist=["Config"]).Config(read_timeout=timeout))
+                      config=_Config(connect_timeout=15, read_timeout=timeout,
+                                     retries={"max_attempts": 0}))
     kwargs = dict(agentRuntimeArn=arn, qualifier="DEFAULT",
                   payload=json.dumps({"prompt": prompt}).encode(),
                   contentType="application/json", accept="application/json")
@@ -319,6 +324,16 @@ def resolve_runtime(state):
     """
     rid = state.get("runtime_id") or state.get("runtimeId")
     arn = state.get("runtime_arn") or state.get("runtimeArn")
+    # The deployment record stores runtime_endpoint (the ENDPOINT arn, i.e.
+    # .../runtime/<id>/runtime-endpoint/DEFAULT). invoke_agent_runtime wants the
+    # BARE runtime arn + qualifier="DEFAULT" separately — passing the endpoint arn
+    # yields ResourceNotFoundException. Derive the bare runtime arn here.
+    if not arn:
+        ep = state.get("runtime_endpoint") or state.get("runtimeEndpoint") or ""
+        if "/runtime-endpoint/" in ep:
+            arn = ep.split("/runtime-endpoint/")[0]
+        elif ep.startswith("arn:"):
+            arn = ep
     if not rid and arn:
         rid = arn.split("/")[-1]
     if not rid:

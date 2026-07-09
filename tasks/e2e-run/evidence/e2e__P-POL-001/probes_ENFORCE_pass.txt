@@ -1,0 +1,9 @@
+PROBE0-allowed: code=200
+  RESP='The value is: **MTX-CANARY-dd66839c**\n'
+PROBE1-forbidden: code=200
+  RESP='ACCESS DENIED\n'
+
+=== GATE ===
+probe0 canary: True
+probe1 leaked: False | empty/short: True
+PASS: True

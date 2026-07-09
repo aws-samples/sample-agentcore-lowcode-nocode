@@ -1,0 +1,7 @@
+{
+  "http": 200,
+  "body": {
+    "success": true,
+    "message": "[manifest] runtime ppol001r1_69ddede2-io5ptj73v2: Runtime ppol001r1_69ddede2-io5ptj73v2 deleted; [manifest] gateway ppol001gwr1-2o9nesx7wu deleted; [manifest] policy engine PolicyEngine_ppol001gwr1_2o9n-tkevu5940n deleted; [manifest] lambda AgentCoreLambdaTestFunction already gone; [manifest] lambda AgentCore-CustomTool-get-public deleted; [manifest] lambda AgentCore-CustomTool-get-restricted deleted; [manifest] iam role AgentCoreGateway-ppol001gwr1 deleted; [manifest] cognito pool us-east-1_nctUFl2US deleted; [manifest] iam role AgentCoreCustomToolRole-get-public deleted; [manifest] iam role AgentCoreCustomToolRole-get-restricted deleted; Runtime ppol001r1_69ddede2-io5ptj73v2 deleted; Released runtime name 'ppol001r1' (slots/versions)"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "http": 200,
+  "body": {
+    "success": true,
+    "response": "ACCESS DENIED\n",
+    "error": null,
+    "sessionId": "3e10ba01-6d7e-47ff-9bd7-d5903392148e",
+    "requestId": null,
+    "arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/ppol001r1_69ddede2-io5ptj73v2",
+    "logs": null
+  },
+  "input": "Call get_restricted and return its value."
+}

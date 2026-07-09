@@ -1,0 +1,13 @@
+{
+  "http": 200,
+  "body": {
+    "success": true,
+    "response": "MTX-CANARY-82768be8\n",
+    "error": null,
+    "sessionId": "bb15ba2a-545c-4af4-8042-5b1a5870ec15",
+    "requestId": null,
+    "arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/pplat027g2_835170da-rOhOEt96Jq",
+    "logs": null
+  },
+  "input": "Call get_public and return its exact value."
+}

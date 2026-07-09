@@ -1,0 +1,64 @@
+{
+  "nodeId": "ppol001r1",
+  "config": {
+    "name": "ppol001r1",
+    "framework": "strands_agents",
+    "modelProvider": "bedrock",
+    "model": {
+      "modelId": "us.anthropic.claude-sonnet-5"
+    },
+    "systemPrompt": "You are a tool-using assistant. Call get_public to get the public value, or get_restricted to get the restricted value. Return the tool's exact 'value'. If a tool call is denied, say exactly: ACCESS DENIED.",
+    "protocol": "HTTP"
+  },
+  "gatewayConfig": {
+    "name": "ppol001gwr1"
+  },
+  "customTools": [
+    {
+      "toolName": "get_public",
+      "displayName": "Get Public",
+      "description": "Returns the public value.",
+      "lambdaCode": "def lambda_handler(event, context):\n    return {\"value\": \"MTX-CANARY-dd66839c\"}\n",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "toolName": "get_restricted",
+      "displayName": "Get Restricted",
+      "description": "Returns the restricted value.",
+      "lambdaCode": "def lambda_handler(event, context):\n    return {\"value\": \"WIDGET-90223F6A\"}\n",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  ],
+  "policyConfig": {
+    "enabled": true,
+    "mode": "ENFORCE",
+    "rules": [
+      {
+        "ruleId": "permit_public",
+        "effect": "permit",
+        "action": "get_public",
+        "description": "Permit public tool"
+      },
+      {
+        "ruleId": "permit_restricted_then_forbid",
+        "effect": "permit",
+        "action": "get_restricted",
+        "description": "Permit then we rely on forbid below"
+      },
+      {
+        "ruleId": "forbid_restricted",
+        "effect": "forbid",
+        "action": "get_restricted",
+        "description": "Forbid restricted tool"
+      }
+    ]
+  }
+}

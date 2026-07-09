@@ -1,0 +1,58 @@
+{
+  "nodeId": "ppol003r1",
+  "config": {
+    "name": "ppol003r1",
+    "framework": "strands_agents",
+    "modelProvider": "bedrock",
+    "model": {
+      "modelId": "us.anthropic.claude-sonnet-5"
+    },
+    "systemPrompt": "Use gateway tools to answer. If a tool call is denied, say DENIED.",
+    "protocol": "HTTP"
+  },
+  "gatewayConfig": {
+    "name": "ppol003gwr1"
+  },
+  "customTools": [
+    {
+      "toolName": "allowed_probe",
+      "displayName": "allowed_probe",
+      "description": "Returns allowed token",
+      "lambdaCode": "def lambda_handler(event, context):\n    return {\"token\": \"MTX-CANARY-POL3\", \"source\": \"lambda\"}\n",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    },
+    {
+      "toolName": "forbidden_probe",
+      "displayName": "forbidden_probe",
+      "description": "Returns forbidden secret",
+      "lambdaCode": "def lambda_handler(event, context):\n    return {\"token\": \"NEVER-SEE-THIS\", \"source\": \"lambda\"}\n",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  ],
+  "policyConfig": {
+    "enabled": true,
+    "mode": "ENFORCE",
+    "rules": [
+      {
+        "ruleId": "permit_allowed",
+        "effect": "permit",
+        "action": "allowed_probe",
+        "description": "permit allowed"
+      },
+      {
+        "ruleId": "forbid_forbidden",
+        "effect": "forbid",
+        "action": "forbidden_probe",
+        "description": "forbid forbidden"
+      }
+    ]
+  }
+}

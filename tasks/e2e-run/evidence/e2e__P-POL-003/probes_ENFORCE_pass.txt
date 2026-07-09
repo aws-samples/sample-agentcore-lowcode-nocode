@@ -1,0 +1,9 @@
+PROBE0-allowed: code=200
+  RESP='The token returned by `allowed_probe` is exactly:\n\n**MTX-CANARY-POL3**\n'
+PROBE1-forbidden: code=200
+  RESP="I don't have access to a `forbidden_probe` tool — only `allowed_probe` is available to me. DENIED\n"
+
+=== GATE ===
+probe0 canary MTX-CANARY-POL3: True
+probe1 leaked: False empty/short: False
+PASS: True

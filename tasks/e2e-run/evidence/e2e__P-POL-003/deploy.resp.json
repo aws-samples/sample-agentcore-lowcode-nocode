@@ -1,0 +1,9 @@
+{
+  "http": 202,
+  "body": {
+    "deploymentId": "2a4f909a-2afb-43e3-8d4e-6fde3c4cdf39",
+    "executionArn": "arn:aws:states:us-east-1:123456789012:execution:agentcore-workflow-e2e-deployment:deploy-2a4f909a-2afb-43e3-8d4e-6fde3c4cdf39",
+    "status": "pending",
+    "message": "Deployment started"
+  }
+}

@@ -554,17 +554,17 @@ def handler(event: dict, context) -> dict:
                 attempt = 0
                 while (status != "ACTIVE"
                        and any(t in reason.lower() for t in _TRANSIENT)
-                       and attempt < 12):
+                       and attempt < 30):
                     attempt += 1
                     logger.warning(
-                        "Policy %s CREATE_FAILED (transient, attempt %d/12): %s — recreating",
+                        "Policy %s CREATE_FAILED (transient, attempt %d/30): %s — recreating",
                         pol_name, attempt, reason,
                     )
                     try:
                         agentcore_ctrl.delete_policy(policyEngineId=engine_id, policyId=pid)
                     except Exception:  # noqa: BLE001
                         pass
-                    _t.sleep(20)  # steady 20s waits for engine convergence
+                    _t.sleep(25)  # steady 25s waits; engine<->gateway authz converges in ~5-15min
                     pol = name_to_stmt.get(pol_name, {})
                     try:
                         cp2 = _create_policy_when_engine_ready(

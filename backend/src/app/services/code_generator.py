@@ -575,9 +575,16 @@ def _discover_gateway_tools():
     only after retries are exhausted (preserves the Bug-105 wiring-proof gate).
     """
     import logging as _gw_log
+    import os as _gw_os
     import time as _gw_time
     _gw_logger = _gw_log.getLogger("agentcore.gateway")
-    attempts = 6
+    # A Cedar-ENFORCE gateway's policy plane can take minutes (not seconds) to
+    # converge to a servable tool list after a fresh deploy — a plain gateway
+    # serves tools in ~60s, but ENFORCE mode lags. This retry runs at CONTAINER
+    # INIT (eager warm), which has a generous startup budget, so we can afford a
+    # wide window. Tunable via GATEWAY_DISCOVERY_ATTEMPTS / _BACKOFF_S.
+    attempts = int(_gw_os.environ.get("GATEWAY_DISCOVERY_ATTEMPTS", "30"))
+    backoff = int(_gw_os.environ.get("GATEWAY_DISCOVERY_BACKOFF_S", "15"))
     for attempt in range(1, attempts + 1):
         mcp_client = MCPClient(_create_transport)
         mcp_client.start()
@@ -593,7 +600,7 @@ def _discover_gateway_tools():
             # MCP session. Do NOT stop() it.
             return tools
         # Empty attempt: stop this client so its daemon thread + http session
-        # are not leaked across the (up to 6) retries on a cold start.
+        # are not leaked across the retries on a cold start.
         try:
             mcp_client.stop(None, None, None)
         except Exception:  # noqa: BLE001
@@ -601,33 +608,41 @@ def _discover_gateway_tools():
         if attempt < attempts:
             _gw_logger.warning(
                 "Gateway tools/list returned 0 tools (attempt %d/%d) from %s — "
-                "retrying with a fresh MCP session.",
-                attempt, attempts, GATEWAY_URL,
+                "retrying with a fresh MCP session in %ds.",
+                attempt, attempts, GATEWAY_URL, backoff,
             )
-            _gw_time.sleep(10)
+            _gw_time.sleep(backoff)
     return []
 
 _agent = None
+import threading as _agent_thr
+_agent_lock = _agent_thr.Lock()
 
 def _get_agent():
     global _agent
     if _agent is not None:
         return _agent
-    model = BedrockModel(model_id=MODEL_ID, region_name=REGION)
-    if GATEWAY_URL:
-        tools = _discover_gateway_tools()
-        # Wiring proof gate: a gateway-enabled agent that came up with zero
-        # tools (after retries) is silently broken. Surface it as an error
-        # rather than letting the model bluff a canary out of the system prompt.
-        if not tools:
-            raise RuntimeError(
-                f"Gateway MCPClient returned 0 tools from {{GATEWAY_URL}} after retries — "
-                "gateway wiring is broken. Check Cognito credentials, gateway target "
-                "schemas, and that the target Lambda has been deployed."
-            )
-        _agent = Agent(model=model, tools=tools, system_prompt=SYSTEM_PROMPT)
-    else:
-        _agent = Agent(model=model, system_prompt=SYSTEM_PROMPT)
+    # Serialize the (possibly minutes-long) gateway discovery: the background
+    # warm thread and the first invoke must not run two concurrent discoveries.
+    # Whoever gets the lock builds the agent; the other blocks and reuses it.
+    with _agent_lock:
+        if _agent is not None:
+            return _agent
+        model = BedrockModel(model_id=MODEL_ID, region_name=REGION)
+        if GATEWAY_URL:
+            tools = _discover_gateway_tools()
+            # Wiring proof gate: a gateway-enabled agent that came up with zero
+            # tools (after retries) is silently broken. Surface it as an error
+            # rather than letting the model bluff a canary out of the system prompt.
+            if not tools:
+                raise RuntimeError(
+                    f"Gateway MCPClient returned 0 tools from {{GATEWAY_URL}} after retries — "
+                    "gateway wiring is broken. Check Cognito credentials, gateway target "
+                    "schemas, and that the target Lambda has been deployed."
+                )
+            _agent = Agent(model=model, tools=tools, system_prompt=SYSTEM_PROMPT)
+        else:
+            _agent = Agent(model=model, system_prompt=SYSTEM_PROMPT)
     return _agent
 
 
@@ -639,19 +654,24 @@ def invoke(payload):
     result = agent(message)
     return {{"response": str(result)}}
 
-# Eager warm at CONTAINER INIT: gateway tool discovery (up to 6x10s) must run during
-# the container's startup budget, NOT lazily inside the first invoke — the data-plane
-# invoke is capped at ~30s and a cold gateway tool plane blows past it, returning 503
-# "Service Unavailable" on the very first call. Building the agent here means the first
-# real invoke hits an already-warmed agent. Guarded so a transient failure at import
-# doesn't crash the container — _get_agent() retries lazily on the first invoke.
-try:
-    _get_agent()
-except Exception as _warm_err:  # noqa: BLE001
-    import logging as _wl
-    _wl.getLogger("agentcore.gateway").warning(
-        "Eager gateway warm at init failed (will retry on first invoke): %s", _warm_err
-    )
+# Eager warm at CONTAINER INIT — in a BACKGROUND thread so the HTTP server starts
+# immediately and passes AgentCore's /ping health check, while gateway tool discovery
+# (which for a Cedar-ENFORCE gateway can take minutes to converge) runs asynchronously.
+# The data-plane invoke is capped ~30s, so a cold gateway tool plane blows past it and
+# returns 503 on the first call if discovery runs lazily inside invoke. Warming in the
+# background means _get_agent() (called from invoke) blocks on the already-in-progress
+# warm instead of starting a fresh cold discovery under the 30s ceiling.
+if GATEWAY_URL:
+    import threading as _thr
+    def _bg_warm():
+        try:
+            _get_agent()
+        except Exception as _warm_err:  # noqa: BLE001
+            import logging as _wl
+            _wl.getLogger("agentcore.gateway").warning(
+                "Background gateway warm failed (invoke will retry): %s", _warm_err
+            )
+    _thr.Thread(target=_bg_warm, name="gateway-warm", daemon=True).start()
 
 if __name__ == "__main__":
     app.run()

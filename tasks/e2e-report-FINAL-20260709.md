@@ -144,3 +144,27 @@ None of 1-6 are fixable by further harness iteration or the platform-code change
 me without: (a) AgentCore Cedar discovery-permit schema, (b) model tool-use tuning, or
 (c) AWS-service-side provisioning-latency changes. Reporting RED per the anti-rationalization
 clause rather than redefining these failures as passes.
+
+## GROUND-TRUTH root cause of Cedar cells (control-plane proven, deepest level)
+After deploying eager-warm + 30x15s discovery + a settle loop that polls GET /api/deploy/{id}
+to drive the lazy Cedar promoter, POL-001 STILL failed. get-policy on the live engine showed:
+  status: CREATE_FAILED
+  statusReasons: ["Insufficient permissions to call gateway with ID ppol001gwp8-..."]
+  statement: permit(principal is AgentCore::OAuthUser, action in [AgentCore::Action::"CT-get-public___get_public"], resource == AgentCore::Gateway::"<arn>")  # CORRECT
+So: the Cedar PERMIT IS CORRECT, targets are READY, engine is ENFORCE — but the policy engine
+itself cannot call the freshly-created gateway to VALIDATE the permit, so the policy never
+reaches ACTIVE, and AgentCore default-deny serves 0 tools at MCP tools/list.
+create_policy_engine takes NO roleArn — the engine→gateway authorization is AgentCore-service-
+managed, not a role the platform controls. The platform already retries (6x20s at deploy) and
+lazy-promotes (recreate on status/invoke touchpoints); both hit the same persistent
+"Insufficient permissions to call gateway" on a fresh gateway. P-POL-001 PASSED on the
+long-lived dev stack, so this converges given enough gateway age — it is AgentCore service
+provisioning/authorization latency, NOT a platform-code defect. No platform-code or harness
+change closes it; only AWS-service-side convergence (or a pre-warmed persistent gateway) does.
+
+## FINAL committed platform improvements (branch fix/codegen-tool-output-and-gateway-warm)
+1. execute_python stream drain (real stdout).
+2. tools-agent _final_text (real answer vs tool name).
+3. gateway agent background eager-warm + tunable 30x15s discovery window + thread-safe _get_agent.
+All unit-tested (169 pass); fixes 1-2 validated live; fix 3 proven to retry correctly (the
+gateway simply never serves under the un-validatable Cedar policy — a service issue, not the fix).

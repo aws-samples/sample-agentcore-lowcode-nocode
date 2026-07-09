@@ -628,7 +628,7 @@ def _get_agent():
     with _agent_lock:
         if _agent is not None:
             return _agent
-        model = BedrockModel(model_id=MODEL_ID, region_name=REGION)
+        model = BedrockModel(model_id=MODEL_ID, region_name=REGION, max_tokens=8192)
         if GATEWAY_URL:
             tools = _discover_gateway_tools()
             # Wiring proof gate: a gateway-enabled agent that came up with zero
@@ -698,6 +698,19 @@ def _generate_tools_agent(
     kb_config: Optional[dict] = None,
 ) -> str:
     """Generate agent with built-in tools (code interpreter, browser, KB retrieve)."""
+    # When the code interpreter is available, the model must ACTUALLY CALL
+    # execute_python for any computation rather than answering from its own
+    # reasoning (which produces fabricated/incorrect results for non-trivial
+    # arithmetic — the tool exists precisely so results are computed, not guessed).
+    # Prepend a hard directive so the tool is used deterministically.
+    if has_code_interpreter:
+        system_prompt = (
+            "You have an execute_python tool that runs code in a real sandbox. "
+            "For ANY computation, data processing, hashing, or arithmetic beyond "
+            "trivial single-digit sums, you MUST call execute_python and report the "
+            "tool's actual stdout VERBATIM. NEVER compute or guess results yourself "
+            "and NEVER describe calling the tool without actually calling it.\n\n"
+        ) + system_prompt
     imports = [
         '"""AgentCore Runtime Agent — Strands Agent with Built-in Tools"""',
         "import os",
@@ -866,6 +879,89 @@ def browse_web(url: str, action: str = "navigate") -> str:
 '''
 
     tl = ", ".join(tools_list)
+
+    # Deterministic tool-use fallback for the code interpreter: some models emit
+    # the tool call as PROSE (```python ...```) instead of a real tool_use block,
+    # then report a fabricated result. When the Strands turn returned code-looking
+    # text without executing, re-run via boto3 Converse with
+    # toolChoice={{"tool": {{"name": "execute_python"}}}} — Bedrock then FORCES a real
+    # tool call, we run it through the same code_session, and return the true stdout.
+    if has_code_interpreter:
+        ci_forced_helper = '''
+import re as _ci_re
+import boto3 as _ci_boto3
+
+def _looks_unexecuted(t):
+    # The model sometimes NARRATES a tool call instead of emitting a real tool_use
+    # block (then fabricates the result). Detect the common evasion phrasings AND
+    # code-block/tool narration; when in doubt, force real execution (the forced
+    # path is idempotent for genuine compute requests).
+    if not t:
+        return True
+    tl = t.lower()
+    _narration = (
+        "execute_python", "```", "i'll call", "i will call", "let me call",
+        "let me run", "i'll run", "i will run", "the stdout", "stdout was",
+        "based on the exact", "based on executing", "the output is", "the result is",
+        "running the code", "executing the code", "the tool returned", "would output",
+    )
+    return any(k in tl for k in _narration)
+
+def _forced_execute(prompt):
+    """Force a real execute_python call via Converse toolChoice, return stdout."""
+    br = _ci_boto3.client("bedrock-runtime", region_name=REGION)
+    tool_config = {
+        "tools": [{"toolSpec": {
+            "name": "execute_python",
+            "description": "Execute Python code in a secure sandbox and return stdout.",
+            "inputSchema": {"json": {"type": "object",
+                "properties": {"code": {"type": "string", "description": "Python code to run"}},
+                "required": ["code"]}},
+        }}],
+        "toolChoice": {"tool": {"name": "execute_python"}},
+    }
+    messages = [{"role": "user", "content": [{"text": prompt}]}]
+    resp = br.converse(modelId=MODEL_ID, system=[{"text": SYSTEM_PROMPT}],
+                       messages=messages, toolConfig=tool_config)
+    out = resp["output"]["message"]
+    for block in out.get("content", []):
+        if "toolUse" in block:
+            code = block["toolUse"]["input"].get("code", "")
+            stdout = execute_python(code)  # real sandbox execution
+            # feed the tool result back for a final natural-language answer
+            messages.append(out)
+            messages.append({"role": "user", "content": [{"toolResult": {
+                "toolUseId": block["toolUse"]["toolUseId"],
+                "content": [{"text": stdout}]}}]})
+            resp2 = br.converse(modelId=MODEL_ID, system=[{"text": SYSTEM_PROMPT}],
+                                messages=messages)
+            for b2 in resp2["output"]["message"].get("content", []):
+                if "text" in b2:
+                    return b2["text"]
+            return stdout
+    return None
+'''
+        ci_forced_call = '''    import logging as _fl
+    _cilog = _fl.getLogger("agentcore.ci")
+    _pl = (prompt or "").lower()
+    _compute_intent = any(k in _pl for k in (
+        "execute_python", "run ", "compute", "calculate", "print(", "hashlib",
+        "sha256", "code interpreter", "python", "stdout", "evaluate"))
+    if _looks_unexecuted(text) or _compute_intent:
+        _cilog.warning("CI result looks unexecuted (len=%d); forcing execute_python via toolChoice", len(text or ""))
+        try:
+            forced = _forced_execute(prompt)
+            if forced:
+                _cilog.warning("forced execute produced result (len=%d)", len(forced))
+                text = forced
+            else:
+                _cilog.warning("forced execute returned None")
+        except Exception as _fe:
+            _cilog.warning("forced execute failed: %s", _fe)'''
+    else:
+        ci_forced_helper = ""
+        ci_forced_call = "    pass"
+
     return (
         "\n".join(imports)
         + f"""
@@ -881,7 +977,11 @@ _agent = None
 def _get_agent():
     global _agent
     if _agent is None:
-        model = BedrockModel(model_id=MODEL_ID, region_name=REGION)
+        # Raise max_tokens: agentic-RAG (multi-hop/reranked) and multi-tool loops
+        # accumulate large context across tool calls and otherwise hit
+        # MaxTokensReachedException on the default output budget. 8192 is safe for
+        # Claude Sonnet/Opus 5 and comfortably covers multi-hop retrieval answers.
+        model = BedrockModel(model_id=MODEL_ID, region_name=REGION, max_tokens=8192)
         _agent = Agent(model=model, system_prompt=SYSTEM_PROMPT, tools=[{tl}])
     return _agent
 
@@ -902,10 +1002,14 @@ def _final_text(result):
         pass
     return str(result).strip()
 
+{ci_forced_helper}
 @app.entrypoint
 def invoke(payload):
-    result = _get_agent()(payload.get("prompt", "Hello"))
-    return {{"response": _final_text(result)}}
+    prompt = payload.get("prompt", "Hello")
+    result = _get_agent()(prompt)
+    text = _final_text(result)
+{ci_forced_call}
+    return {{"response": text}}
 
 if __name__ == "__main__":
     app.run()
@@ -1336,7 +1440,7 @@ def _get_agent(**extra_kwargs):
     global _model, _agent
     if _agent is None or extra_kwargs:
         if _model is None:
-            _model = BedrockModel(model_id=MODEL_ID, region_name=REGION)
+            _model = BedrockModel(model_id=MODEL_ID, region_name=REGION, max_tokens=8192)
         _agent = Agent(model=_model, {agent_tools}system_prompt=SYSTEM_PROMPT, **extra_kwargs)
     return _agent
 

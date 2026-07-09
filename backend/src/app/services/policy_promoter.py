@@ -90,39 +90,38 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
         if status in ("CREATING", "DELETING", "UPDATING"):
             logger.info("promote: policy %s is %s (another run owns it) — skipping", name, status)
             continue
-        # Drop a stale/failed one, then (re)create. Policy names are account-global
-        # and delete_policy is ASYNC — recreating with the SAME name too soon hits
-        # ConflictException ("policy name already exists") which the create's
-        # except swallows, so the policy silently never gets recreated and stays
-        # CREATE_FAILED forever (root cause: promoter never converged the permit).
-        # POLL until the old policy is actually gone before reusing the name.
-        if cur:
-            _old_pid = cur.get("policyId") or cur.get("id")
-            try:
-                ctrl.delete_policy(policyEngineId=engine_id, policyId=_old_pid)
-            except Exception:  # noqa: BLE001
-                pass
-            for _ in range(15):  # up to ~45s for async deletion to free the name
-                try:
-                    ctrl.get_policy(policyEngineId=engine_id, policyId=_old_pid)
-                    time.sleep(3)
-                except Exception:  # noqa: BLE001
-                    break  # get_policy 404 => deletion complete, name is free
+        _desc = pol.get("description") or "Auto-permit for allowed gateway tools (ENFORCE)."
+        _defn = {"cedar": {"statement": stmt}}
         try:
-            cp = ctrl.create_policy(
-                policyEngineId=engine_id, name=name,
-                # create_policy requires a NON-EMPTY description (min length 1) —
-                # an empty string fails parameter validation and the create never
-                # happens (the bug that made promotion silently report "not active
-                # yet" even after the gateway converged). Default to a meaningful one.
-                description=(pol.get("description") or "Auto-permit for allowed gateway tools (ENFORCE)."),
-                definition={"cedar": {"statement": stmt}},
-                # IGNORE_ALL_FINDINGS: skip the gateway-calling validation that fails
-                # "Insufficient permissions to call gateway" on fresh gateways (proven
-                # live). Enforcement preserved via AgentCore default-deny.
-                validationMode="IGNORE_ALL_FINDINGS",
-            )
-            pid = cp.get("policyId")
+            if cur:
+                # RECOVER IN PLACE (the elegant race-free fix): a CREATE_FAILED
+                # policy already occupies this account-global name. The old code
+                # deleted it and recreated — but delete_policy is ASYNC, opening a
+                # name-free window in which a CONCURRENT status-poll promoter run
+                # (Lambda scales out; clients poll ~every 20s) creates its own,
+                # then the two clobber each other forever (observed live: 40+ min
+                # of CREATING/CREATE_FAILED/DELETING churn on a gateway that a
+                # single un-raced call converges instantly). update_policy mutates
+                # the SAME stable policyId with no deletion — no name-free window,
+                # so overlapping runs are idempotent (both update the same id).
+                # This re-validates against the now-converged gateway → ACTIVE.
+                pid = cur.get("policyId") or cur.get("id")
+                ctrl.update_policy(
+                    policyEngineId=engine_id, policyId=pid,
+                    description=_desc, definition=_defn,
+                    validationMode="IGNORE_ALL_FINDINGS",
+                )
+            else:
+                cp = ctrl.create_policy(
+                    policyEngineId=engine_id, name=name,
+                    # create_policy requires a NON-EMPTY description (min length 1).
+                    description=_desc, definition=_defn,
+                    # IGNORE_ALL_FINDINGS: skip the gateway-calling validation that
+                    # fails "Insufficient permissions to call gateway" on fresh
+                    # gateways (proven live). Enforcement preserved via default-deny.
+                    validationMode="IGNORE_ALL_FINDINGS",
+                )
+                pid = cp.get("policyId")
             # Poll THIS policy's own status to terminal — do NOT rely on a fresh
             # list_policies(), which is eventually-consistent and returns 0 right
             # after a create (the bug that made promotion always report "not
@@ -131,7 +130,7 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
             for _ in range(10):
                 d = ctrl.get_policy(policyEngineId=engine_id, policyId=pid)
                 final = d.get("status", "")
-                if final in ("ACTIVE", "CREATE_FAILED", "FAILED"):
+                if final in ("ACTIVE", "CREATE_FAILED", "FAILED", "UPDATE_FAILED"):
                     break
                 time.sleep(3)
             if final == "ACTIVE":

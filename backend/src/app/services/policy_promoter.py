@@ -75,6 +75,21 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
         if status == "ACTIVE":
             active += 1
             continue
+        # RACE GUARD (root cause of the never-converging permit): this promoter
+        # runs on EVERY status poll, and the poller (UI / test harness) hits the
+        # status endpoint every ~20s. Lambda scales out, so 2+ promoter runs
+        # overlap. The old code unconditionally did delete->wait->create on the
+        # SAME account-global name, so overlapping runs clobbered each other:
+        # run A creates a fresh policy, run B (seeing it mid-create) deletes it
+        # and starts its own, forever — the exact CREATING/CREATE_FAILED/DELETING
+        # churn observed live for 40+ min on a gateway that a SINGLE un-raced
+        # create converges to ACTIVE instantly. Fix: never touch an in-flight
+        # (CREATING/DELETING) policy — another concurrent run owns it; just report
+        # not-yet-active and let it finish. Only recreate a genuinely terminal
+        # CREATE_FAILED/FAILED one.
+        if status in ("CREATING", "DELETING", "UPDATING"):
+            logger.info("promote: policy %s is %s (another run owns it) — skipping", name, status)
+            continue
         # Drop a stale/failed one, then (re)create. Policy names are account-global
         # and delete_policy is ASYNC — recreating with the SAME name too soon hits
         # ConflictException ("policy name already exists") which the create's
@@ -124,7 +139,13 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
             else:
                 logger.info("promote: policy %s still %s (gateway converging)", name, final)
         except Exception as e:  # noqa: BLE001
-            logger.info("promote: recreate of %s not yet valid: %s", name, str(e)[:120])
+            # ConflictException == a concurrent promoter run already recreated
+            # this name. That is BENIGN — do NOT delete it (that would restart the
+            # clobber race). Leave it; the next poll will see it CREATING/ACTIVE.
+            if "ConflictException" in type(e).__name__ or "already exists" in str(e):
+                logger.info("promote: %s already (re)created by a concurrent run — leaving it", name)
+            else:
+                logger.info("promote: recreate of %s not yet valid: %s", name, str(e)[:120])
 
     return active
 

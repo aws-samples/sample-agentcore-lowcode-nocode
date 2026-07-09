@@ -1099,6 +1099,12 @@ class PlatformStack(cdk.Stack):
                     "bedrock-agentcore:ListPolicyEngines",
                     "bedrock-agentcore:CreatePolicy",
                     "bedrock-agentcore:DeletePolicy",
+                    # UpdatePolicy: the lazy promoter recovers a CREATE_FAILED
+                    # permit by UPDATING it in place (race-free — no delete/create
+                    # name-collision window) once the gateway converges. Without
+                    # this action the update is silently AccessDenied and the
+                    # permit stays CREATE_FAILED forever, so ENFORCE never engages.
+                    "bedrock-agentcore:UpdatePolicy",
                     "bedrock-agentcore:ListPolicies",
                     "bedrock-agentcore:GetPolicy",
                     # Bug 134: gateway-scoped policy create/delete is authorized as

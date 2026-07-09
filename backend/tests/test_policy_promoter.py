@@ -115,6 +115,9 @@ def test_recovers_create_failed_in_place_without_delete():
     _, ukw = ctrl.update_policy.call_args
     assert ukw["policyId"] == "p1"
     assert ukw["validationMode"] == "IGNORE_ALL_FINDINGS"
+    # update_policy's description is a STRUCTURE {"optionalValue": str}, not a
+    # bare string (create_policy's is a string) — a str raises ParamValidationError.
+    assert isinstance(ukw["description"], dict) and "optionalValue" in ukw["description"]
 
 
 def test_skips_in_flight_policy_owned_by_concurrent_run():

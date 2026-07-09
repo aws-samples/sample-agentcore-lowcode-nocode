@@ -106,9 +106,14 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
                 # so overlapping runs are idempotent (both update the same id).
                 # This re-validates against the now-converged gateway → ACTIVE.
                 pid = cur.get("policyId") or cur.get("id")
+                # NOTE: update_policy's `description` is a STRUCTURE
+                # {"optionalValue": str} — NOT a bare string like create_policy's.
+                # Passing a str raises ParamValidationError (caught below), which
+                # silently left the policy CREATE_FAILED forever. Proven live: with
+                # the correct shape the stuck policy flips ACTIVE on the first poll.
                 ctrl.update_policy(
                     policyEngineId=engine_id, policyId=pid,
-                    description=_desc, definition=_defn,
+                    description={"optionalValue": _desc}, definition=_defn,
                     validationMode="IGNORE_ALL_FINDINGS",
                 )
             else:

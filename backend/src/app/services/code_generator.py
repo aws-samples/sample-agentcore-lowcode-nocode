@@ -639,6 +639,20 @@ def invoke(payload):
     result = agent(message)
     return {{"response": str(result)}}
 
+# Eager warm at CONTAINER INIT: gateway tool discovery (up to 6x10s) must run during
+# the container's startup budget, NOT lazily inside the first invoke — the data-plane
+# invoke is capped at ~30s and a cold gateway tool plane blows past it, returning 503
+# "Service Unavailable" on the very first call. Building the agent here means the first
+# real invoke hits an already-warmed agent. Guarded so a transient failure at import
+# doesn't crash the container — _get_agent() retries lazily on the first invoke.
+try:
+    _get_agent()
+except Exception as _warm_err:  # noqa: BLE001
+    import logging as _wl
+    _wl.getLogger("agentcore.gateway").warning(
+        "Eager gateway warm at init failed (will retry on first invoke): %s", _warm_err
+    )
+
 if __name__ == "__main__":
     app.run()
 '''
@@ -765,9 +779,34 @@ def execute_python(code: str, description: str = "") -> str:
     """Execute Python code in a secure sandbox. Use for calculations, data analysis, or any Python task."""
     with code_session(REGION) as client:
         response = client.invoke("executeCode", {"code": code, "language": "python", "clearContext": False})
+    # The AgentCore code-interpreter streams multiple events; the FIRST frame is
+    # often the invocation echo, not the execution output. Drain the whole stream
+    # and extract the real stdout/text (content[].text) instead of returning the
+    # first frame — otherwise the agent never sees stdout and fabricates a result.
+    texts = []
+    structured = None
     for event in response.get("stream", [response]):
-        result = event.get("result", event)
-        return json.dumps(result) if isinstance(result, dict) else str(result)
+        result = event.get("result", event) if isinstance(event, dict) else event
+        if isinstance(result, dict):
+            structured = result
+            content = result.get("content") or []
+            if isinstance(content, list):
+                for item in content:
+                    if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+                        texts.append(str(item["text"]))
+            for key in ("stdout", "output", "text"):
+                if result.get(key):
+                    texts.append(str(result[key]))
+            so = result.get("structuredContent")
+            if isinstance(so, dict) and so.get("stdout"):
+                texts.append(str(so["stdout"]))
+    if texts:
+        # de-dup while preserving order
+        seen = set()
+        out = [t for t in texts if not (t in seen or seen.add(t))]
+        return "\\n".join(out).strip()
+    if structured is not None:
+        return json.dumps(structured)
     return "No output"
 '''
 
@@ -826,10 +865,27 @@ def _get_agent():
         _agent = Agent(model=model, system_prompt=SYSTEM_PROMPT, tools=[{tl}])
     return _agent
 
+def _final_text(result):
+    # Extract the agent's final assistant text from a Strands AgentResult.
+    # str(result) can fall back to a tool name when the last turn was a tool_use
+    # with no synthesized text; pull the text content out of the result message
+    # so tool output actually reaches the caller instead of a bare tool name.
+    try:
+        msg = getattr(result, "message", None)
+        if isinstance(msg, dict):
+            content = msg.get("content") or []
+            texts = [c["text"] for c in content
+                     if isinstance(c, dict) and c.get("text")]
+            if texts:
+                return "\\n".join(texts).strip()
+    except Exception:
+        pass
+    return str(result).strip()
+
 @app.entrypoint
 def invoke(payload):
     result = _get_agent()(payload.get("prompt", "Hello"))
-    return {{"response": str(result)}}
+    return {{"response": _final_text(result)}}
 
 if __name__ == "__main__":
     app.run()

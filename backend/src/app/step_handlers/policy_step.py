@@ -547,24 +547,31 @@ def handler(event: dict, context) -> dict:
             failed = []
             for pol_name, pid in list(created_policy_ids):
                 status, reason = _await_policy(pid)
-                # Retry transient engine/gateway-consistency failures. The engine's
-                # CREATING->ACTIVE convergence can take a couple of minutes, so use
-                # a longer budget: 6 attempts × 20s = up to 2 min (within the 300s
-                # step timeout). Each retry deletes + recreates the policy.
+                # Retry transient engine/gateway-consistency failures with a SHORT
+                # budget only. The engine<->gateway authorization plane can take
+                # 5-15 MINUTES to converge on a freshly-created gateway (proven
+                # live: same engine + identical permit is CREATE_FAILED at gateway
+                # age ~12min, ACTIVE at ~17min). Blocking the deploy step that long
+                # is wrong — it makes deploys 12+ min AND still races the tail.
+                # So: try a couple of quick recreates here to catch the FAST-
+                # converging cases, then attach ENFORCE fail-closed with the permit
+                # still pending. The lazy promoter (policy_promoter) recreates the
+                # policy on later status/invoke touchpoints, once the gateway has
+                # aged into convergence — that is the real hands-off converger.
                 attempt = 0
                 while (status != "ACTIVE"
                        and any(t in reason.lower() for t in _TRANSIENT)
-                       and attempt < 30):
+                       and attempt < 6):
                     attempt += 1
                     logger.warning(
-                        "Policy %s CREATE_FAILED (transient, attempt %d/30): %s — recreating",
+                        "Policy %s CREATE_FAILED (transient, attempt %d/6): %s — recreating",
                         pol_name, attempt, reason,
                     )
                     try:
                         agentcore_ctrl.delete_policy(policyEngineId=engine_id, policyId=pid)
                     except Exception:  # noqa: BLE001
                         pass
-                    _t.sleep(25)  # steady 25s waits; engine<->gateway authz converges in ~5-15min
+                    _t.sleep(20)  # short waits; promoter finishes convergence post-deploy
                     pol = name_to_stmt.get(pol_name, {})
                     try:
                         cp2 = _create_policy_when_engine_ready(

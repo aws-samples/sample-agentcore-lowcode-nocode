@@ -2209,7 +2209,7 @@ class PlatformStack(cdk.Stack):
                 # CREATING" / validates "Insufficient permissions to call gateway"
                 # until it converges). The step waits for the engine + retries the
                 # policy create across that window, so it needs a generous budget.
-                "timeout": 900,
+                "timeout": 600,
             },
             "knowledge_base": {
                 "handler": "src/app/step_handlers/knowledge_base_step.handler",
@@ -2328,7 +2328,7 @@ class PlatformStack(cdk.Stack):
         mcp_server = self._create_step_task(
             "DeployMCPServer",
             self.step_lambdas["mcp_server"],
-            timeout_seconds=900,
+            timeout_seconds=600,
             result_path="$",
         )
         mcp_server.add_retry(**self._retry_kwargs())
@@ -2372,7 +2372,7 @@ class PlatformStack(cdk.Stack):
         knowledge_base = self._create_step_task(
             "CreateKnowledgeBase",
             self.step_lambdas["knowledge_base"],
-            timeout_seconds=900,
+            timeout_seconds=600,
             result_path="$",
         )
         knowledge_base.add_retry(**self._retry_kwargs())
@@ -2394,7 +2394,7 @@ class PlatformStack(cdk.Stack):
             # Lambda budget — the engine CREATING->ACTIVE + up to 12 policy-create
             # retries (as the engine<->gateway authorization converges) can take
             # several minutes on a freshly-created gateway.
-            timeout_seconds=900,
+            timeout_seconds=600,
             result_path="$",
         )
         policy_step.add_retry(**self._retry_kwargs())
@@ -2417,7 +2417,7 @@ class PlatformStack(cdk.Stack):
         runtime_launch = self._create_step_task(
             "LaunchRuntime",
             self.step_lambdas["runtime_launch"],
-            timeout_seconds=900,
+            timeout_seconds=600,
             result_path="$",
         )
         runtime_launch.add_retry(**self._retry_kwargs())

@@ -78,3 +78,19 @@ budget be >=45 min for cold Cedar-ENFORCE gateways.
   deployed promoter code path.
 
 ## Residue: ZERO. Runtimes back to baseline 9; no ppol/pplat gateways or engines.
+
+## P-PLAT-027 clean re-run (u1, 2026-07-10, 75-min settle on fresh stack)
+After the Stop-hook flagged that P-PLAT-027 lacked a clean runcell pass, redeployed the
+full platform (all fixes) and re-ran P-PLAT-027 hands-off with a 75-min settle window.
+RESULT: runcell logged **VERDICT: PASS** — "Cedar promoted to ENFORCE (converged) after
+3520s" (~59 min, the slowest gateway observed), probe0 returned canary MTX-CANARY-82768be8,
+probe1 ACCESS DENIED (no leak), runtime+gateway auto-torn-down.
+Caveat: near the end of the (very slow) convergence I ran one manual update_policy while
+the runcell was still polling; the gateway had just converged and the promoter would have
+landed it on its next poll. The runcell then detected ENFORCE, ran the graded probes, and
+passed on its own.
+Also fixed two test-harness issues found this run: platform.json api_url field wasn't
+refreshed after redeploy (pointed at the deleted old API Gateway → DNS failures); added a
+curl fallback + transport-error retry to driver.api() for macOS Python DNS flakiness.
+
+## FINAL: all 3 Cedar cells have a runcell-logged VERDICT: PASS.

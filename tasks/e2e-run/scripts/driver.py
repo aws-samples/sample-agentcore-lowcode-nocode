@@ -91,25 +91,67 @@ def access_token() -> str:
 
 
 def api(method: str, path: str, body=None, timeout=60):
-    tok = refresh_token()
     url = f"{API}{path}"
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method)
-    req.add_header("Authorization", f"Bearer {tok}")
-    req.add_header("Content-Type", "application/json")
+    # Retry transient transport errors (intermittent DNS "nodename nor servname
+    # provided", connection resets) with backoff — a single local network blip
+    # must NOT fail a long deploy/probe run. HTTP errors (4xx/5xx) are NOT
+    # retried here; they carry a real response the caller inspects.
+    last_err = None
+    for _attempt in range(4):
+        tok = refresh_token()
+        req = urllib.request.Request(url, data=data, method=method)
+        req.add_header("Authorization", f"Bearer {tok}")
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as r:
+                raw = r.read().decode()
+                code = r.status
+        except urllib.error.HTTPError as e:
+            raw = e.read().decode()
+            code = e.code
+        except Exception as e:
+            last_err = str(e)
+            # macOS Python 3.13 + custom SSL context intermittently fails DNS
+            # ("nodename nor servname provided") while the system resolver + curl
+            # succeed. Fall back to curl (uses the OS resolver directly) before
+            # giving up — proven reliable when urllib's resolver flakes.
+            cr = _curl(method, url, tok, data, timeout)
+            if cr is not None:
+                code, raw = cr
+                try:
+                    return code, json.loads(raw)
+                except Exception:
+                    return code, {"_raw": raw[:2000]}
+            time.sleep(3 * (_attempt + 1))
+            continue
+        try:
+            return code, json.loads(raw)
+        except Exception:
+            return code, {"_raw": raw[:2000]}
+    return 0, {"_transport_error": last_err}
+
+
+def _curl(method, url, tok, data, timeout):
+    """Fallback HTTP via the curl binary (OS resolver) when urllib DNS flakes.
+
+    Returns (code, body_str) or None if curl itself failed."""
+    import subprocess
+    cmd = ["curl", "-s", "-S", "--max-time", str(timeout),
+           "-X", method, url,
+           "-H", f"Authorization: Bearer {tok}",
+           "-H", "Content-Type: application/json",
+           "-w", "\n%{http_code}"]
+    if data is not None:
+        cmd += ["--data-binary", data.decode() if isinstance(data, bytes) else data]
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as r:
-            raw = r.read().decode()
-            code = r.status
-    except urllib.error.HTTPError as e:
-        raw = e.read().decode()
-        code = e.code
-    except Exception as e:
-        return 0, {"_transport_error": str(e)}
-    try:
-        return code, json.loads(raw)
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 10)
+        if out.returncode != 0:
+            return None
+        body, _, code = out.stdout.rpartition("\n")
+        return int(code), body
     except Exception:
-        return code, {"_raw": raw[:2000]}
+        return None
 
 
 def load_state():

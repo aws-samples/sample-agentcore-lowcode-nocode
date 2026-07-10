@@ -1,7 +1,7 @@
 {
-  "nodeId": "pplat027s1",
+  "nodeId": "pplat027u1",
   "config": {
-    "name": "pplat027s1",
+    "name": "pplat027u1",
     "framework": "strands_agents",
     "modelProvider": "bedrock",
     "model": {
@@ -11,7 +11,7 @@
     "protocol": "HTTP"
   },
   "gatewayConfig": {
-    "name": "pplat027gws1"
+    "name": "pplat027gwu1"
   },
   "customTools": [
     {

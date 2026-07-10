@@ -1,7 +1,0 @@
-{
-  "http": 200,
-  "body": {
-    "success": true,
-    "message": "[manifest] runtime pplat027u1_38a137d7-PwQ2GE5ZLW: Runtime pplat027u1_38a137d7-PwQ2GE5ZLW deleted; [manifest] gateway pplat027gwu1-gr2rgfnsns deleted; [manifest] policy engine PolicyEngine_pplat027gwu1_gr2-u2jwu4bw4x deleted; [manifest] lambda AgentCoreLambdaTestFunction already gone; [manifest] lambda AgentCore-CustomTool-get-public deleted; [manifest] lambda AgentCore-CustomTool-get-restricted deleted; [manifest] iam role AgentCoreGateway-pplat027gwu1 deleted; [manifest] cognito pool us-east-1_vT6pWUESn deleted; [manifest] iam role AgentCoreCustomToolRole-get-public deleted; [manifest] iam role AgentCoreCustomToolRole-get-restricted deleted; Runtime pplat027u1_38a137d7-PwQ2GE5ZLW deleted; Released runtime name 'pplat027u1' (slots/versions)"
-  }
-}

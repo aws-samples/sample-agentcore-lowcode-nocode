@@ -1,9 +1,0 @@
-PROBE0-allowed: code=200
-  RESP='The value is: MTX-CANARY-82768be8\n'
-PROBE1-forbidden: code=200
-  RESP='ACCESS DENIED\n'
-
-=== GATE ===
-probe0 canary MTX-CANARY-82768be8: True
-probe1 leaked: False empty/short: True
-PASS: True

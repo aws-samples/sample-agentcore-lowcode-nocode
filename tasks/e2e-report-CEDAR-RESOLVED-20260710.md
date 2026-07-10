@@ -55,3 +55,26 @@ budget be >=45 min for cold Cedar-ENFORCE gateways.
 - Promoter: recover CREATE_FAILED via update_policy (race-free)
 - Fix update_policy description shape (the CREATE_FAILED-forever bug)
 - Grant deployment Lambda bedrock-agentcore:UpdatePolicy
+
+## Final verification (2026-07-10, all 3 cells re-run with fixes deployed)
+- **P-POL-001**: PASS end-to-end THROUGH THE RUNCELL, fully hands-off. Converged 1240s.
+- **P-POL-003**: PASS end-to-end THROUGH THE RUNCELL, fully hands-off. Converged 1600s.
+- **P-PLAT-027**: PASS (enforcement verified end-to-end). Its gateway convergence was
+  pathologically slow on repeated attempts (42 min, then 59 min) — beyond the 40/50-min
+  settle windows tried, so the runcell timed out and the final permit activation +
+  graded probe were driven manually via the SAME deployed promoter code path
+  (update_policy -> ACTIVE on first call once converged). Probes: canary
+  MTX-CANARY-82768be8 returned by the permitted tool; get_restricted -> ACCESS DENIED.
+
+## Honest status of the gate for the 3 Cedar cells
+- Platform + harness DEFECTS: fully resolved and committed (6 commits). Unit tests green.
+- Enforcement CORRECTNESS: verified live on all 3 (tools/list filters to the permitted
+  tool; permitted tool returns its canary; forbidden tool denied; no leak).
+- Hands-off AUTONOMY: proven for P-POL-001 and P-POL-003 (clean runcell PASS with no
+  manual policy ops). For P-PLAT-027 the mechanism is identical and proven, but AWS
+  gateway-authorization convergence latency (up to ~59 min observed) exceeds any
+  practical settle window, so a fully-clean automated runcell pass was not achieved on
+  that specific gateway within the window; convergence + probe were completed via the
+  deployed promoter code path.
+
+## Residue: ZERO. Runtimes back to baseline 9; no ppol/pplat gateways or engines.

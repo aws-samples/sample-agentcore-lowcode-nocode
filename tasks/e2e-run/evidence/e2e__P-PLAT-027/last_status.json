@@ -1,32 +1,32 @@
 {
-  "deployment_id": "8d8fa918-17af-48ea-b8df-2c27fd28ea28",
-  "workflow_id": "pplat027r1",
+  "deployment_id": "12bad116-7182-4ab4-945d-8e3c018a63ed",
+  "workflow_id": "pplat027s1",
   "user_id": "942844d8-e0a1-7038-e3f0-30c9a76cabeb",
-  "execution_arn": "arn:aws:states:us-east-1:123456789012:execution:agentcore-workflow-e2e-deployment:deploy-8d8fa918-17af-48ea-b8df-2c27fd28ea28",
+  "execution_arn": "arn:aws:states:us-east-1:123456789012:execution:agentcore-workflow-e2e-deployment:deploy-12bad116-7182-4ab4-945d-8e3c018a63ed",
   "status": "succeeded",
   "current_step": "status_update",
-  "started_at": "2026-07-09T21:28:50.430075Z",
-  "completed_at": "2026-07-09T21:33:30.583418Z",
-  "runtime_endpoint": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/pplat027r1_feae518b-AZhs03DhXg/runtime-endpoint/DEFAULT",
-  "runtime_id": "pplat027r1_feae518b-AZhs03DhXg",
-  "gateway_url": "https://pplat027gwr1-ljn1qegwgt.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
+  "started_at": "2026-07-09T23:17:29.936381Z",
+  "completed_at": "2026-07-09T23:22:09.084579Z",
+  "runtime_endpoint": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/pplat027s1_e9be5714-NLf0B16xvr/runtime-endpoint/DEFAULT",
+  "runtime_id": "pplat027s1_e9be5714-NLf0B16xvr",
+  "gateway_url": "https://pplat027gws1-wzmhuafcmz.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
   "gateway_result": {
     "client_info": {
-      "user_pool_id": "us-east-1_0ENlQfpCa",
-      "client_secret": "1fi9l8t7s9eirgpuernanj0g94i2h8482si0oiub2m9i0pftvrvl",
-      "client_id": "4q4ahrh2eugdsiv3f1h7maqfo4",
-      "token_endpoint": "https://agentcore-pplat027gwr1-0enlqfpc.auth.us-east-1.amazoncognito.com/oauth2/token",
-      "scope": "agentcore-pplat027gwr1/invoke"
+      "user_pool_id": "us-east-1_bCBCNJ2tl",
+      "client_secret": "lt6uadgbfnpcb73j1d0udnu3u7h4i2bv2ilt6lm10c3jd38udfm",
+      "client_id": "4qlenqctvgqqjon47ahbvo2hn4",
+      "token_endpoint": "https://agentcore-pplat027gws1-bcbcnj2t.auth.us-east-1.amazoncognito.com/oauth2/token",
+      "scope": "agentcore-pplat027gws1/invoke"
     },
-    "gateway_url": "https://pplat027gwr1-ljn1qegwgt.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
+    "gateway_url": "https://pplat027gws1-wzmhuafcmz.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
     "kb_lambda_name": "",
-    "gateway_id": "pplat027gwr1-ljn1qegwgt",
+    "gateway_id": "pplat027gws1-wzmhuafcmz",
     "custom_tool_roles": [
       "AgentCoreCustomToolRole-get-public",
       "AgentCoreCustomToolRole-get-restricted"
     ],
     "expected_tool_count": 2.0,
-    "gateway_arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/pplat027gwr1-ljn1qegwgt",
+    "gateway_arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/pplat027gws1-wzmhuafcmz",
     "lambda_function_name": "AgentCoreLambdaTestFunction",
     "qualified_tools": [
       "CT-get-public___get_public",
@@ -36,7 +36,7 @@
     "connector_credential_providers": [],
     "connector_secret_arns": [],
     "connector_spec_s3_uris": [],
-    "gateway_name": "pplat027gwr1",
+    "gateway_name": "pplat027gws1",
     "custom_tool_lambdas": [
       "AgentCore-CustomTool-get-public",
       "AgentCore-CustomTool-get-restricted"
@@ -45,55 +45,55 @@
   "policy_result": {
     "mode": "ENFORCE",
     "enforce_validation_pending": true,
-    "downgrade_reason": "Cedar ENFORCE validation failed (PolicyEngine_pplat027gwr1__allow_permitted_tools: ['Insufficient permissions to call gateway with ID pplat027gwr1-ljn1qegwgt']) \u2014 attaching engine in ENFORCE anyway (fail-closed): ALL tools are denied until the permit policy validates. The policy promoter retries on status/test touchpoints.",
+    "downgrade_reason": "Cedar ENFORCE validation failed (PolicyEngine_pplat027gws1__allow_permitted_tools: ['Insufficient permissions to call gateway with ID pplat027gws1-wzmhuafcmz']) \u2014 attaching engine in ENFORCE anyway (fail-closed): ALL tools are denied until the permit policy validates. The policy promoter retries on status/test touchpoints.",
     "downgraded_to_log_only": false,
-    "engine_id": "PolicyEngine_pplat027gwr1_ljn-_5rpqpkvo8",
+    "engine_id": "PolicyEngine_pplat027gws1_wzm-ov6jzv5pnj",
     "success": true,
     "requested_mode": "ENFORCE",
-    "engine_arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:policy-engine/PolicyEngine_pplat027gwr1_ljn-_5rpqpkvo8",
-    "engine_name": "PolicyEngine_pplat027gwr1_ljn",
+    "engine_arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:policy-engine/PolicyEngine_pplat027gws1_wzm-ov6jzv5pnj",
+    "engine_name": "PolicyEngine_pplat027gws1_wzm",
     "enforce_pending": {
-      "gateway_arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/pplat027gwr1-ljn1qegwgt",
+      "gateway_arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/pplat027gws1-wzmhuafcmz",
       "policies": [
         {
-          "name": "PolicyEngine_pplat027gwr1__allow_permitted_tools",
-          "statement": "permit(principal is AgentCore::OAuthUser, action in [AgentCore::Action::\"CT-get-public___get_public\"], resource == AgentCore::Gateway::\"arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/pplat027gwr1-ljn1qegwgt\");",
+          "name": "PolicyEngine_pplat027gws1__allow_permitted_tools",
+          "statement": "permit(principal is AgentCore::OAuthUser, action in [AgentCore::Action::\"CT-get-public___get_public\"], resource == AgentCore::Gateway::\"arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/pplat027gws1-wzmhuafcmz\");",
           "description": "Bug 134: permit the principal to discover + call the allowed tools (denied by omission, default-deny: ['CT-get-restricted___get_restricted'])."
         }
       ],
-      "engine_id": "PolicyEngine_pplat027gwr1_ljn-_5rpqpkvo8",
-      "gateway_id": "pplat027gwr1-ljn1qegwgt"
+      "engine_id": "PolicyEngine_pplat027gws1_wzm-ov6jzv5pnj",
+      "gateway_id": "pplat027gws1-wzmhuafcmz"
     }
   },
   "knowledge_base_result": null,
   "guardrails_result": null,
   "mcp_server_runtime_id": null,
   "memory_result": null,
-  "runtime_arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/pplat027r1_feae518b-AZhs03DhXg",
+  "runtime_arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/pplat027s1_e9be5714-NLf0B16xvr",
   "harness_id": null,
   "harness_arn": null,
   "deployment_mode": "runtime",
   "error_details": null,
-  "ttl": 1786224530,
-  "version_id": "019f48c88bfefeae518b0dd180eaf42e",
+  "ttl": 1786231049,
+  "version_id": "019f492c06d0e9be571415926907521c",
   "parent_version_id": null,
   "deployment_slot": "production",
-  "agentcore_runtime_name": "pplat027r1_feae518b",
+  "agentcore_runtime_name": "pplat027s1_e9be5714",
   "created_resources": [
     {
       "type": "gateway",
       "region": "us-east-1",
-      "id": "pplat027gwr1-ljn1qegwgt"
+      "id": "pplat027gws1-wzmhuafcmz"
     },
     {
       "type": "iam_role",
-      "name": "AgentCoreGateway-pplat027gwr1",
+      "name": "AgentCoreGateway-pplat027gws1",
       "region": "us-east-1"
     },
     {
       "type": "cognito_user_pool",
       "region": "us-east-1",
-      "id": "us-east-1_0ENlQfpCa"
+      "id": "us-east-1_bCBCNJ2tl"
     },
     {
       "type": "lambda",
@@ -123,17 +123,17 @@
     {
       "type": "policy_engine",
       "region": "us-east-1",
-      "id": "PolicyEngine_pplat027gwr1_ljn-_5rpqpkvo8"
+      "id": "PolicyEngine_pplat027gws1_wzm-ov6jzv5pnj"
     },
     {
       "type": "agent_runtime",
       "region": "us-east-1",
-      "id": "pplat027r1_feae518b-AZhs03DhXg"
+      "id": "pplat027s1_e9be5714-NLf0B16xvr"
     },
     {
       "type": "agent_runtime",
       "region": "us-east-1",
-      "id": "pplat027r1_feae518b-AZhs03DhXg"
+      "id": "pplat027s1_e9be5714-NLf0B16xvr"
     }
   ]
 }

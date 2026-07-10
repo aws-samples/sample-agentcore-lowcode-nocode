@@ -9,10 +9,11 @@ import type { ConnectionType, ValidationStatus } from '../../types/workflow';
 // Constants
 // ============================================================================
 
+// Neon edge colors — bright, saturated so the wires glow on the dark canvas.
 export const CONNECTION_COLORS: Record<ConnectionType, string> = {
-  data: '#3B82F6',
-  tool: '#22C55E',
-  identity: '#F97316',
+  data: '#38bdf8',     // neon sky
+  tool: '#34d399',     // neon emerald
+  identity: '#fbbf24', // neon amber
 };
 
 // ============================================================================

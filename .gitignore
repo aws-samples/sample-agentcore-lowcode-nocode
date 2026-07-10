@@ -143,3 +143,7 @@ tasks/e2e-run/scripts/run_order.txt
 tasks/e2e-run/scripts/serial_run.sh
 tasks/e2e-run/scripts/specs/
 tasks/e2e-run/scripts/specs-run/
+
+# Frontend source lib/ is real source, not a Python build artifact
+!frontend/src/lib/
+!frontend/src/lib/**

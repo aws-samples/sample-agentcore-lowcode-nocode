@@ -340,19 +340,43 @@ def _ensure_oss_collection(region: str, deployment_id: str, kb_role_arn: str, kb
     if not coll_arn:
         raise RuntimeError(f"OSS collection {coll_name} not ACTIVE after timeout")
 
-    # 5. the vector index (control-plane create_index; knn_vector 1024-dim cosine).
+    # 5. the vector index (control-plane create_index; knn_vector 1024-dim).
+    # NOTE: the knn method params are OpenSearch snake_case ("space_type", not
+    # "spaceType") — the camelCase form fails "Invalid parameter: spaceType".
     index_schema = {
         "settings": {"index": {"knn": True}},
         "mappings": {"properties": {
             vec_field: {"type": "knn_vector", "dimension": 1024,
-                        "method": {"name": "hnsw", "engine": "faiss", "spaceType": "l2"}},
+                        "method": {"name": "hnsw", "engine": "faiss", "space_type": "l2"}},
             txt_field: {"type": "text"},
             meta_field: {"type": "text"},
         }},
     }
-    _ignore_conflict(aoss.create_index, id=coll_id, indexName=idx_name, indexSchema=index_schema)
+    # The data-access policy (step 3) is eventually-consistent: create_index can
+    # race it and return AccessDenied "Access denied to create index" for the first
+    # ~30-60s. Retry with backoff until the policy propagates.
+    import botocore.exceptions as _bce
+    created = False
+    for attempt in range(12):
+        try:
+            aoss.create_index(id=coll_id, indexName=idx_name, indexSchema=index_schema)
+            created = True
+            break
+        except _bce.ClientError as e:
+            code = e.response.get("Error", {}).get("Code", "")
+            msg = str(e).lower()
+            if code == "ConflictException" or "exist" in msg:
+                created = True
+                break
+            if "access denied" in msg or code == "AccessDeniedException":
+                logger.warning("create_index access-denied (policy propagating, attempt %d/12) — retrying", attempt + 1)
+                time.sleep(10)
+                continue
+            raise
+    if not created:
+        raise RuntimeError(f"OSS create_index for {idx_name} failed after retries (access policy did not propagate)")
     # brief settle so the index is queryable before CreateKnowledgeBase validates it
-    time.sleep(20)
+    time.sleep(30)
     kb_config["opensearchCollectionArn"] = coll_arn
     logger.warning("Auto-provisioned OSS collection %s (%s) + index %s", coll_name, coll_arn, idx_name)
     return coll_arn

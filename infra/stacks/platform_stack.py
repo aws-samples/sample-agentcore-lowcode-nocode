@@ -1155,23 +1155,15 @@ class PlatformStack(cdk.Stack):
                     "s3vectors:GetIndex",
                     "s3vectors:DescribeIndex",
                     "s3vectors:DeleteIndex",
-                    # OpenSearch Serverless: KB step auto-provisions a collection +
-                    # security/access policies + vector index when no ARN is supplied,
-                    # and the manifest teardown here must delete them (standing billable
-                    # resource — orphan = ~$350/mo). create + describe + delete verbs.
-                    "aoss:CreateCollection",
+                    # OpenSearch Serverless: the KB step auto-provisions an OSS
+                    # collection; this (deployment/teardown) role only needs the
+                    # DELETE verbs to reclaim it via the manifest (standing billable
+                    # resource — orphan = ~$350/mo). Create verbs live on the KB step
+                    # role, keeping this policy small enough to avoid an overflow policy.
                     "aoss:BatchGetCollection",
                     "aoss:DeleteCollection",
-                    "aoss:CreateSecurityPolicy",
                     "aoss:DeleteSecurityPolicy",
-                    "aoss:GetSecurityPolicy",
-                    "aoss:CreateAccessPolicy",
                     "aoss:DeleteAccessPolicy",
-                    "aoss:GetAccessPolicy",
-                    "aoss:CreateIndex",
-                    "aoss:DeleteIndex",
-                    "aoss:DescribeIndex",
-                    "aoss:APIAccessAll",
                 ],
                 resources=["*"],
             )
@@ -3504,6 +3496,19 @@ class PlatformStack(cdk.Stack):
         ]
         _suppress(self.workflow_lambda.role, iam_reasons)
         _suppress(self.deployment_lambda.role, iam_reasons)
+        # When the deployment role's inline policy exceeds the IAM size limit, CDK
+        # splits the excess into a separate "OverflowPolicy<N>" managed-policy
+        # resource that apply_to_children on the role does NOT reach. Suppress the
+        # same IAM5 wildcard findings on it by path (best-effort; ignored if absent).
+        for _n in range(1, 4):
+            try:
+                cdk_nag.NagSuppressions.add_resource_suppressions_by_path(
+                    self,
+                    f"/{self.stack_name}/DeploymentLambdaRole/OverflowPolicy{_n}/Resource",
+                    [cdk_nag.NagPackSuppression(id=nid, reason=reason) for nid, reason in iam_reasons],
+                )
+            except Exception:  # noqa: BLE001
+                pass
         # Bug 157 — streaming test Lambda role: same invoke-on-* wildcards as the
         # deployment Lambda's test path (InvokeAgentRuntime/InvokeHarness).
         if hasattr(self, "stream_lambda"):

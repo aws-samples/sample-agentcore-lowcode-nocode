@@ -253,6 +253,111 @@ def _find_existing_kb(bedrock_agent, kb_name: str) -> str | None:
     return None
 
 
+def _ensure_oss_collection(region: str, deployment_id: str, kb_role_arn: str, kb_config: dict, store, dep_id: str) -> str:
+    """Auto-provision an OpenSearch Serverless collection + vector index for a KB.
+
+    Bedrock's CreateKnowledgeBase requires a PRE-EXISTING OSS collection ARN — unlike
+    S3 Vectors there is no auto-provision from the storage config. So when the caller
+    did not supply `opensearchCollectionArn`, we create the whole OSS stack here with
+    pure boto3 (control-plane `aoss.create_index` — no data-plane SigV4 needed):
+      1. encryption security policy (AWS-owned key)
+      2. network security policy (public — matches the managed KB default)
+      3. data-access policy (KB role + caller principal: full index/collection perms)
+      4. the collection (type VECTORSEARCH), wait ACTIVE
+      5. the vector index with the Bedrock-default field mapping (1024-dim knn cosine)
+    Every created resource is recorded to the deployment manifest so teardown removes
+    it (an OSS collection is a STANDING billable resource — leaving it orphaned costs
+    ~$350/mo). Returns the collection ARN. Idempotent on SFN retry.
+    """
+    import botocore.exceptions
+
+    aoss = boto3.client("opensearchserverless", region_name=region)
+    # Names: 3-32 chars, lowercase alphanumeric + hyphen, must start with a letter.
+    coll_name = ("kb" + deployment_id.replace("-", "").lower())[:32]
+    idx_name = kb_config.get("opensearchVectorIndexName") or "bedrock-knowledge-base-default-index"
+    vec_field = kb_config.get("opensearchVectorField") or "bedrock-knowledge-base-default-vector"
+    txt_field = kb_config.get("opensearchTextField") or "AMAZON_BEDROCK_TEXT_CHUNK"
+    meta_field = kb_config.get("opensearchMetadataField") or "AMAZON_BEDROCK_METADATA"
+    kb_config["opensearchVectorIndexName"] = idx_name
+
+    def _ignore_conflict(fn, *a, **kw):
+        try:
+            return fn(*a, **kw)
+        except botocore.exceptions.ClientError as e:
+            if e.response.get("Error", {}).get("Code") in ("ConflictException", "ValidationException") and "exist" in str(e).lower():
+                return None
+            raise
+
+    # 1+2. security policies (encryption + network), scoped to this collection.
+    _ignore_conflict(aoss.create_security_policy, name=f"{coll_name}-enc"[:32], type="encryption",
+        policy=json.dumps({"Rules": [{"ResourceType": "collection", "Resource": [f"collection/{coll_name}"]}], "AWSOwnedKey": True}))
+    _ignore_conflict(aoss.create_security_policy, name=f"{coll_name}-net"[:32], type="network",
+        policy=json.dumps([{"Rules": [
+            {"ResourceType": "collection", "Resource": [f"collection/{coll_name}"]},
+            {"ResourceType": "dashboard", "Resource": [f"collection/{coll_name}"]},
+        ], "AllowFromPublic": True}]))
+
+    # 3. data-access policy: KB role + the caller (deployment Lambda) principal.
+    caller_arn = ""
+    try:
+        caller_arn = boto3.client("sts").get_caller_identity()["Arn"]
+        # normalise assumed-role ARN -> role ARN for the policy principal
+        if ":assumed-role/" in caller_arn:
+            _, _, tail = caller_arn.partition(":assumed-role/")
+            role = tail.split("/")[0]
+            caller_arn = f"arn:aws:iam::{_get_account_id()}:role/{role}"
+    except Exception:  # noqa: BLE001
+        pass
+    principals = [p for p in [kb_role_arn, caller_arn] if p]
+    _ignore_conflict(aoss.create_access_policy, name=f"{coll_name}-acc"[:32], type="data",
+        policy=json.dumps([{
+            "Rules": [
+                {"ResourceType": "index", "Resource": [f"index/{coll_name}/*"],
+                 "Permission": ["aoss:CreateIndex", "aoss:DescribeIndex", "aoss:ReadDocument", "aoss:WriteDocument", "aoss:UpdateIndex", "aoss:DeleteIndex"]},
+                {"ResourceType": "collection", "Resource": [f"collection/{coll_name}"],
+                 "Permission": ["aoss:CreateCollectionItems", "aoss:DescribeCollectionItems", "aoss:UpdateCollectionItems"]},
+            ],
+            "Principal": principals,
+        }]))
+
+    # 4. the collection.
+    _ignore_conflict(aoss.create_collection, name=coll_name, type="VECTORSEARCH",
+                     description=f"AgentCore KB vector store for {deployment_id[:12]}")
+    if store is not None:
+        store.record_resource(dep_id, {"type": "oss_collection", "name": coll_name, "region": region})
+
+    # wait ACTIVE (up to ~5 min) + capture id/arn
+    coll_id = coll_arn = ""
+    for _ in range(60):
+        summ = aoss.batch_get_collection(names=[coll_name]).get("collectionDetails", [])
+        if summ:
+            st = summ[0].get("status")
+            if st == "ACTIVE":
+                coll_id = summ[0]["id"]; coll_arn = summ[0]["arn"]; break
+            if st == "FAILED":
+                raise RuntimeError(f"OSS collection {coll_name} creation FAILED")
+        time.sleep(5)
+    if not coll_arn:
+        raise RuntimeError(f"OSS collection {coll_name} not ACTIVE after timeout")
+
+    # 5. the vector index (control-plane create_index; knn_vector 1024-dim cosine).
+    index_schema = {
+        "settings": {"index": {"knn": True}},
+        "mappings": {"properties": {
+            vec_field: {"type": "knn_vector", "dimension": 1024,
+                        "method": {"name": "hnsw", "engine": "faiss", "spaceType": "l2"}},
+            txt_field: {"type": "text"},
+            meta_field: {"type": "text"},
+        }},
+    }
+    _ignore_conflict(aoss.create_index, id=coll_id, indexName=idx_name, indexSchema=index_schema)
+    # brief settle so the index is queryable before CreateKnowledgeBase validates it
+    time.sleep(20)
+    kb_config["opensearchCollectionArn"] = coll_arn
+    logger.warning("Auto-provisioned OSS collection %s (%s) + index %s", coll_name, coll_arn, idx_name)
+    return coll_arn
+
+
 def _build_storage_config(kb_config: dict) -> dict:
     """Build storage configuration based on vector store type."""
     vector_store_type = kb_config.get("vectorStoreType", "s3_vectors")
@@ -581,6 +686,14 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
                         )
                 except Exception as ix_err:
                     logger.warning("S3 Vectors index pre-check/create skipped: %s", ix_err)
+
+            # OpenSearch Serverless: Bedrock requires a pre-existing collection ARN
+            # (no auto-provision from storage config, unlike S3 Vectors). If the
+            # caller didn't supply one, self-provision the collection + index here
+            # and record it to the manifest for teardown (standing billable resource).
+            elif kb_config.get("vectorStoreType") == "opensearch_serverless" \
+                    and not kb_config.get("opensearchCollectionArn"):
+                _ensure_oss_collection(region, deployment_id, role_arn, kb_config, store, deployment_id)
 
             storage_config = _build_storage_config(kb_config)
             vector_kb_config: dict = {

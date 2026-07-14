@@ -107,6 +107,16 @@ def run(spec):
            "canary": canary, "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
     print(f"=== {cell} canary={canary} ===", flush=True)
 
+    # Control-plane specs (surface=control_plane, no deploy payload) are driven by
+    # the REST control-plane runner, not this deploy-oriented runcell. Skip them
+    # here gracefully instead of KeyError'ing on spec["payload"].
+    if "payload" not in spec or spec.get("surface") == "control_plane":
+        print(f"SKIP: {cell} is a control-plane spec (no deploy payload) — run via control_plane_run.py", flush=True)
+        rec["verdict"] = "SKIP"
+        rec["reason"] = "control-plane spec; not a deploy cell"
+        d.save_cell(cell, rec)
+        return
+
     dep = d.deploy_and_wait(spec["payload"], evid, max_wait=spec.get("max_wait", 1500))
     rec["deployment_id"] = dep.get("deployment_id")
     rec["final_status"] = dep.get("final_status")

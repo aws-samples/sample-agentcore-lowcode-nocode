@@ -1155,6 +1155,23 @@ class PlatformStack(cdk.Stack):
                     "s3vectors:GetIndex",
                     "s3vectors:DescribeIndex",
                     "s3vectors:DeleteIndex",
+                    # OpenSearch Serverless: KB step auto-provisions a collection +
+                    # security/access policies + vector index when no ARN is supplied,
+                    # and the manifest teardown here must delete them (standing billable
+                    # resource — orphan = ~$350/mo). create + describe + delete verbs.
+                    "aoss:CreateCollection",
+                    "aoss:BatchGetCollection",
+                    "aoss:DeleteCollection",
+                    "aoss:CreateSecurityPolicy",
+                    "aoss:DeleteSecurityPolicy",
+                    "aoss:GetSecurityPolicy",
+                    "aoss:CreateAccessPolicy",
+                    "aoss:DeleteAccessPolicy",
+                    "aoss:GetAccessPolicy",
+                    "aoss:CreateIndex",
+                    "aoss:DeleteIndex",
+                    "aoss:DescribeIndex",
+                    "aoss:APIAccessAll",
                 ],
                 resources=["*"],
             )
@@ -1789,6 +1806,19 @@ class PlatformStack(cdk.Stack):
                     "s3vectors:DescribeVectorBucket",
                     "s3vectors:GetVectorBucket",
                     "s3vectors:ListVectorBuckets",
+                ],
+                resources=["*"],
+            ))
+            # OpenSearch Serverless: KB step auto-provisions a collection +
+            # security/access policies + vector index when the caller supplies no
+            # opensearchCollectionArn (Bedrock requires a pre-existing collection).
+            role.add_to_policy(iam.PolicyStatement(
+                actions=[
+                    "aoss:CreateCollection", "aoss:BatchGetCollection", "aoss:DeleteCollection",
+                    "aoss:CreateSecurityPolicy", "aoss:GetSecurityPolicy", "aoss:DeleteSecurityPolicy",
+                    "aoss:CreateAccessPolicy", "aoss:GetAccessPolicy", "aoss:DeleteAccessPolicy",
+                    "aoss:CreateIndex", "aoss:DescribeIndex", "aoss:DeleteIndex",
+                    "aoss:APIAccessAll",
                 ],
                 resources=["*"],
             ))

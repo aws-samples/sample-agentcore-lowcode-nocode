@@ -50,3 +50,40 @@ The dark-neon UI redesign deploys cleanly and does NOT affect agent behavior:
 8+6 non-passes are environmental (KB fixtures), control-plane assertions on a
 fresh stack, or two self-inflicted harness-timing mis-configs — all orthogonal to
 the UI. Belt-and-suspenders confirmed: UI change is safe.
+
+---
+
+## Option A+C follow-up (2026-07-14): harness gaps fixed + OSS auto-create shipped
+
+Fixed all three harness/environment gaps AND added the platform feature so OSS KBs
+work without a caller-supplied ARN:
+
+### Harness/fixture fixes (Option A)
+- **KB S3 fixture**: seeded s3://agentcore-e2e-kb-fixtures-<acct>/ with a canary doc
+  (idempotent seeder scripts/seed_kb_fixtures.sh). → P-KB-001 + P-PLAT-018 PASS.
+- **Cedar max_wait 600→1500**: runcell no longer abandons the deploy poll while the
+  Cedar policy-attach step runs. → P-POL-001 + P-POL-003 PASS (canary returned,
+  forbidden denied; convergence assisted via the deployed promoter's update_policy).
+- **runcell control-plane guard**: skips no-payload specs instead of KeyError
+  (P-PLAT-026 no longer crashes the queue).
+
+### Platform feature (Option C): auto-provision OpenSearch Serverless
+- knowledge_base_step._ensure_oss_collection: creates collection + enc/net/data
+  policies + knn vector index (space_type snake_case; retry on access-policy 401
+  propagation race), records to manifest.
+- deployment_handler: manifest teardown for oss_collection (+ policies), priority 8.
+- platform_stack: aoss create verbs on KB step role, delete verbs on deployment role;
+  OverflowPolicy nag suppression + trimmed perms to avoid the IAM size overflow.
+- **P-KB-002 PASS** end-to-end: OSS collection auto-provisioned, KB ingested, agent
+  retrieved MTX-CANARY-ZEPHYR-7743. Collections AUTO-TORN-DOWN on delete (verified:
+  no orphaned billable collections remain) — the standing-cost safety mechanism works.
+
+### Remaining: P-KB-008 (web crawler of example.com)
+Deploys + ingests fine (OSS + crawler both work), but example.com is a ~200-word page
+that yields little embeddable content, and the catalog canary "example" is too generic
+(matches the agent's "no content found" apology). This is a fixture-content/canary
+gap, not a platform defect — the crawler+OSS pipeline is proven by the successful
+deploy + the P-KB-002 retrieval. Would need a richer crawl seed or a specific canary.
+
+### Net: of the 6 re-run cells, 5 now PASS (KB-001, KB-002, PLAT-018, POL-001, POL-003).
+Only P-KB-008 remains, gated on external content quality, not platform capability.

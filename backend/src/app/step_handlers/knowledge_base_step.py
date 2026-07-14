@@ -475,7 +475,7 @@ def _build_data_source_config(kb_config: dict) -> tuple[dict, str | None]:
         # Filter empty seed URLs — Bedrock CreateDataSource rejects
         # `seedUrls.N.member.url=""` with ValidationException. See
         # tasks/lessons.md Bug 94. Accept either a string OR a list.
-        raw_urls = kb_config.get("webCrawlerUrls") or kb_config.get("webCrawlerUrl", "")
+        raw_urls = kb_config.get("webCrawlerUrls") or kb_config.get("seedUrls") or kb_config.get("webCrawlerUrl", "")
         if isinstance(raw_urls, str):
             url_list = [u.strip() for u in raw_urls.split(",") if u.strip()]
         else:
@@ -751,22 +751,29 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
             # the given role`. Retry with backoff. See tasks/lessons.md Bug 80.
             kb_resp = None
             last_err = None
-            for attempt in range(8):
+            for attempt in range(12):
                 try:
                     kb_resp = bedrock_agent.create_knowledge_base(**kb_params)
                     break
                 except Exception as e:
-                    err_str = str(e)
-                    if (
-                        "ValidationException" in err_str
-                        and "unable to assume" in err_str.lower()
-                    ):
+                    err_str = str(e).lower()
+                    # Retry two transient races: (1) IAM role propagation ("unable
+                    # to assume"); (2) OSS data-access-policy propagation — Bedrock's
+                    # KB-role session hits the just-created collection before the
+                    # access policy is live, surfacing as "server returned 401" /
+                    # "storage configuration ... is invalid". Both clear within ~1-2 min.
+                    transient = (
+                        ("validationexception" in err_str and "unable to assume" in err_str)
+                        or "server returned 401" in err_str
+                        or ("storage configuration" in err_str and "invalid" in err_str)
+                    )
+                    if transient:
                         last_err = e
                         logger.warning(
-                            "create_knowledge_base IAM-propagation race (attempt %d/8): %s",
-                            attempt + 1, err_str[:200],
+                            "create_knowledge_base propagation race (attempt %d/12): %s",
+                            attempt + 1, str(e)[:200],
                         )
-                        time.sleep(10)
+                        time.sleep(15)
                         continue
                     raise
             if kb_resp is None:

@@ -95,6 +95,29 @@ def _resolve_window(from_: int | None, to: int | None) -> tuple[int, int]:
     return from_ts, to_ts
 
 
+@router.get("/{runtime_name}/traces", dependencies=[Depends(require_scopes("observability:read"))])
+async def get_runtime_traces(
+    runtime_name: str,
+    from_: int | None = Query(default=None, alias="from"),
+    to: int | None = Query(default=None),
+    trace_id: str | None = Query(default=None, alias="traceId"),
+    caller_sub: str = Depends(get_caller_sub),
+) -> dict:
+    """Phase 5 (Loom) — OTEL span waterfall for *runtime_name*'s production runtime.
+
+    Owner-checked (same resolver as cost). Returns a nested parent/child span
+    tree with offsets/durations the frontend renders as a timeline.
+    """
+    runtime_name = _validate_runtime_name(runtime_name)
+    from_ts, to_ts = _resolve_window(from_, to)
+    runtime_id, version_id = _resolve_owned_runtime_id(runtime_name, caller_sub)
+    from app.services.trace_query import fetch_trace_waterfall
+
+    wf = fetch_trace_waterfall(runtime_id, from_ts, to_ts, _region(), trace_id=trace_id)
+    wf.update({"runtime_name": runtime_name, "version_id": version_id})
+    return wf
+
+
 @router.get("/{runtime_name}/cost", dependencies=[Depends(require_scopes("cost:read"))])
 async def get_runtime_cost(
     runtime_name: str,

@@ -265,6 +265,43 @@ deployment_app.add_middleware(
     allow_headers=["Content-Type", "Authorization", "X-Amz-Date", "X-Api-Key"],
 )
 
+
+# Phase 5 (Loom) audit trail — record WRITE-ish control-plane actions to the
+# audit store for the admin dashboard. Fixed action vocabulary (audit_store.
+# classify_action); reads are ignored. Best-effort: an audit failure NEVER
+# affects the underlying response (wrapped, logged, swallowed).
+@deployment_app.middleware("http")
+async def _audit_middleware(request, call_next):
+    response = await call_next(request)
+    try:
+        from app.services.audit_store import (
+            AuditEvent,
+            classify_action,
+            get_audit_store,
+        )
+
+        action = classify_action(request.method, request.url.path)
+        if action is not None:
+            from app.services.auth import get_caller_sub as _gcs
+
+            try:
+                actor = _gcs(request)
+            except Exception:  # noqa: BLE001
+                actor = "unknown"
+            get_audit_store().record(
+                AuditEvent(
+                    org_id="default",
+                    actor_sub=actor,
+                    action=action,
+                    method=request.method,
+                    path=request.url.path,
+                    status_code=getattr(response, "status_code", 0),
+                )
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("audit middleware skipped: %s", exc)
+    return response
+
 # Phase 1 Gap 1A — version + slot management endpoints. Mounted on the
 # deployment Lambda because the versions table belongs to the runtime-control
 # plane (same data plane as /api/deploy and /api/test-runtime). API GW routes
@@ -280,6 +317,7 @@ from app.routers.prompts import router as prompts_router  # noqa: E402  # Phase 
 from app.routers.connectors import router as connectors_router  # noqa: E402
 from app.routers.triggers import router as triggers_router  # noqa: E402
 from app.routers.tags import router as tags_router  # noqa: E402  # Phase 2 governance tagging
+from app.routers.admin import router as admin_router  # noqa: E402  # Phase 5 audit dashboard
 
 deployment_app.include_router(versions_router)
 # Phase 1 Gap 1C — evaluation results endpoint. Mounted on the deployment
@@ -317,6 +355,9 @@ deployment_app.include_router(triggers_router)
 # /api/settings/tags + /api/settings/tag-profiles are added in platform_stack.py
 # (Bug 21 router-enumeration rule: HTTP API needs explicit routes per path).
 deployment_app.include_router(tags_router)
+# Phase 5 (Loom) audit dashboard — /api/admin/audit (admin scope). Reads the
+# audit store the middleware writes to.
+deployment_app.include_router(admin_router)
 
 
 @deployment_app.get("/health")

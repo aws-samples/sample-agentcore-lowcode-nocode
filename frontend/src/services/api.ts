@@ -209,6 +209,36 @@ export interface CostSummary {
   };
 }
 
+// Phase 5 (Loom) — OTEL trace waterfall.
+export interface TraceSpan {
+  span_id: string;
+  parent_span_id: string;
+  name: string;
+  offset_ms: number;
+  duration_ms: number;
+  depth: number;
+  children: TraceSpan[];
+}
+export interface TraceWaterfall {
+  trace_id: string | null;
+  start_ms: number;
+  total_ms: number;
+  spans: TraceSpan[];
+  runtime_name?: string;
+  query_status?: string;
+}
+
+// Phase 5 (Loom) — admin action-audit summary.
+export interface AuditSummary {
+  total: number;
+  by_action: Record<string, number>;
+  by_actor: Record<string, number>;
+  events: Array<{
+    action: string; actor_sub: string; method: string; path: string;
+    status_code: number; ts: string;
+  }>;
+}
+
 // Phase 3 Gap 3F — scheduled / event triggers.
 export interface TriggerSummary {
   runtime_name: string;
@@ -599,6 +629,26 @@ export class ApiClient {
     return this.request<CostSummary>(
       `/api/runtimes/${encodeURIComponent(runtimeName)}/cost${suffix}`
     );
+  }
+
+  /** Phase 5 (Loom) — OTEL span waterfall for a runtime's production version. */
+  async getTraces(
+    runtimeName: string,
+    opts?: { from?: number; to?: number; traceId?: string }
+  ): Promise<TraceWaterfall> {
+    const qs = new URLSearchParams();
+    if (opts?.from) qs.set('from', String(opts.from));
+    if (opts?.to) qs.set('to', String(opts.to));
+    if (opts?.traceId) qs.set('traceId', opts.traceId);
+    const suffix = qs.toString() ? `?${qs.toString()}` : '';
+    return this.request<TraceWaterfall>(
+      `/api/runtimes/${encodeURIComponent(runtimeName)}/traces${suffix}`
+    );
+  }
+
+  /** Phase 5 (Loom) — admin action-audit summary (admin scope). */
+  async getAudit(limit = 200): Promise<AuditSummary> {
+    return this.request<AuditSummary>(`/api/admin/audit?limit=${limit}`);
   }
 
   // ==========================================================================

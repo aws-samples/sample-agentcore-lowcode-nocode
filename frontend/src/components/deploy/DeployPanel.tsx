@@ -15,6 +15,7 @@ import { VersionsList } from './VersionsList';
 import { EvaluationResultsPanel } from './EvaluationResultsPanel';
 import { CostPanel } from './CostPanel';
 import { ObservabilityPanel } from './ObservabilityPanel';
+import { TraceWaterfall } from '../observability/TraceWaterfall';
 import { TriggersPanel } from './TriggersPanel';
 import { ResourceTagFields, type ResourceTagState } from './ResourceTagFields';
 
@@ -1545,10 +1546,17 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
             />
           )}
           {activeTab === 'observability' && (
-            <ObservabilityPanel
-              runtimeName={config?.name ?? null}
-              refreshKey={versionsRefreshKey}
-            />
+            <>
+              <ObservabilityPanel
+                runtimeName={config?.name ?? null}
+                refreshKey={versionsRefreshKey}
+              />
+              {/* Phase 5 (Loom) — in-UI OTEL span waterfall. */}
+              <TraceWaterfall
+                runtimeName={config?.name ?? null}
+                refreshKey={versionsRefreshKey}
+              />
+            </>
           )}
           {activeTab === 'triggers' && (
             <TriggersPanel

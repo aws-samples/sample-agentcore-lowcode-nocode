@@ -128,6 +128,8 @@ class PlatformStack(cdk.Stack):
         self.tag_policy_table = self._create_tag_policy_table()
         # Phase 4 (Loom) FinOps — cost budgets table.
         self.budget_table = self._create_budget_table()
+        # Phase 5 (Loom) — action-audit trail table.
+        self.audit_table = self._create_audit_table()
         self.logging_bucket = self._create_logging_bucket()
         self.artifacts_bucket = self._create_artifacts_bucket()
         self._upload_agentcore_deps()
@@ -574,6 +576,31 @@ class PlatformStack(cdk.Stack):
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=self._removal_policy,
             encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_audit_table(self) -> dynamodb.Table:
+        """Phase 5 (Loom) — action-audit trail.
+
+        PK ``org_id``, SK ``<ts_iso>#<event_id>`` (sortable). TTL on ``ttl``
+        (90-day) bounds growth. See services/audit_store.
+        """
+        return dynamodb.Table(
+            self,
+            "AuditTable",
+            table_name=f"{self._project}-{self._env}-audit",
+            partition_key=dynamodb.Attribute(
+                name="org_id", type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="sk", type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=self._removal_policy,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            time_to_live_attribute="ttl",
             point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
                 point_in_time_recovery_enabled=True,
             ),
@@ -1104,6 +1131,8 @@ class PlatformStack(cdk.Stack):
         self.tag_policy_table.grant_read_write_data(role)
         # Phase 4 (Loom) FinOps — cost budgets (routers/cost.py budgets_router).
         self.budget_table.grant_read_write_data(role)
+        # Phase 5 (Loom) — audit trail (middleware writes, /api/admin/audit reads).
+        self.audit_table.grant_read_write_data(role)
         # states:StartExecution on the state machine (granted after SM creation)
         # SSM read
         role.add_to_policy(
@@ -1472,6 +1501,8 @@ class PlatformStack(cdk.Stack):
                 "TAG_POLICY_TABLE_NAME": self.tag_policy_table.table_name,
                 # Phase 4 (Loom) FinOps — cost budgets table (routers/cost.py).
                 "BUDGET_TABLE_NAME": self.budget_table.table_name,
+                # Phase 5 (Loom) — audit trail table (middleware + admin router).
+                "AUDIT_TABLE_NAME": self.audit_table.table_name,
                 "ARTIFACTS_BUCKET_NAME": self.artifacts_bucket.bucket_name,
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
@@ -3218,6 +3249,13 @@ class PlatformStack(cdk.Stack):
                 apigwv2.HttpMethod.POST,
                 apigwv2.HttpMethod.DELETE,
             ],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Phase 5 (Loom) — admin audit dashboard (/api/admin/audit).
+        api.add_routes(
+            path="/api/admin/{proxy+}",
+            methods=[apigwv2.HttpMethod.GET],
             integration=deployment_integration,
             authorizer=jwt_authorizer,
         )

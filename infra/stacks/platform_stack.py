@@ -782,7 +782,7 @@ class PlatformStack(cdk.Stack):
 
     def _create_artifacts_bucket(self) -> s3.Bucket:
         """Create S3 bucket for deployment code artifacts."""
-        return s3.Bucket(
+        bucket = s3.Bucket(
             self,
             "ArtifactsBucket",
             bucket_name=f"{self._project}-{self._env}-artifacts-{self.region}-{self.account}",
@@ -797,6 +797,56 @@ class PlatformStack(cdk.Stack):
                 s3.LifecycleRule(expiration=Duration.days(90), prefix="deployments/"),
             ],
         )
+        # Phase 7 (opt-in) cross-account deploy: a target account's
+        # AgentCoreFlowsDeploymentRole (assumed by the step Lambdas) must
+        # read/write code artifacts here — the artifacts bucket is a PLATFORM
+        # resource, not per-account. Grant scoped to that exact role name in ANY
+        # account, on the deployments/ prefix only (not the agentcore-deps/
+        # bundles). No effect until cross-account deploy is used. IAM on the
+        # assuming side is still name-scoped, so this is a two-sided, bounded grant.
+        # Phase 7 (opt-in) cross-account deploy: a target account's
+        # AgentCoreFlowsDeploymentRole (assumed by the step Lambdas) must
+        # read/write code artifacts here — the artifacts bucket is a PLATFORM
+        # resource, not per-account.
+        #
+        # S3 resource policies (unlike IAM) require CONCRETE account principals:
+        #   * a wildcard-account ARN ("arn:aws:iam::*:role/...") → "Invalid principal"
+        #   * Principal:* (even condition-gated) → blocked by BlockPublicPolicy
+        #     (the bucket is correctly BLOCK_ALL).
+        # So trusted deploy-target account IDs are supplied at CDK-deploy time via
+        # context (`-c deploy_target_accounts=111111111111,222222222222`) and we
+        # add a CONCRETE-principal grant per account, scoped to the deployments/
+        # prefix + that exact role name. Empty by default → no cross-account
+        # grant (feature dormant). Registering a NEW target account is therefore
+        # a two-step, deliberate action: add the id to context + redeploy, THEN
+        # register via the admin API. This is the security-correct topology under
+        # BlockPublicAccess; documented in docs/RBAC_ROLLOUT.md / cross-account.
+        _target_accounts_ctx = self.node.try_get_context("deploy_target_accounts") or ""
+        _target_accounts = [a.strip() for a in str(_target_accounts_ctx).split(",") if a.strip()]
+        if _target_accounts:
+            bucket.add_to_resource_policy(
+                iam.PolicyStatement(
+                    sid="CrossAccountDeployRoleArtifacts",
+                    effect=iam.Effect.ALLOW,
+                    principals=[
+                        iam.ArnPrincipal(f"arn:aws:iam::{acct}:role/{_rname}")
+                        for acct in _target_accounts
+                        # Both the deploy role (uploads the code zip) AND the
+                        # runtime role (reads it at agent boot) need artifacts
+                        # access across the account boundary.
+                        for _rname in ("AgentCoreFlowsDeploymentRole", "AgentCoreFlowsRuntimeRole")
+                    ],
+                    actions=["s3:GetObject", "s3:PutObject"],
+                    resources=[
+                        # code artifacts written/read per deploy
+                        bucket.arn_for_objects("deployments/*"),
+                        # pre-built dependency bundles the codegen step downloads
+                        # to bundle into the runtime zip (read-only in practice).
+                        bucket.arn_for_objects("agentcore-deps/*"),
+                    ],
+                )
+            )
+        return bucket
 
     def _upload_agentcore_deps(self) -> None:
         """Upload pre-built aarch64 dependency bundles to S3 artifacts bucket.
@@ -1749,6 +1799,14 @@ class PlatformStack(cdk.Stack):
         ))
         role.add_to_policy(iam.PolicyStatement(actions=["sts:GetCallerIdentity"], resources=["*"]))
         role.add_to_policy(iam.PolicyStatement(actions=["cloudwatch:PutMetricData"], resources=["*"]))
+        # Phase 7 (opt-in) cross-account deploy: each step Lambda assumes the
+        # target account's deployment role (services/step_clients). NAME-SCOPED
+        # to the agreed role name — NOT a blanket AssumeRole. Feature is off by
+        # default (no target → no assume-role call is ever made).
+        role.add_to_policy(iam.PolicyStatement(
+            actions=["sts:AssumeRole"],
+            resources=["arn:aws:iam::*:role/AgentCoreFlowsDeploymentRole"],
+        ))
 
         # ── Per-step grants ──────────────────────────────────────────────────
         # Every step that writes to S3 (codegen, gateway, knowledge_base,

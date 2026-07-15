@@ -595,8 +595,14 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     # landed-account) at registration time; here we only enforce the gate.
     target_account_id: Optional[str] = None
     target_region: Optional[str] = None
+    target_role_arn: Optional[str] = None
     if request.target_account_id or request.target_region:
-        from app.services.deploy_target import TargetError, resolve_region, targets_enabled
+        from app.services.deploy_target import (
+            TargetError,
+            get_account,
+            resolve_region,
+            targets_enabled,
+        )
 
         if not targets_enabled():
             raise HTTPException(
@@ -608,6 +614,17 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
             target_account_id = request.target_account_id
         except TargetError as exc:
             raise HTTPException(status_code=400, detail=str(exc))
+        # Resolve the target account's role ARN HERE (the deployment Lambda has
+        # the Settings table) and thread it on the SFN event, so the step
+        # Lambdas assume the role without needing a Settings lookup.
+        if target_account_id:
+            tgt = get_account(target_account_id)
+            if tgt is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Account '{target_account_id}' is not a registered deployment target",
+                )
+            target_role_arn = tgt.get("role_arn")
 
     sfn_input = {
         "deployment_id": deployment_id,
@@ -618,10 +635,13 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         # Phase 2 (Loom) governance tagging — resolved tag set applied to every
         # AWS resource the step handlers create (threaded via sfn_input).
         "resource_tags": resolved_tags,
-        # Phase 7 (opt-in) — target account/region for the deploy's boto3 clients
-        # (services/step_clients reads these). None → home account (unchanged).
+        # Phase 7 (opt-in) — target account/region/role for the deploy's boto3
+        # clients (services/step_clients reads these). None → home (unchanged).
+        # The role ARN is resolved here (deployment Lambda has the Settings
+        # table) so step Lambdas assume it without a Settings lookup.
         "target_account_id": target_account_id,
         "target_region": target_region,
+        "target_role_arn": target_role_arn,
         # Phase 1 Gap 1A — every step handler keys S3 paths and AgentCore
         # runtime names off the version. friendly_runtime_name is the user's
         # input; agentcore_runtime_name is what we actually pass to AgentCore.

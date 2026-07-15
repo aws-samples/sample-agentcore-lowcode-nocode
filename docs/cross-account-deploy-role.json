@@ -1,5 +1,43 @@
 {
-  "_README": "Phase 7 (opt-in) cross-account deployment. Create this role in EACH target AWS account you want the AgentCore Visual Workflow Platform to deploy agents into. The role name MUST be exactly 'AgentCoreFlowsDeploymentRole' (the platform's sts:AssumeRole grant is name-scoped to it). Replace <PLATFORM_ACCOUNT_ID> with the platform/home account (166827918465 in the reference deployment). Apply with: aws iam create-role --role-name AgentCoreFlowsDeploymentRole --assume-role-policy-document file://trust-policy.json ; then attach permissions-policy.json.",
+  "_README": "Phase 7 (opt-in) cross-account deployment. In EACH target AWS account, pre-provision THREE things (all name-by-convention; the platform references them without per-deploy creation, which also avoids the fresh-role IAM-propagation race that CREATE_FAILs runtimes for ~17-20 min): (1) role 'AgentCoreFlowsDeploymentRole' — assumed by the platform to run the deploy; (2) role 'AgentCoreFlowsRuntimeRole' — the AgentCore runtime execution role, passed to CreateAgentRuntime (trusts bedrock-agentcore.amazonaws.com, reads the code zip from the target-account bucket + the deps bundle); (3) S3 bucket 'agentcore-flows-artifacts-<TARGET_ACCOUNT_ID>-<REGION>' — AgentCore's runtime code-fetch is SAME-ACCOUNT-ONLY, so the final code.zip is uploaded HERE (the platform's deps bundle is read cross-account during codegen and bundled in). On the PLATFORM side: add the target account id to the stack context `-c deploy_target_accounts=<id>` + redeploy (grants the deploy role read on the platform deps bundle), THEN register the account via the admin API. Replace <PLATFORM_ACCOUNT_ID> with the platform/home account. VERIFIED LIVE: agent deployed + runtime confirmed present in a second account.",
+
+  "_STEP_2_runtime-role-trust.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "TrustAgentCoreRuntime",
+        "Effect": "Allow",
+        "Principal": { "Service": "bedrock-agentcore.amazonaws.com" },
+        "Action": "sts:AssumeRole"
+      }
+    ]
+  },
+
+  "_STEP_2_runtime-role-permissions.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "RuntimeBedrock",
+        "Effect": "Allow",
+        "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "bedrock:Converse", "bedrock:ConverseStream"],
+        "Resource": "*"
+      },
+      {
+        "Sid": "RuntimeArtifactsRead",
+        "Effect": "Allow",
+        "Action": ["s3:GetObject"],
+        "Resource": "arn:aws:s3:::agentcore-workflow-*-artifacts-*/*",
+        "_note": "The runtime reads its code zip from the PLATFORM artifacts bucket cross-account — the bucket policy (deploy_target_accounts context) grants this role GetObject on deployments/*."
+      },
+      {
+        "Sid": "RuntimeLogs",
+        "Effect": "Allow",
+        "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+        "Resource": "*"
+      }
+    ],
+    "_note": "Create AgentCoreFlowsRuntimeRole with runtime-role-trust.json, attach these perms, then WAIT ~20 min (or until a test CreateAgentRuntime succeeds) before first real use so AgentCore's IAM cache has propagated — exactly why the home account pre-creates its shared role at stack-init."
+  },
 
   "trust-policy.json": {
     "Version": "2012-10-17",

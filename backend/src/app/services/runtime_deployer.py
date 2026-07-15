@@ -515,11 +515,21 @@ def wait_for_runtime_ready(agentcore_ctrl, runtime_id: str, timeout: int = 600) 
                     "status": status,
                 }
             if "FAILED" in status:
+                # Surface AgentCore's own reason — CREATE_FAILED alone is
+                # undiagnosable. The field name varies across API versions.
+                reason = (
+                    resp.get("statusReason")
+                    or resp.get("failureReason")
+                    or resp.get("reasonCode")
+                    or (resp.get("statusReasons") or [""])[0]
+                    or ""
+                )
+                logger.error("Runtime %s %s: %s", runtime_id, status, reason)
                 return {
                     "success": False,
                     "runtime_id": runtime_id,
                     "status": status,
-                    "error": f"Runtime entered {status}",
+                    "error": f"Runtime entered {status}" + (f": {reason}" if reason else ""),
                 }
         except Exception as e:
             logger.warning("Error checking runtime status: %s", e)

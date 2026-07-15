@@ -227,8 +227,14 @@ def handler(event: dict, context) -> dict:
         )
         # Per-deploy exec role minted by iam_step (mode == 'per_agent'); skip the
         # Bug-60 shared role, which is reused across every runtime in the stack.
+        # Phase 7 (opt-in) cross-account: the target-account runtime role is
+        # PRE-PROVISIONED by the target-account owner (the platform didn't create
+        # it) — it is shared infrastructure like the home shared role and MUST
+        # NOT be recorded/torn down (deleting it breaks every future deploy into
+        # that account — observed live). Skip recording when cross-account.
+        _cross_account = bool(event.get("target_account_id"))
         shared_role_arn = _get_env("SHARED_RUNTIME_ROLE_ARN", "")
-        if role_arn and role_arn != shared_role_arn:
+        if role_arn and role_arn != shared_role_arn and not _cross_account:
             role_name = role_arn.rsplit("/", 1)[-1]
             if role_name and not role_name.endswith("-shared"):
                 store.record_resource(

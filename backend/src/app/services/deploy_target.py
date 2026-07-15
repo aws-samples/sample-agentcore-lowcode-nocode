@@ -151,6 +151,7 @@ def resolve_region(requested: Optional[str]) -> str:
 
 def session_for_target(
     account_id: Optional[str] = None, region: Optional[str] = None,
+    *, require_gate: bool = True, role_arn: Optional[str] = None,
 ) -> boto3.Session:
     """Return a boto3 Session for the deploy target.
 
@@ -159,21 +160,31 @@ def session_for_target(
       return a scoped session, after a dry-run GetCallerIdentity confirms we
       landed in the expected account.
 
-    Raises TargetError when targeting is disabled, the account is unregistered,
-    the role can't be assumed, or the landed account doesn't match.
+    ``require_gate`` (default True) re-checks the opt-in feature flag + region
+    allowlist. The SFN STEP path passes ``require_gate=False`` because the
+    deployment Lambda (handle_deploy) is the single authoritative gate — it
+    validated targets_enabled() + the allowlist BEFORE starting the state
+    machine, and the step Lambdas don't carry the Settings-table env to re-read
+    the flag. ``role_arn`` may be supplied to skip the Settings lookup (used when
+    the caller already knows the target's role, e.g. teardown from a manifest).
+
+    Raises TargetError when targeting is disabled (gated path only), the account
+    is unregistered, the role can't be assumed, or the landed account mismatches.
     """
-    resolved_region = resolve_region(region)
+    resolved_region = resolve_region(region) if require_gate else (
+        region or os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", HOME_REGION_DEFAULT))
+    )
     if not account_id:
         return boto3.Session(region_name=resolved_region)
 
-    if not targets_enabled():
+    if require_gate and not targets_enabled():
         raise TargetError("Deployment targets are disabled; cannot target another account")
 
-    target = get_account(account_id)
-    if target is None:
-        raise TargetError(f"Account '{account_id}' is not a registered deployment target")
-
-    role_arn = target["role_arn"]
+    if role_arn is None:
+        target = get_account(account_id)
+        if target is None:
+            raise TargetError(f"Account '{account_id}' is not a registered deployment target")
+        role_arn = target["role_arn"]
     sts = boto3.client("sts", region_name=resolved_region)
     try:
         creds = sts.assume_role(
@@ -186,7 +197,7 @@ def session_for_target(
         aws_access_key_id=creds["AccessKeyId"],
         aws_secret_access_key=creds["SecretAccessKey"],
         aws_session_token=creds["SessionToken"],
-        region_name=target.get("region") or resolved_region,
+        region_name=resolved_region,
     )
     # Dry-run: confirm we actually landed in the expected account.
     landed = session.client("sts").get_caller_identity()["Account"]

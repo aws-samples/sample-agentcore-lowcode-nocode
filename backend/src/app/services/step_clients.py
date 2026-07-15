@@ -54,10 +54,20 @@ def session_for_event(event: Optional[dict]) -> boto3.Session:
     if not account_id:
         # Home account, unchanged path.
         return boto3.Session(region_name=_home_region(event))
-    # Cross-account: delegate to the proven, gated resolver.
+    # Cross-account: assume the target role. require_gate=False because
+    # handle_deploy (the deployment Lambda) is the SINGLE authoritative gate —
+    # it validated targets_enabled() + the allowlist before starting the SFN,
+    # and the step Lambdas don't carry the Settings-table env to re-read it. The
+    # role ARN is threaded on the SFN event (resolved at deploy time) so the step
+    # never needs a Settings lookup; the landed-account dry-run check still runs.
     from app.services.deploy_target import session_for_target
 
-    return session_for_target(account_id=account_id, region=region)
+    return session_for_target(
+        account_id=account_id,
+        region=region,
+        role_arn=event.get("target_role_arn"),
+        require_gate=False,
+    )
 
 
 def client(event: Optional[dict], service: str, **kwargs: Any):

@@ -189,6 +189,33 @@ def handler(event: dict, context) -> dict:
                 },
             }
 
+        # Phase 7 (opt-in) cross-account — BEST PRACTICE (mirrors the home Bug-60
+        # shared-role design). The platform's SHARED_RUNTIME_ROLE_ARN lives in the
+        # HOME account, so CreateAgentRuntime in a TARGET account can't pass it.
+        # AgentCore's guidance is to use a STABLE, PRE-PROVISIONED exec role —
+        # never mint-and-immediately-use (the fresh-role IAM-propagation race that
+        # CREATE_FAILs a runtime for ~17-20 min). So a cross-account deploy uses a
+        # well-known role the target-account owner pre-created (+ pre-warmed) as an
+        # onboarding step: `AgentCoreFlowsRuntimeRole`. We pass it by ARN (built
+        # from the target account id) exactly like the home shared role — zero
+        # deploy-time role creation, zero propagation race. Overridable per target
+        # via a `runtime_role_name` on the deploy_target config (defaults below).
+        _cross_account = bool(event.get("target_account_id"))
+        if _cross_account:
+            _tgt_acct = event["target_account_id"]
+            _rt_role_name = event.get("target_runtime_role_name") or "AgentCoreFlowsRuntimeRole"
+            _xacct_role_arn = f"arn:aws:iam::{_tgt_acct}:role/{_rt_role_name}"
+            logger.info("Cross-account: using pre-provisioned target runtime role %s", _xacct_role_arn)
+            return {
+                **event,
+                "role_name": _rt_role_name,
+                "role_arn": _xacct_role_arn,
+                "iam_result": {
+                    "success": True,
+                    "message": f"Using pre-provisioned target-account runtime role {_rt_role_name}",
+                },
+            }
+
         shared_role_arn = _get_env("SHARED_RUNTIME_ROLE_ARN", "").strip()
         if shared_role_arn:
             logger.info("Using shared runtime exec role %s (Bug 60)", shared_role_arn)

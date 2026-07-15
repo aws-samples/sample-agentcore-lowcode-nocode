@@ -389,7 +389,12 @@ async def get_entry(
     return RegistryEntryResponse.from_entry(entry, caller_sub)
 
 
-@router.post("/{slug}/clone", response_model=CloneResponse, dependencies=[Depends(require_scopes("registry:write"))])
+# Clone is a CONSUME action (copy a blueprint onto your own canvas) — it does NOT
+# mutate the registry entry's ownership (the increment_usage bump is incidental
+# telemetry). So it needs registry:READ, not write; otherwise the very users the
+# org catalog exists to serve (browse + reuse) couldn't clone. Publish/approve/
+# reject/update/delete remain registry:write (govern).
+@router.post("/{slug}/clone", response_model=CloneResponse, dependencies=[Depends(require_scopes("registry:read"))])
 async def clone(
     slug: str,
     caller_sub: str = Depends(get_caller_sub),

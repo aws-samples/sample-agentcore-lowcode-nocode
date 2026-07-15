@@ -15,7 +15,8 @@ import type { ActiveDeployment } from './components/deploy/ActiveDeploymentBanne
 import { ToolGeneratorPanel } from './components/ai/ToolGeneratorPanel';
 import { AgentGeneratorPanel } from './components/ai/AgentGeneratorPanel';
 import { HarnessAuthoring } from './components/harness/HarnessAuthoring';
-import type { GeneratedCanvasSpec } from './services/api';
+import type { GeneratedCanvasSpec, RegistryCanvasSnapshot } from './services/api';
+import { snapshotToCanvas } from './utils/cloneSnapshot';
 import { TemplateGallery } from './components/templates';
 import { MemoryConfigurationModal } from './components/modals/MemoryConfigurationModal';
 import { PolicyConfigurationModal } from './components/modals/PolicyConfigurationModal';
@@ -403,6 +404,29 @@ function App() {
   // Adapts the generator's spec shape onto the existing
   // instantiateTemplate / loadTemplate pipeline so a generated agent
   // lands on the canvas exactly like a hand-built template would.
+  // Phase 2 Gap 2A — apply a CLONED registry snapshot.
+  // A registry snapshot is a RAW React-Flow canvas ({name, nodes, edges} exactly
+  // as the store holds it — captured verbatim at publish time), NOT the NL
+  // generator's {idSuffix, configuration, sourceIdSuffix} spec shape. It must be
+  // loaded DIRECTLY via loadTemplate — routing it through handleApplyGeneratedSpec
+  // (as this used to) mis-reads n.idSuffix/n.configuration (undefined on real
+  // nodes) and e.sourceIdSuffix/targetIdSuffix, silently DROPPING every edge —
+  // so a Runtime→Memory / Gateway→tool wiring came back unwired and generated a
+  // broken template. Clone REPLACES the canvas, so the snapshot's internal node
+  // ids are self-consistent and need no remap.
+  const handleCloneSnapshot = useCallback((snapshot: RegistryCanvasSnapshot) => {
+    const { nodes, edges } = snapshotToCanvas(snapshot);
+    if (!nodes.length) {
+      // Defensive: an empty/legacy snapshot — surface it rather than silently
+      // loading a blank canvas that then "generates an incorrect template".
+      // eslint-disable-next-line no-console
+      console.warn('Clone: snapshot had no nodes; nothing to load', snapshot);
+      return;
+    }
+    loadTemplate(nodes, edges, `cloned-${Date.now()}`);
+    setTimeout(() => runValidation(), 10);
+  }, [loadTemplate, runValidation]);
+
   const handleApplyGeneratedSpec = useCallback((spec: GeneratedCanvasSpec) => {
     const fakeTemplate = {
       id: `ai-generated-${Date.now()}`,
@@ -1053,7 +1077,7 @@ function App() {
         isOpen={showRegistry}
         onClose={() => setShowRegistry(false)}
         onClone={(snapshot) => {
-          handleApplyGeneratedSpec(snapshot as GeneratedCanvasSpec);
+          handleCloneSnapshot(snapshot);
           setShowRegistry(false);
         }}
       />

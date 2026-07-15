@@ -1134,10 +1134,25 @@ export interface PublishRegistryRequest {
   latest_version_id?: string;
 }
 
+/**
+ * A registry canvas snapshot is a RAW React-Flow canvas — the exact
+ * {name, nodes, edges} the store holds, captured verbatim at publish time.
+ * It is NOT the NL-generator's GeneratedCanvasSpec ({idSuffix, configuration,
+ * sourceIdSuffix}) shape. Kept loosely typed (nodes/edges as unknown[]) so this
+ * module stays free of React-Flow store types; App.tsx casts to AgentCoreNode[]
+ * /Edge[] when loading. (Mislabeling this as GeneratedCanvasSpec is exactly what
+ * let the broken clone-apply cast compile and silently drop all edges.)
+ */
+export interface RegistryCanvasSnapshot {
+  name: string;
+  nodes: unknown[];
+  edges: unknown[];
+}
+
 export interface RegistryCloneResponse {
   agent_slug: string;
   display_name: string;
-  canvas_snapshot: GeneratedCanvasSpec;
+  canvas_snapshot: RegistryCanvasSnapshot;
 }
 
 /** Publish a deployed agent's canvas snapshot to the org registry. */

@@ -14,7 +14,7 @@ import {
   rejectRegistryApi,
   getErrorMessage,
   type RegistryEntry,
-  type GeneratedCanvasSpec,
+  type RegistryCanvasSnapshot,
 } from '../../services/api';
 import { useIsRegistryAdmin } from '../../auth/useIsRegistryAdmin';
 import { AwsRegistryPanel } from './AwsRegistryPanel';
@@ -27,7 +27,7 @@ import { DeployTargetsPanel } from './DeployTargetsPanel';
 export interface RegistryModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onClone?: (snapshot: GeneratedCanvasSpec) => void;
+  onClone?: (snapshot: RegistryCanvasSnapshot) => void;
 }
 
 // ============================================================================

@@ -97,7 +97,7 @@ GROUP_SCOPES: dict[str, set[str]] = {
     "g-admins-registry": {"registry:read", "registry:write"},
     "g-admins-security": {"settings:read", "settings:write", "observability:read"},
     "g-admins-cost": {"cost:read", "cost:write"},
-    "g-users-default": {SCOPE_INVOKE, "agent:read", "cost:read", "prompt:read"},
+    "g-users-default": {SCOPE_INVOKE, "agent:read", "cost:read", "prompt:read", "registry:read"},
     # --- Legacy groups (backward compatible) ---
     "org-admin": {SCOPE_ADMIN, SCOPE_INVOKE} | _all_read_write(),
     "registry-admin": {"registry:read", "registry:write"},

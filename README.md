@@ -793,6 +793,8 @@ aws cognito-idp admin-add-user-to-group \
 
 In the UI: developers click **Publish to Registry** in the Deploy panel after a deploy, and **Registry** in the component palette to browse and **Clone to Canvas**. Admins additionally see a **Pending review** tab with Approve / Reject actions.
 
+> The registry roles above are one slice of the platform-wide persona/scope model. For the full group→scope map (super-admin, security, cost, standard-user, …), how personas are *defined* (`rbac.py` `GROUP_SCOPES`), *created* (CDK `CfnUserPoolGroup`), and *assigned* (AWS Cognito / federated IdP), see [`docs/PERSONAS.md`](docs/PERSONAS.md).
+
 ## Deployment Templates
 
 ### Template 1: Web Search Agent (Beginner)

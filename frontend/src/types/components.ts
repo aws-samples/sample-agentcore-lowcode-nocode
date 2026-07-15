@@ -551,6 +551,12 @@ export interface ConnectorConfiguration extends ToolConfiguration {
   scopes?: string[];
   clientId?: string;
   discoveryUrl?: string;
+  // Phase 3 (Loom) OBO identity propagation. 'm2m' (default) = shared
+  // client-credentials; 'obo' = on-behalf-of token exchange (agent acts AS the
+  // end-user). OBO requires a custom OIDC provider (discoveryUrl) + a
+  // token-exchange-capable IdP.
+  delegationMode?: 'm2m' | 'obo';
+  oboGrantType?: 'TOKEN_EXCHANGE' | 'JWT_AUTHORIZATION_GRANT';
   // api_key only (catalog provides sensible defaults)
   credentialLocation?: ConnectorCredentialLocation;
   credentialParameterName?: string;

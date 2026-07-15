@@ -446,6 +446,18 @@ def _ensure_api_key_credential_provider(
         raise
 
 
+# Phase 3 (Loom) OBO — on-behalf-of token-exchange grant types (RFC 8693 /
+# RFC 7523) and their AgentCore client-auth pairing. Verified against the live
+# bedrock-agentcore-control service model (boto3 1.43.8):
+#   TOKEN_EXCHANGE (RFC 8693, e.g. Okta) → CLIENT_SECRET_BASIC + actorTokenContent NONE
+#   JWT_AUTHORIZATION_GRANT (RFC 7523, e.g. Entra ID) → CLIENT_SECRET_POST
+_OBO_GRANT_TYPES = ("TOKEN_EXCHANGE", "JWT_AUTHORIZATION_GRANT")
+_OBO_CLIENT_AUTH = {
+    "TOKEN_EXCHANGE": "CLIENT_SECRET_BASIC",
+    "JWT_AUTHORIZATION_GRANT": "CLIENT_SECRET_POST",
+}
+
+
 def _ensure_oauth2_credential_provider(
     agentcore_ctrl,
     name: str,
@@ -455,6 +467,8 @@ def _ensure_oauth2_credential_provider(
     client_secret_arn: str,
     json_key: str = "clientSecret",
     discovery_url: Optional[str] = None,
+    delegation_mode: str = "m2m",
+    obo_grant_type: Optional[str] = None,
 ) -> str:
     """Create (or reuse) an OAuth2 credential provider for a connector.
 
@@ -464,11 +478,23 @@ def _ensure_oauth2_credential_provider(
     ``discovery_url`` is required. The client secret is referenced from our own
     Secrets Manager secret (``clientSecretSource="EXTERNAL"``). Returns the
     credential provider ARN. Idempotent on conflict.
+
+    Phase 3 (Loom) OBO: when ``delegation_mode="obo"`` the provider is configured
+    for on-behalf-of token exchange (RFC 8693) so the agent calls downstream
+    services AS THE END-USER, preserving the delegation chain and least-privilege
+    — rather than a shared machine-to-machine identity. OBO requires the
+    ``CustomOauth2`` vendor (the branded vendor configs don't expose the
+    exchange config) and a token-exchange-capable IdP (Entra/Okta/Auth0/OIDC).
     """
     from app.services.connectors import vendor_config_key
 
     provider_name = _sanitize_provider_name(name)
     config_key = vendor_config_key(vendor)
+
+    _obo = str(delegation_mode or "m2m").lower() == "obo"
+    if _obo and vendor != "CustomOauth2":
+        # OBO exchange config only exists on customOauth2ProviderConfig.
+        raise ValueError("OBO delegation requires the CustomOauth2 vendor (custom OIDC provider)")
 
     if vendor == "CustomOauth2":
         if not discovery_url:
@@ -479,6 +505,16 @@ def _ensure_oauth2_credential_provider(
             "clientSecretConfig": {"secretId": client_secret_arn, "jsonKey": json_key},
             "clientSecretSource": "EXTERNAL",
         }
+        if _obo:
+            grant = (obo_grant_type or "TOKEN_EXCHANGE").upper()
+            if grant not in _OBO_GRANT_TYPES:
+                raise ValueError(f"obo_grant_type must be one of {_OBO_GRANT_TYPES}")
+            provider_config["clientAuthenticationMethod"] = _OBO_CLIENT_AUTH[grant]
+            obo_cfg: dict = {"grantType": grant}
+            if grant == "TOKEN_EXCHANGE":
+                # RFC 8693: no actor token — the user's subject token carries identity.
+                obo_cfg["tokenExchangeGrantTypeConfig"] = {"actorTokenContent": "NONE"}
+            provider_config["onBehalfOfTokenExchangeConfig"] = obo_cfg
     else:
         provider_config = {
             "clientId": client_id,
@@ -2442,6 +2478,11 @@ def _deploy_connector_targets_inner(
                 or "CustomOauth2"
             )
             discovery_url = conn.get("discovery_url") or conn.get("discoveryUrl")
+            # Phase 3 (Loom) OBO — carry delegation mode + grant type from the
+            # connector payload so the credential provider is minted for
+            # on-behalf-of token exchange when requested.
+            delegation_mode = (conn.get("delegation_mode") or conn.get("delegationMode") or "m2m")
+            obo_grant_type = conn.get("obo_grant_type") or conn.get("oboGrantType")
             provider_arn = _ensure_oauth2_credential_provider(
                 agentcore_ctrl,
                 provider_name,
@@ -2449,6 +2490,8 @@ def _deploy_connector_targets_inner(
                 client_id=conn.get("client_id") or conn.get("clientId") or "",
                 client_secret_arn=secret_arn,
                 discovery_url=discovery_url,
+                delegation_mode=delegation_mode,
+                obo_grant_type=obo_grant_type,
             )
             cred_cfg = {
                 "credentialProviderType": "OAUTH",

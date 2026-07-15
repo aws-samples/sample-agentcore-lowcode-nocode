@@ -120,10 +120,12 @@ def create_runtime_iam_role(
     region: str,
     connected_tools: Optional[list] = None,
     otel_secret_arn: Optional[str] = None,
+    resource_tags: Optional[dict] = None,
 ) -> str:
     """Create or reuse an IAM execution role for an AgentCore runtime.
 
-    Returns the role ARN.
+    ``resource_tags`` (Phase 2 governance tagging) are merged onto the role
+    alongside the mandatory ManagedBy tag. Returns the role ARN.
     """
     trust_policy = {
         "Version": "2012-10-17",
@@ -139,7 +141,16 @@ def create_runtime_iam_role(
     # Bug 139: tag every runtime exec role ManagedBy=agentcore-flows so the
     # delete-path IAM grant can be scoped by aws:ResourceTag instead of a broad
     # role/*-role wildcard that would match unrelated account roles.
-    _managed_tag = [{"Key": "ManagedBy", "Value": "agentcore-flows"}]
+    # Phase 2 (Loom): merge the resolved governance tags (owner/application/
+    # cost-center/…) so cost attribution + ABAC work off real AWS resource tags.
+    # IAM keys/values must be strings; the ManagedBy tag is always last so it
+    # can't be overridden by a caller-supplied governance tag of the same key.
+    _managed_tag = [
+        {"Key": str(k), "Value": str(v)}
+        for k, v in (resource_tags or {}).items()
+        if k and k != "ManagedBy"
+    ]
+    _managed_tag.append({"Key": "ManagedBy", "Value": "agentcore-flows"})
     try:
         resp = iam_client.create_role(
             RoleName=role_name,

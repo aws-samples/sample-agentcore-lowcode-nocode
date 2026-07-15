@@ -436,6 +436,12 @@ class DeployRequest(BaseModel):
     version_description: Optional[str] = Field(
         alias="versionDescription", default=None, max_length=500
     )
+    # Phase 2 (Loom) governance tagging. Caller supplies ad-hoc tag values
+    # and/or selects a named tag profile; the deploy handler resolves them
+    # against the org's tag policies (required-tag enforcement → HTTP 400) and
+    # applies the resolved set to every AWS resource the deploy creates.
+    resource_tags: Optional[dict] = Field(alias="resourceTags", default=None)
+    tag_profile: Optional[str] = Field(alias="tagProfile", default=None, max_length=128)
 
     @model_validator(mode="after")
     def _check_kb_config(self) -> "DeployRequest":

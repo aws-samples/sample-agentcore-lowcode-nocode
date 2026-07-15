@@ -278,6 +278,7 @@ from app.routers.hitl import router as hitl_router  # noqa: E402
 from app.routers.prompts import router as prompts_router  # noqa: E402  # Phase 3 Gap 3H
 from app.routers.connectors import router as connectors_router  # noqa: E402
 from app.routers.triggers import router as triggers_router  # noqa: E402
+from app.routers.tags import router as tags_router  # noqa: E402  # Phase 2 governance tagging
 
 deployment_app.include_router(versions_router)
 # Phase 1 Gap 1C — evaluation results endpoint. Mounted on the deployment
@@ -306,6 +307,12 @@ deployment_app.include_router(connectors_router)
 # the deployment Lambda owns the TriggersTable grant + the agentcore-trigger/*
 # Secrets Manager grant and already has the get_caller_sub auth helper.
 deployment_app.include_router(triggers_router)
+# Phase 2 governance tagging — tag policies + tag profiles. Mounted on the
+# deployment Lambda because the deploy hook resolves tags in this same process
+# and the Lambda owns the TagPolicy table grant. API-GW routes for
+# /api/settings/tags + /api/settings/tag-profiles are added in platform_stack.py
+# (Bug 21 router-enumeration rule: HTTP API needs explicit routes per path).
+deployment_app.include_router(tags_router)
 
 
 @deployment_app.get("/health")
@@ -500,12 +507,45 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     if request.observability_config and "observability" not in auto_connected:
         auto_connected.append("observability")
 
+    # Phase 2 (Loom) governance tagging — resolve the org's tag policies against
+    # the caller's supplied tags / selected profile BEFORE starting the deploy.
+    # A missing REQUIRED tag fails fast with HTTP 400 (rather than dying mid-SFN).
+    # Resolution is best-effort tolerant of a missing table (fresh stack): only a
+    # genuine required-tag violation blocks the deploy.
+    resolved_tags: dict = {}
+    try:
+        from app.services.tag_policy_store import (
+            TagResolutionError,
+            get_tag_policy_store,
+        )
+
+        tag_store = get_tag_policy_store()
+        tag_store.ensure_platform_policies("default")
+        resolved_tags = tag_store.resolve_tags(
+            "default",
+            supplied=request.resource_tags or {},
+            profile_name=request.tag_profile,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        # A required-tag violation is a caller error → 400. Any other failure
+        # (e.g. table absent on a fresh stack) must NOT block deploys.
+        from app.services.tag_policy_store import TagResolutionError
+
+        if isinstance(exc, TagResolutionError):
+            raise HTTPException(status_code=400, detail=str(exc))
+        logger.warning("Tag resolution skipped (non-fatal): %s", exc)
+
     sfn_input = {
         "deployment_id": deployment_id,
         "workflow_id": request.node_id,
         "config": request.config.model_dump(mode="json", by_alias=True),
         "connected_tools": auto_connected,
         "template_id": request.template_id,
+        # Phase 2 (Loom) governance tagging — resolved tag set applied to every
+        # AWS resource the step handlers create (threaded via sfn_input).
+        "resource_tags": resolved_tags,
         # Phase 1 Gap 1A — every step handler keys S3 paths and AgentCore
         # runtime names off the version. friendly_runtime_name is the user's
         # input; agentcore_runtime_name is what we actually pass to AgentCore.

@@ -219,6 +219,9 @@ def handler(event: dict, context) -> dict:
             region=region,
             connected_tools=connected_tools,
             otel_secret_arn=otel_secret_arn,
+            # Phase 2 (Loom) governance tagging — resolved at deploy start and
+            # threaded through the SFN input; applied to the runtime exec role.
+            resource_tags=event.get("resource_tags") or {},
         )
 
         return {

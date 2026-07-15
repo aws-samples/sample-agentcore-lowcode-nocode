@@ -16,6 +16,7 @@ import { EvaluationResultsPanel } from './EvaluationResultsPanel';
 import { CostPanel } from './CostPanel';
 import { ObservabilityPanel } from './ObservabilityPanel';
 import { TriggersPanel } from './TriggersPanel';
+import { ResourceTagFields, type ResourceTagState } from './ResourceTagFields';
 
 interface DeploymentStatus {
   state: 'idle' | 'deploying' | 'deployed' | 'error';
@@ -136,6 +137,9 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
   // Phase 1 Gap 1A — increment to force VersionsList reload after a new deploy.
   const [versionsRefreshKey, setVersionsRefreshKey] = useState(0);
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // Phase 2 (Loom) governance tagging — resolved tags + selected profile the
+  // user picked in ResourceTagFields; attached to the deploy payload.
+  const [resourceTagState, setResourceTagState] = useState<ResourceTagState>({ tags: {}, profileName: null });
   const [conversationHistory, setConversationHistory] = useState<Array<{role: string, content: string}>>([]);
   const [chatMessages, setChatMessages] = useState<Array<{
     id: string;
@@ -249,6 +253,9 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
           knowledgeBaseConfig: knowledgeBaseConfig || undefined,
           observabilityConfig: observabilityConfig || undefined,
           a2aConfig: a2aConfig || undefined,
+          // Phase 2 (Loom) governance tagging — resolved tags + selected profile.
+          resourceTags: Object.keys(resourceTagState.tags).length ? resourceTagState.tags : undefined,
+          tagProfile: resourceTagState.profileName || undefined,
         }),
       });
 
@@ -446,6 +453,9 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
           knowledgeBaseConfig: knowledgeBaseConfig || undefined,
           observabilityConfig: observabilityConfig || undefined,
           a2aConfig: a2aConfig || undefined,
+          // Phase 2 (Loom) governance tagging — resolved tags + selected profile.
+          resourceTags: Object.keys(resourceTagState.tags).length ? resourceTagState.tags : undefined,
+          tagProfile: resourceTagState.profileName || undefined,
         }),
       });
 
@@ -520,6 +530,9 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
           knowledgeBaseConfig: knowledgeBaseConfig || undefined,
           observabilityConfig: observabilityConfig || undefined,
           a2aConfig: a2aConfig || undefined,
+          // Phase 2 (Loom) governance tagging — resolved tags + selected profile.
+          resourceTags: Object.keys(resourceTagState.tags).length ? resourceTagState.tags : undefined,
+          tagProfile: resourceTagState.profileName || undefined,
         }),
       });
 
@@ -1158,6 +1171,12 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
                     </div>
                   </div>
                 </div>
+              )}
+
+              {/* Phase 2 (Loom) governance tags — shown when the org defines
+                  tag policies/profiles; otherwise renders nothing. */}
+              {deploymentStatus.state === 'idle' && (
+                <ResourceTagFields onChange={setResourceTagState} />
               )}
 
               {/* Deploy + Download Buttons (inside scroll area) */}

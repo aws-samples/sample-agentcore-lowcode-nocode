@@ -34,7 +34,35 @@ from aws_cdk import aws_stepfunctions_tasks as sfn_tasks
 from aws_cdk import aws_wafv2 as wafv2
 from aws_cdk import custom_resources as cr
 import cdk_nag
-from constructs import Construct
+import jsii
+from constructs import Construct, IConstruct
+
+
+@jsii.implements(cdk.IAspect)
+class _OverflowPolicyNagSuppressor:
+    """Aspect: suppress IAM5 wildcard findings on CDK auto-generated
+    ``OverflowPolicy<N>`` managed policies.
+
+    CDK splits an over-large inline role policy into ``OverflowPolicy<N>``
+    constructs during SYNTHESIS — after a stack's __init__ runs — so a
+    suppression applied in __init__ can miss them (their creation races with
+    the grant that tips the policy over the IAM size limit). An Aspect visits
+    every node during synthesis, catching overflow policies whenever they land.
+    """
+
+    def __init__(self, reasons):
+        self._reasons = reasons
+
+    def visit(self, node: IConstruct) -> None:
+        if node.node.id.startswith("OverflowPolicy"):
+            try:
+                cdk_nag.NagSuppressions.add_resource_suppressions(
+                    node,
+                    [cdk_nag.NagPackSuppression(id=nid, reason=reason)
+                     for nid, reason in self._reasons],
+                )
+            except Exception:  # noqa: BLE001
+                pass
 
 
 class PlatformStack(cdk.Stack):
@@ -96,6 +124,8 @@ class PlatformStack(cdk.Stack):
         self.triggers_table = self._create_triggers_table()
         # Phase 3 Gap 3H — prompt library / catalog table.
         self.prompt_library_table = self._create_prompt_library_table()
+        # Phase 2 (Loom) governance tagging — tag policies + tag profiles table.
+        self.tag_policy_table = self._create_tag_policy_table()
         self.logging_bucket = self._create_logging_bucket()
         self.artifacts_bucket = self._create_artifacts_bucket()
         self._upload_agentcore_deps()
@@ -495,6 +525,33 @@ class PlatformStack(cdk.Stack):
             ),
         )
         return table
+
+    def _create_tag_policy_table(self) -> dynamodb.Table:
+        """Phase 2 (Loom) governance tagging — tag policies + tag profiles.
+
+        PK ``org_id``, SK ``POLICY#<key>`` | ``PROFILE#<name>`` (single-table,
+        record kind discriminated by SK prefix — see services/tag_policy_store).
+        Low-volume org-wide config; no GSI. Mirrors _create_prompt_library_table.
+        """
+        return dynamodb.Table(
+            self,
+            "TagPolicyTable",
+            table_name=f"{self._project}-{self._env}-tag-policy",
+            partition_key=dynamodb.Attribute(
+                name="org_id",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="sk",
+                type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=self._removal_policy,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
 
     def _create_usage_events_table(self) -> dynamodb.Table:
         """Phase 2 Gap 2B — DynamoDB table for explicit per-invocation usage
@@ -1016,6 +1073,9 @@ class PlatformStack(cdk.Stack):
         # Phase 3 Gap 3H — prompt library. routers/prompts.py (mounted on the
         # deployment Lambda) reads/writes this table + the owner_sub GSI.
         self.prompt_library_table.grant_read_write_data(role)
+        # Phase 2 (Loom) governance tagging. routers/tags.py + the deploy-time
+        # tag resolver (services/tag_policy_store) read/write this table.
+        self.tag_policy_table.grant_read_write_data(role)
         # states:StartExecution on the state machine (granted after SM creation)
         # SSM read
         role.add_to_policy(
@@ -1379,6 +1439,9 @@ class PlatformStack(cdk.Stack):
                 "TRIGGERS_TABLE_NAME": self.triggers_table.table_name,
                 # Phase 3 Gap 3H — prompt library table (routers/prompts.py).
                 "PROMPT_LIBRARY_TABLE_NAME": self.prompt_library_table.table_name,
+                # Phase 2 (Loom) governance tagging table (routers/tags.py +
+                # deploy-time tag resolver).
+                "TAG_POLICY_TABLE_NAME": self.tag_policy_table.table_name,
                 "ARTIFACTS_BUCKET_NAME": self.artifacts_bucket.bucket_name,
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
@@ -3103,6 +3166,19 @@ class PlatformStack(cdk.Stack):
             integration=deployment_integration,
             authorizer=jwt_authorizer,
         )
+        # Phase 2 (Loom) governance tagging — routers/tags.py mounts
+        # /api/settings/tags + /api/settings/tag-profiles on the deployment
+        # Lambda. Bug 21 enumeration: HTTP API needs explicit routes per path.
+        api.add_routes(
+            path="/api/settings/{proxy+}",
+            methods=[
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.POST,
+                apigwv2.HttpMethod.DELETE,
+            ],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
         # Phase 2 Gap 2E — workspace sharing. GET /api/workspaces routes to the
         # WORKFLOW Lambda (main.py mounts workspaces_router; it reads workflow
         # storage). The share endpoints /api/workflows/{id}/share already match
@@ -3526,19 +3602,14 @@ class PlatformStack(cdk.Stack):
         ]
         _suppress(self.workflow_lambda.role, iam_reasons)
         _suppress(self.deployment_lambda.role, iam_reasons)
-        # When the deployment role's inline policy exceeds the IAM size limit, CDK
-        # splits the excess into a separate "OverflowPolicy<N>" managed-policy
-        # resource that apply_to_children on the role does NOT reach. Suppress the
-        # same IAM5 wildcard findings on it by path (best-effort; ignored if absent).
-        for _n in range(1, 4):
-            try:
-                cdk_nag.NagSuppressions.add_resource_suppressions_by_path(
-                    self,
-                    f"/{self.stack_name}/DeploymentLambdaRole/OverflowPolicy{_n}/Resource",
-                    [cdk_nag.NagPackSuppression(id=nid, reason=reason) for nid, reason in iam_reasons],
-                )
-            except Exception:  # noqa: BLE001
-                pass
+        # When a role's inline policy exceeds the IAM size limit, CDK splits the
+        # excess into auto-generated "OverflowPolicy<N>" managed policies DURING
+        # SYNTHESIS — after this __init__-time method runs — so a fixed by-path
+        # suppression can miss them once a grant tips the policy over the limit
+        # (hit when the Phase 2 tag-policy grant grew the deployment role). An
+        # Aspect visits nodes during synth and suppresses the same IAM5 wildcard
+        # findings on any OverflowPolicy, whenever/wherever CDK creates it.
+        cdk.Aspects.of(self).add(_OverflowPolicyNagSuppressor(iam_reasons))
         # Bug 157 — streaming test Lambda role: same invoke-on-* wildcards as the
         # deployment Lambda's test path (InvokeAgentRuntime/InvokeHarness).
         if hasattr(self, "stream_lambda"):

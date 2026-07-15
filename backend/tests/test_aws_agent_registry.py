@@ -28,8 +28,11 @@ def test_record_id_from_arn():
 def test_a2a_descriptor_shape():
     d = build_a2a_descriptor("bot", "does things", "https://x/invoke",
                              skills=[{"id": "s1", "name": "search"}])
-    card = json.loads(d["agentCard"]["inlineContent"])
-    assert d["agentCard"]["schemaVersion"] == "0.3"
+    # Wrapped under the "a2a" type key (API-required — caught live).
+    assert set(d.keys()) == {"a2a"}
+    ac = d["a2a"]["agentCard"]
+    card = json.loads(ac["inlineContent"])
+    assert ac["schemaVersion"] == "0.3"
     assert card["name"] == "bot" and card["url"] == "https://x/invoke"
     assert card["protocolVersion"] == "0.3"
     assert card["skills"] == [{"id": "s1", "name": "search"}]
@@ -37,13 +40,14 @@ def test_a2a_descriptor_shape():
 
 def test_a2a_description_capped_at_100():
     d = build_a2a_descriptor("bot", "x" * 200, "https://x")
-    card = json.loads(d["agentCard"]["inlineContent"])
+    card = json.loads(d["a2a"]["agentCard"]["inlineContent"])
     assert len(card["description"]) == 100
 
 
 def test_custom_descriptor_roundtrips():
     d = build_custom_descriptor({"framework": "strands", "model": "claude"})
-    assert json.loads(d["inlineContent"])["framework"] == "strands"
+    assert set(d.keys()) == {"custom"}
+    assert json.loads(d["custom"]["inlineContent"])["framework"] == "strands"
 
 
 # -- adapter (fake client) ---------------------------------------------------

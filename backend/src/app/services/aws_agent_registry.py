@@ -58,13 +58,20 @@ def build_a2a_descriptor(name: str, description: str, url: str,
         "defaultInputModes": ["text"],
         "defaultOutputModes": ["text"],
     }
-    return {"agentCard": {"schemaVersion": A2A_CARD_SCHEMA_VERSION,
-                          "inlineContent": json.dumps(card)}}
+    # The API's `descriptors` map is keyed by the (lowercased) descriptor type:
+    # {"a2a": {"agentCard": {...}}} — NOT a bare agentCard. (Caught live: passing
+    # the inner structure fails with "Unknown parameter in descriptors:
+    # agentCard, must be one of: mcp, a2a, custom, agentSkills".)
+    return {"a2a": {"agentCard": {"schemaVersion": A2A_CARD_SCHEMA_VERSION,
+                                  "inlineContent": json.dumps(card)}}}
 
 
 def build_custom_descriptor(payload: dict) -> dict:
-    """CUSTOM descriptor — arbitrary inlineContent JSON (our own agent metadata)."""
-    return {"inlineContent": json.dumps(payload)}
+    """CUSTOM descriptor — arbitrary inlineContent JSON (our own agent metadata).
+
+    Returned wrapped under the ``custom`` type key (see build_a2a_descriptor).
+    """
+    return {"custom": {"inlineContent": json.dumps(payload)}}
 
 
 class AwsAgentRegistry:

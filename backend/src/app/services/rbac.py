@@ -171,7 +171,10 @@ def require_scopes(*required: str) -> Callable[[Request], None]:
                 detail=f"Missing required scope(s): {', '.join(required)}",
             )
         # Advisory mode: record what WOULD have been denied, then allow.
-        logger.info(
+        # WARNING (not info): this is an actionable operational signal — the
+        # RBAC_ROLLOUT runbook + the WouldDeny CloudWatch metric filter depend on
+        # this line being emitted at Lambda's default log level (INFO is filtered).
+        logger.warning(
             "RBAC advisory (would-deny): caller lacks %s (held=%s) path=%s",
             list(required), held, request.scope.get("path"),
         )

@@ -149,12 +149,41 @@ async def get_runtime_cost(
 
         b = get_budget_store().get("default", "owner", caller_sub)
         if b is not None:
-            summary["owner_budget"] = evaluate_budget(
+            ob = evaluate_budget(
                 b.limit_usd, b.warn_pct, float(summary.get("total_cost", 0.0))
             )
+            summary["owner_budget"] = ob
+            # Phase B hardening — emit a CloudWatch metric when a budget is at
+            # warn/over so an ops alarm can fire WITHOUT a scheduled poller
+            # (metric-on-read; the dashboard already reads cost, so this is free).
+            if ob["status"] in ("warn", "over"):
+                _emit_budget_breach_metric(ob["status"])
     except Exception as exc:  # noqa: BLE001
         logger.warning("owner budget annotation skipped: %s", exc)
     return summary
+
+
+def _emit_budget_breach_metric(status: str) -> None:
+    """Best-effort CloudWatch metric for a budget warn/over (Phase B FinOps).
+
+    Namespace <project>/<env>/finops, metric BudgetBreach, dimension Status.
+    Never raises — a metric failure must not affect the cost read.
+    """
+    try:
+        import boto3
+        proj = os.environ.get("PROJECT_NAME", "agentcore-workflow")
+        env = os.environ.get("ENVIRONMENT", "dev")
+        boto3.client("cloudwatch", region_name=_region()).put_metric_data(
+            Namespace=f"{proj}/{env}/finops",
+            MetricData=[{
+                "MetricName": "BudgetBreach",
+                "Dimensions": [{"Name": "Status", "Value": status}],
+                "Value": 1,
+                "Unit": "Count",
+            }],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.info("budget breach metric emit skipped: %s", exc)
 
 
 # ---------------------------------------------------------------------------

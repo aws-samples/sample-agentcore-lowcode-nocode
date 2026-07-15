@@ -131,13 +131,21 @@ class TagPolicyStore:
     # -- seeding + resolution -------------------------------------------
 
     def ensure_platform_policies(self, org_id: str) -> None:
-        """Idempotently seed the platform-required tag policies."""
+        """Idempotently seed the platform tag policies as RECOMMENDED (not required).
+
+        Governance must be OPT-IN: seeding these as ``required=True`` would make
+        EVERY deploy without the tag fail at HTTP 400 the moment anyone views the
+        settings page — breaking normal agent deploys by default. So they seed as
+        ``required=False`` (shown on cards, encouraged); an admin explicitly flips
+        ``required`` via POST /api/settings/tags when the org wants enforcement.
+        Mirrors the advisory-by-default posture of RBAC + deploy-targets.
+        """
         existing = {p.key for p in self.list_policies(org_id)}
         for key in PLATFORM_REQUIRED_KEYS:
             if key not in existing:
                 self.put_policy(
                     org_id,
-                    TagPolicy(key=key, required=True, show_on_card=True),
+                    TagPolicy(key=key, required=False, show_on_card=True),
                 )
 
     def resolve_tags(

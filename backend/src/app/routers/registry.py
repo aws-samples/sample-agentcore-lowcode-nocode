@@ -312,6 +312,67 @@ def _can_view(entry: RegistryEntry, caller_sub: str, caller_org: str, is_admin: 
     return entry.status == "approved" and _visible_to(entry, caller_sub, caller_org)
 
 
+# ---------------------------------------------------------------------------
+# Phase 6 (Loom) — AWS Bedrock AgentCore Agent Registry federation. Opt-in.
+# DECLARED BEFORE the /{slug} routes: FastAPI matches in declaration order, so
+# these literal /aws-* paths must precede the /{slug} path parameter or they'd
+# be captured as a slug and 404 (caught live). Degrades gracefully when the
+# feature is unconfigured / the API is absent (public preview).
+# ---------------------------------------------------------------------------
+
+
+class AwsRegistryEnableRequest(BaseModel):
+    registry_id: str = Field(min_length=1, max_length=256)
+
+
+@router.get("/aws-config", dependencies=[Depends(require_scopes("registry:read"))])
+async def aws_registry_config(caller_sub: str = Depends(get_caller_sub)) -> dict:
+    """Return whether AWS Agent Registry federation is enabled + reachable."""
+    from app.services.aws_agent_registry import get_configured_registry_id, get_registry
+
+    rid = get_configured_registry_id()
+    if not rid:
+        return {"enabled": False, "registry_id": None, "available": False}
+    reg = get_registry()
+    return {"enabled": True, "registry_id": rid,
+            "available": bool(reg and reg.available())}
+
+
+@router.post("/aws-config", dependencies=[Depends(require_scopes("registry:write"))])
+async def aws_registry_enable(
+    body: AwsRegistryEnableRequest,
+    caller_sub: str = Depends(get_caller_sub),
+    is_admin: bool = Depends(caller_is_admin),
+) -> dict:
+    """Enable AWS Agent Registry federation with a registryId. Admin only."""
+    if not is_admin:
+        raise HTTPException(status_code=403, detail="Requires registry-admin role")
+    from app.services.aws_agent_registry import AwsAgentRegistry, set_configured_registry_id
+
+    # Validate reachability before persisting so a typo fails loudly here.
+    if not AwsAgentRegistry(body.registry_id).available():
+        raise HTTPException(
+            status_code=400,
+            detail="Registry not reachable (check the registryId / region / permissions)",
+        )
+    set_configured_registry_id(body.registry_id)
+    return {"enabled": True, "registry_id": body.registry_id, "available": True}
+
+
+@router.get("/aws-search", dependencies=[Depends(require_scopes("registry:read"))])
+async def aws_registry_search(
+    q: str = Query(min_length=1, max_length=256),
+    caller_sub: str = Depends(get_caller_sub),
+) -> dict:
+    """Semantic search across the AWS Agent Registry (empty when disabled)."""
+    from app.services.aws_agent_registry import get_registry
+
+    reg = get_registry()
+    if reg is None:
+        return {"enabled": False, "results": []}
+    return {"enabled": True, "results": reg.search(q)}
+
+
 @router.get("/{slug}", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:read"))])
 async def get_entry(
     slug: str,
@@ -475,63 +536,6 @@ async def reject_entry(
     return RegistryEntryResponse.from_entry(updated, caller_sub)
 
 
-# ---------------------------------------------------------------------------
-# Phase 6 (Loom) — AWS Bedrock AgentCore Agent Registry federation. Opt-in:
-# an admin sets a registryId; deployed agents can then be published to the
-# org-wide AWS-native catalog with the AWS approval workflow. All endpoints
-# degrade gracefully when the feature is unconfigured / the API is absent
-# (public preview). Routes live under /api/registry/aws-* (covered by the
-# existing /api/registry/{proxy+} API-GW route).
-# ---------------------------------------------------------------------------
-
-
-class AwsRegistryEnableRequest(BaseModel):
-    registry_id: str = Field(min_length=1, max_length=256)
-
-
-@router.get("/aws-config", dependencies=[Depends(require_scopes("registry:read"))])
-async def aws_registry_config(caller_sub: str = Depends(get_caller_sub)) -> dict:
-    """Return whether AWS Agent Registry federation is enabled + reachable."""
-    from app.services.aws_agent_registry import get_configured_registry_id, get_registry
-
-    rid = get_configured_registry_id()
-    if not rid:
-        return {"enabled": False, "registry_id": None, "available": False}
-    reg = get_registry()
-    return {"enabled": True, "registry_id": rid,
-            "available": bool(reg and reg.available())}
-
-
-@router.post("/aws-config", dependencies=[Depends(require_scopes("registry:write"))])
-async def aws_registry_enable(
-    body: AwsRegistryEnableRequest,
-    caller_sub: str = Depends(get_caller_sub),
-    is_admin: bool = Depends(caller_is_admin),
-) -> dict:
-    """Enable AWS Agent Registry federation with a registryId. Admin only."""
-    if not is_admin:
-        raise HTTPException(status_code=403, detail="Requires registry-admin role")
-    from app.services.aws_agent_registry import AwsAgentRegistry, set_configured_registry_id
-
-    # Validate reachability before persisting so a typo fails loudly here.
-    if not AwsAgentRegistry(body.registry_id).available():
-        raise HTTPException(
-            status_code=400,
-            detail="Registry not reachable (check the registryId / region / permissions)",
-        )
-    set_configured_registry_id(body.registry_id)
-    return {"enabled": True, "registry_id": body.registry_id, "available": True}
-
-
-@router.get("/aws-search", dependencies=[Depends(require_scopes("registry:read"))])
-async def aws_registry_search(
-    q: str = Query(min_length=1, max_length=256),
-    caller_sub: str = Depends(get_caller_sub),
-) -> dict:
-    """Semantic search across the AWS Agent Registry (empty when disabled)."""
-    from app.services.aws_agent_registry import get_registry
-
-    reg = get_registry()
-    if reg is None:
-        return {"enabled": False, "results": []}
-    return {"enabled": True, "results": reg.search(q)}
+# (AWS Agent Registry federation routes are declared ABOVE the /{slug} routes —
+# see near the top of the endpoint section — so literal /aws-* paths aren't
+# swallowed by the /{slug} path parameter.)

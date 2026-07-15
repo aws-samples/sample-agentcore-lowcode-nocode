@@ -67,11 +67,19 @@ def list_policies(caller_sub: str = Depends(get_caller_sub)) -> list[TagPolicy]:
 def upsert_policy(
     body: TagPolicyRequest, caller_sub: str = Depends(get_caller_sub)
 ) -> TagPolicy:
-    if body.key.startswith("platform:"):
-        raise HTTPException(status_code=400, detail="platform: tag keys are reserved")
     store = get_tag_policy_store()
+    org = _org(caller_sub)
+    if body.key.startswith("platform:"):
+        # platform:* keys can't be CREATED by callers, but an admin MAY update an
+        # existing platform policy (e.g. flip required=true to enforce it, or set
+        # a default). Reject only creation of a brand-new platform: key.
+        if store.get_policy(org, body.key) is None:
+            raise HTTPException(
+                status_code=400,
+                detail="platform: tag keys are reserved (cannot create new ones)",
+            )
     return store.put_policy(
-        _org(caller_sub),
+        org,
         TagPolicy(
             key=body.key,
             default_value=body.default_value,

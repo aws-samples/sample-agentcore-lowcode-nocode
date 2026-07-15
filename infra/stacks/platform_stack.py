@@ -1220,6 +1220,20 @@ class PlatformStack(cdk.Stack):
                     "bedrock-agentcore:GetPolicyEngine",
                     "bedrock-agentcore:DeletePolicyEngine",
                     "bedrock-agentcore:ListPolicyEngines",
+                    # Phase 6 (Loom) — AWS Agent Registry federation (opt-in).
+                    # The registry router publishes/approves/searches records in
+                    # the org-wide AWS-native catalog. Public preview; feature is
+                    # off unless an admin configures a registryId.
+                    "bedrock-agentcore:CreateRegistry",
+                    "bedrock-agentcore:GetRegistry",
+                    "bedrock-agentcore:CreateRegistryRecord",
+                    "bedrock-agentcore:GetRegistryRecord",
+                    "bedrock-agentcore:ListRegistryRecords",
+                    "bedrock-agentcore:SubmitRegistryRecordForApproval",
+                    "bedrock-agentcore:UpdateRegistryRecordStatus",
+                    "bedrock-agentcore:UpdateRegistryRecord",
+                    "bedrock-agentcore:DeleteRegistryRecord",
+                    "bedrock-agentcore:SearchRegistryRecords",
                     "bedrock-agentcore:CreatePolicy",
                     "bedrock-agentcore:DeletePolicy",
                     # UpdatePolicy: the lazy promoter recovers a CREATE_FAILED

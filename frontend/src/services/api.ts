@@ -651,6 +651,24 @@ export class ApiClient {
     return this.request<AuditSummary>(`/api/admin/audit?limit=${limit}`);
   }
 
+  /** Phase 6 (Loom) — AWS Agent Registry federation config/status. */
+  async getAwsRegistryConfig(): Promise<{ enabled: boolean; registry_id: string | null; available: boolean }> {
+    return this.request(`/api/registry/aws-config`);
+  }
+
+  /** Phase 6 — enable AWS Agent Registry federation with a registryId (admin). */
+  async enableAwsRegistry(registryId: string): Promise<{ enabled: boolean; registry_id: string; available: boolean }> {
+    return this.request(`/api/registry/aws-config`, {
+      method: 'POST',
+      body: JSON.stringify({ registry_id: registryId }),
+    });
+  }
+
+  /** Phase 6 — semantic search across the AWS Agent Registry. */
+  async searchAwsRegistry(q: string): Promise<{ enabled: boolean; results: Array<Record<string, unknown>> }> {
+    return this.request(`/api/registry/aws-search?q=${encodeURIComponent(q)}`);
+  }
+
   // ==========================================================================
   // Scheduled / event triggers (Phase 3 Gap 3F)
   // ==========================================================================

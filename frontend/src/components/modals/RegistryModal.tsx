@@ -17,6 +17,7 @@ import {
   type GeneratedCanvasSpec,
 } from '../../services/api';
 import { useIsRegistryAdmin } from '../../auth/useIsRegistryAdmin';
+import { AwsRegistryPanel } from './AwsRegistryPanel';
 
 // ============================================================================
 // Props
@@ -187,6 +188,10 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
               {loading ? 'Searching...' : 'Search'}
             </button>
           </form>
+          {/* Phase 6 (Loom) — AWS Agent Registry federation (opt-in). */}
+          <div className="mt-3">
+            <AwsRegistryPanel />
+          </div>
         </div>
 
         {/* Error banner */}

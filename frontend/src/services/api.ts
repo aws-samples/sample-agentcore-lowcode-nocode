@@ -1122,6 +1122,10 @@ export interface RegistryEntry {
   reviewed_by?: string | null;
   reviewed_at?: string | null;
   rejection_reason?: string | null;
+  // Populated only by the single-entry GET (detail view). Null on list results —
+  // the browse grid does not carry full snapshots. Lets the Components tab render
+  // the blueprint's nodes/edges without triggering a clone.
+  canvas_snapshot?: RegistryCanvasSnapshot | null;
 }
 
 export interface PublishRegistryRequest {
@@ -1189,6 +1193,25 @@ export async function searchRegistryApi(
     throw new Error(`Registry search failed (${response.status})`);
   }
   return (await response.json()) as RegistryEntry[];
+}
+
+/**
+ * Fetch a single registry entry (detail view). Unlike the list, this response
+ * carries `canvas_snapshot` so the Components tab can render the blueprint's
+ * nodes/edges. This is a READ, not a clone — it does NOT increment usage.
+ */
+export async function getRegistryEntryApi(
+  slug: string,
+  baseUrl: string = API_BASE_URL,
+): Promise<RegistryEntry> {
+  const response = await authFetch(
+    `${baseUrl}/api/registry/${encodeURIComponent(slug)}`,
+    { method: 'GET' },
+  );
+  if (!response.ok) {
+    throw new Error(`Registry entry fetch failed (${response.status})`);
+  }
+  return (await response.json()) as RegistryEntry;
 }
 
 /** Clone a registry entry — returns the canvas snapshot to drop on the canvas. */

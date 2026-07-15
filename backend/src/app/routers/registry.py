@@ -131,9 +131,19 @@ class RegistryEntryResponse(BaseModel):
     reviewed_by: Optional[str] = None
     reviewed_at: Optional[str] = None
     rejection_reason: Optional[str] = None
+    # Populated ONLY on single-entry GET (detail view's Components tab), never in
+    # the list response — including the full snapshot in every browse-grid card
+    # would bloat the list payload. None on list items by design.
+    canvas_snapshot: Optional[dict] = None
 
     @classmethod
-    def from_entry(cls, e: RegistryEntry, caller_sub: str) -> "RegistryEntryResponse":
+    def from_entry(
+        cls,
+        e: RegistryEntry,
+        caller_sub: str,
+        *,
+        include_snapshot: bool = False,
+    ) -> "RegistryEntryResponse":
         return cls(
             org_id=e.org_id,
             agent_slug=e.agent_slug,
@@ -151,6 +161,7 @@ class RegistryEntryResponse(BaseModel):
             reviewed_by=e.reviewed_by,
             reviewed_at=e.reviewed_at,
             rejection_reason=e.rejection_reason,
+            canvas_snapshot=e.canvas_snapshot if include_snapshot else None,
         )
 
 
@@ -386,7 +397,9 @@ async def get_entry(
         # 404 (not 403) — don't disclose existence of entries the caller
         # can't see. Same rule as services/auth.assert_owner.
         raise HTTPException(status_code=404, detail="Not found")
-    return RegistryEntryResponse.from_entry(entry, caller_sub)
+    # Single-entry detail view carries the snapshot so the UI's Components tab
+    # can render the blueprint's nodes/edges without a clone side-effect.
+    return RegistryEntryResponse.from_entry(entry, caller_sub, include_snapshot=True)
 
 
 # Clone is a CONSUME action (copy a blueprint onto your own canvas) — it does NOT

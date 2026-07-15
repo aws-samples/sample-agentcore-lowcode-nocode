@@ -19,6 +19,7 @@ import {
 import { useIsRegistryAdmin } from '../../auth/useIsRegistryAdmin';
 import { AwsRegistryPanel } from './AwsRegistryPanel';
 import { DeployTargetsPanel } from './DeployTargetsPanel';
+import { RegistryEntryDetail } from './registry/RegistryEntryDetail';
 
 // ============================================================================
 // Props
@@ -45,6 +46,10 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
   const [approving, setApproving] = useState<string | null>(null);
   const [rejecting, setRejecting] = useState<string | null>(null);
   const [rejectReason, setRejectReason] = useState('');
+  // Master-detail: the selected entry opens the 4-tab detail view; null = list.
+  const [selected, setSelected] = useState<RegistryEntry | null>(null);
+  // Status filter tabs (with live counts), ported from the reference registry.
+  const [statusFilter, setStatusFilter] = useState<'all' | 'approved' | 'pending' | 'rejected'>('all');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -62,8 +67,26 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
   useEffect(() => {
     if (isOpen) {
       void load();
+    } else {
+      // Reset master-detail + filter when the modal closes so it reopens on the list.
+      setSelected(null);
+      setStatusFilter('all');
     }
   }, [isOpen, load]);
+
+  // Live status counts across the currently-loaded (scope-filtered) entries.
+  const statusCounts = entries.reduce(
+    (acc, e) => {
+      const s = (e.status || 'approved') as 'approved' | 'pending' | 'rejected';
+      acc[s] = (acc[s] || 0) + 1;
+      return acc;
+    },
+    {} as Record<string, number>,
+  );
+
+  const visibleEntries = entries.filter(
+    (e) => statusFilter === 'all' || (e.status || 'approved') === statusFilter,
+  );
 
   const handleClone = async (entry: RegistryEntry) => {
     if (!onClone) return;
@@ -161,6 +184,25 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
           </button>
         </div>
 
+        {/* Error banner — shown in both list and detail modes. */}
+        {error && (
+          <div className="mx-6 mt-4 px-3 py-2 rounded-lg border border-red-200 bg-red-50 text-xs text-red-700">
+            {error}
+          </div>
+        )}
+
+        {/* Detail view (master-detail): render the 4-tab detail for a selected
+            entry; otherwise fall through to the browse list below. */}
+        {selected ? (
+          <RegistryEntryDetail
+            entry={selected}
+            isAdmin={isAdmin}
+            cloning={cloning === selected.agent_slug}
+            onBack={() => setSelected(null)}
+            onClone={(e) => void handleClone(e)}
+          />
+        ) : (
+        <>
         {/* Search bar */}
         <div className="px-6 py-4 border-b border-gray-200 bg-gray-50">
           <form onSubmit={handleSearch} className="flex gap-2">
@@ -197,20 +239,35 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
           <div className="mt-3">
             <DeployTargetsPanel />
           </div>
-        </div>
-
-        {/* Error banner */}
-        {error && (
-          <div className="mx-6 mt-4 px-3 py-2 rounded-lg border border-red-200 bg-red-50 text-xs text-red-700">
-            {error}
+          {/* Status filter tabs with live counts (reference-registry pattern). */}
+          <div className="flex gap-2 mt-3 flex-wrap">
+            {([
+              ['all', `All (${entries.length})`],
+              ['approved', `Approved (${statusCounts.approved || 0})`],
+              ['pending', `Pending (${statusCounts.pending || 0})`],
+              ['rejected', `Rejected (${statusCounts.rejected || 0})`],
+            ] as const).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setStatusFilter(key)}
+                className={`px-3 py-1 rounded-full text-xs border transition-colors ${
+                  statusFilter === key
+                    ? 'bg-blue-600 text-white border-blue-600'
+                    : 'bg-white text-gray-600 border-gray-300 hover:border-gray-400'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
           </div>
-        )}
+        </div>
 
         {/* Content area */}
         <div className="flex-1 overflow-y-auto px-6 py-4">
           {loading && entries.length === 0 ? (
             <div className="text-sm text-gray-500">Loading agents...</div>
-          ) : entries.length === 0 ? (
+          ) : visibleEntries.length === 0 ? (
             <div className="text-center py-16">
               <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-gray-100 flex items-center justify-center">
                 <svg className="w-8 h-8 text-gray-400" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -230,7 +287,7 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
             </div>
           ) : (
             <div className="grid grid-cols-1 gap-3">
-              {entries.map((entry) => {
+              {visibleEntries.map((entry) => {
                 const status = entry.status || 'approved';
                 const canClone = status === 'approved' || entry.is_owner;
                 const showApprovalActions = isAdmin && status === 'pending';
@@ -238,7 +295,16 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
                 return (
                   <div
                     key={entry.agent_slug}
-                    className="border border-gray-200 rounded-lg p-4 bg-white hover:border-gray-300 transition-colors"
+                    role="button"
+                    tabIndex={0}
+                    onClick={() => setSelected(entry)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        setSelected(entry);
+                      }
+                    }}
+                    className="border border-gray-200 rounded-lg p-4 bg-white hover:border-blue-300 cursor-pointer transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500"
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex-1 min-w-0">
@@ -310,7 +376,9 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
                           </span>
                         </div>
                       </div>
-                      <div className="flex flex-col gap-2">
+                      {/* Stop card-click propagation so action buttons don't
+                          also open the detail view. */}
+                      <div className="flex flex-col gap-2" onClick={(e) => e.stopPropagation()}>
                         {/* Clone button */}
                         <button
                           type="button"
@@ -376,6 +444,8 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
             </div>
           )}
         </div>
+        </>
+        )}
       </div>
     </div>
   );

@@ -33,6 +33,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from app.services.auth import assert_owner, get_caller_sub
+from app.services.rbac import require_scopes
 from app.services.hitl_store import (
     STATUS_APPROVED,
     STATUS_REJECTED,
@@ -121,7 +122,7 @@ class DecisionResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-@router.get("/pending", response_model=list[HitlRequestResponse])
+@router.get("/pending", response_model=list[HitlRequestResponse], dependencies=[Depends(require_scopes("hitl:read"))])
 async def list_pending(
     caller_sub: str = Depends(get_caller_sub),
 ) -> list[HitlRequestResponse]:
@@ -134,7 +135,7 @@ async def list_pending(
     return [HitlRequestResponse.from_model(r) for r in requests]
 
 
-@router.post("/{request_id}/decision", response_model=DecisionResponse)
+@router.post("/{request_id}/decision", response_model=DecisionResponse, dependencies=[Depends(require_scopes("hitl:write"))])
 async def decide(
     request_id: str,
     body: DecisionRequest,

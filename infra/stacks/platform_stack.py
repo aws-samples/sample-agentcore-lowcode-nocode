@@ -963,6 +963,12 @@ class PlatformStack(cdk.Stack):
                 "APP_AWS_REGION": self.region,
                 "POWERTOOLS_SERVICE_NAME": "workflow",
                 "PYTHONPATH": "/var/task/src:/var/task:/var/task/lib",
+                # Scope-based RBAC (services/rbac.py). Advisory by default: the
+                # dependency logs would-be denials but allows the request. Flip
+                # to "true" (redeploy) to enforce 403s once group grants are
+                # validated in real traffic — mirrors the Cedar LOG_ONLY→ENFORCE
+                # promotion. Overridable via `cdk deploy -c rbac_enforce=true`.
+                "RBAC_ENFORCE": self.node.try_get_context("rbac_enforce") or "false",
             },
             log_group=logs.LogGroup(
                 self,
@@ -2749,6 +2755,30 @@ class PlatformStack(cdk.Stack):
             description="Registry publishers",
             precedence=10,
         )
+
+        # Scope-based RBAC groups (services/rbac.py GROUP_SCOPES). Two dimensions:
+        #   * type groups (t-admin / t-user) drive which UI sections render;
+        #   * resource groups (g-admins-* / g-users-*) grant capability scopes.
+        # A user belongs to one type group + one or more resource groups.
+        # Enforcement is advisory until RBAC_ENFORCE=true on the API Lambda.
+        _rbac_groups = [
+            ("TypeAdminGroup", "t-admin", "UI: all admin sections", 1),
+            ("TypeUserGroup", "t-user", "UI: end-user sections only", 20),
+            ("AdminSuperGroup", "g-admins-super", "All scopes", 1),
+            ("AdminRegistryGroup", "g-admins-registry", "registry:read/write", 5),
+            ("AdminSecurityGroup", "g-admins-security", "settings + observability", 5),
+            ("AdminCostGroup", "g-admins-cost", "cost:read/write", 5),
+            ("UserDefaultGroup", "g-users-default", "invoke + read-only defaults", 20),
+        ]
+        for _cid, _gname, _desc, _prec in _rbac_groups:
+            cognito.CfnUserPoolGroup(
+                self,
+                _cid,
+                user_pool_id=pool.user_pool_id,
+                group_name=_gname,
+                description=_desc,
+                precedence=_prec,
+            )
 
         # Pre-create users from context (comma-separated string via env var).
         #

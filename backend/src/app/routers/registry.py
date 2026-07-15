@@ -38,6 +38,7 @@ from app.services.auth import (
     get_caller_sub,
     is_registry_admin,
 )
+from app.services.rbac import require_scopes
 from app.services.registry_store import (
     DEFAULT_ORG_ID,
     RegistryEntry,
@@ -179,7 +180,7 @@ def _visible_to(entry: RegistryEntry, caller_sub: str, caller_org: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-@router.post("", response_model=RegistryEntryResponse)
+@router.post("", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))])
 async def publish(
     body: PublishRequest,
     caller_sub: str = Depends(get_caller_sub),
@@ -239,7 +240,7 @@ async def publish(
     return RegistryEntryResponse.from_entry(entry, caller_sub)
 
 
-@router.get("", response_model=list[RegistryEntryResponse])
+@router.get("", response_model=list[RegistryEntryResponse], dependencies=[Depends(require_scopes("registry:read"))])
 async def search(
     q: Optional[str] = Query(default=None, max_length=200),
     tag: Optional[str] = Query(default=None, max_length=64),
@@ -311,7 +312,7 @@ def _can_view(entry: RegistryEntry, caller_sub: str, caller_org: str, is_admin: 
     return entry.status == "approved" and _visible_to(entry, caller_sub, caller_org)
 
 
-@router.get("/{slug}", response_model=RegistryEntryResponse)
+@router.get("/{slug}", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:read"))])
 async def get_entry(
     slug: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -327,7 +328,7 @@ async def get_entry(
     return RegistryEntryResponse.from_entry(entry, caller_sub)
 
 
-@router.post("/{slug}/clone", response_model=CloneResponse)
+@router.post("/{slug}/clone", response_model=CloneResponse, dependencies=[Depends(require_scopes("registry:write"))])
 async def clone(
     slug: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -354,7 +355,7 @@ async def clone(
     )
 
 
-@router.put("/{slug}", response_model=RegistryEntryResponse)
+@router.put("/{slug}", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))])
 async def update_entry(
     slug: str,
     body: UpdateRequest,
@@ -384,7 +385,7 @@ async def update_entry(
     return RegistryEntryResponse.from_entry(updated, caller_sub)
 
 
-@router.delete("/{slug}")
+@router.delete("/{slug}", dependencies=[Depends(require_scopes("registry:write"))])
 async def delete_entry(
     slug: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -413,7 +414,7 @@ class RejectRequest(BaseModel):
     reason: Optional[str] = Field(default=None, max_length=2000)
 
 
-@router.post("/{slug}/approve", response_model=RegistryEntryResponse)
+@router.post("/{slug}/approve", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))])
 async def approve_entry(
     slug: str,
     caller_sub: str = Depends(get_caller_sub),
@@ -443,7 +444,7 @@ async def approve_entry(
     return RegistryEntryResponse.from_entry(updated, caller_sub)
 
 
-@router.post("/{slug}/reject", response_model=RegistryEntryResponse)
+@router.post("/{slug}/reject", response_model=RegistryEntryResponse, dependencies=[Depends(require_scopes("registry:write"))])
 async def reject_entry(
     slug: str,
     body: Optional[RejectRequest] = None,

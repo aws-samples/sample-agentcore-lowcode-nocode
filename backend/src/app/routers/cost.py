@@ -35,6 +35,7 @@ from app.services.agent_versions_store import (
 )
 from app.services.auth import assert_owner, get_caller_sub
 from app.services.cost_tracking import summarize_from_logs
+from app.services.rbac import require_scopes
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +95,7 @@ def _resolve_window(from_: int | None, to: int | None) -> tuple[int, int]:
     return from_ts, to_ts
 
 
-@router.get("/{runtime_name}/cost")
+@router.get("/{runtime_name}/cost", dependencies=[Depends(require_scopes("cost:read"))])
 async def get_runtime_cost(
     runtime_name: str,
     from_: int | None = Query(default=None, alias="from"),

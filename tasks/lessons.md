@@ -3139,3 +3139,32 @@ released) — FIXED with inter-probe settle + concurrency retry.
 knowledge_base_step.py requires opensearchCollectionArn — the platform does NOT auto-create an
 OSS collection (unlike s3_vectors which it creates). P-KB-002/008 (web-crawler forces OSS) are
 therefore NEEDS_INPUT. P-KB-001 (s3_vectors) is genuinely self-contained and PASSED.
+
+## 2026-07-15: Blank-screen prod crash from rolldown-vite CJS interop
+
+### Bug: deployed CloudFront app = pure black screen, but unit tests + dev all green
+- Live bundle threw `Cannot destructure property 'useDebugValue' of React.default
+  as it is undefined` DURING module eval, before `createRoot` — so even the
+  ErrorBoundary never mounted (its fallback is a light box; a *black* screen means
+  React never mounted at all).
+- Root cause: React 19 ships as CommonJS. ESM `zustand/traditional` (pulled by
+  @xyflow/react) does `import React from 'react'; const {useDebugValue}=React`,
+  requiring the bundler to synthesize `React.default`. `rolldown-vite` (pinned via
+  the `vite: "npm:rolldown-vite@..."` alias + `overrides`) drops that `.default`
+  under some chunk layouts. The UI-redesign's module-graph change flipped it into
+  the broken layout. The SAME broken destructure text was present pre-redesign but
+  `.default` was populated then — chunking-dependent.
+- **Why tests missed it**: vitest/jsdom runs UNBUNDLED ES modules. This class of
+  bug ONLY exists in the minified Rollup/rolldown production build.
+- **Rule 1**: After any dependency or module-graph change, verify the *production
+  build* renders, not just `npm test`. Cheap gate: `npm run build && vite preview`
+  then headless-load and assert `#root` has children + zero pageerrors (playwright
+  one-liner). Unit-test green ≠ app boots.
+- **Rule 2**: rolldown-vite is experimental; its CJS→ESM interop is fragile with
+  CJS-only deps (React 19) consumed via ESM default-import. Fix = stable `vite`
+  (Rollup), whose interop always populates `.default`. Per-option knobs
+  (resolve.dedupe, optimizeDeps.include, manualChunks, legacyInconsistentCjsInterop)
+  did NOT fix it — only the bundler swap did.
+- **Rule 3**: Diagnose blank screens by capturing the actual `pageerror` with a
+  headless browser against the LIVE url first — don't guess from source. The error
+  string pointed straight at the shim.

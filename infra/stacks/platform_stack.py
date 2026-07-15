@@ -1319,6 +1319,18 @@ class PlatformStack(cdk.Stack):
                 resources=["*"],
             )
         )
+        # Phase 7 (opt-in) — cross-account deployment. The deploy path assumes a
+        # target account's deployment role (services/deploy_target.session_for_
+        # target). NAME-SCOPED to the agreed role name so this is NOT a blanket
+        # AssumeRole: each target account must create a role named exactly
+        # `AgentCoreFlowsDeploymentRole` trusting this platform account. Feature
+        # is OFF by default (no target = no assume-role call is ever made).
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["sts:AssumeRole"],
+                resources=["arn:aws:iam::*:role/AgentCoreFlowsDeploymentRole"],
+            )
+        )
         # Phase 1 Gap 1D — dashboard URL probe + cascade-delete on
         # destroy_runtime. CloudWatch dashboard IAM is account-level
         # (no resource ARN). DeleteDashboards is idempotent.
@@ -3266,10 +3278,11 @@ class PlatformStack(cdk.Stack):
             integration=deployment_integration,
             authorizer=jwt_authorizer,
         )
-        # Phase 5 (Loom) — admin audit dashboard (/api/admin/audit).
+        # Phase 5 (Loom) — admin audit dashboard (/api/admin/audit) + Phase 7
+        # deployment-targets management (/api/admin/deploy-targets*, POST).
         api.add_routes(
             path="/api/admin/{proxy+}",
-            methods=[apigwv2.HttpMethod.GET],
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
             integration=deployment_integration,
             authorizer=jwt_authorizer,
         )

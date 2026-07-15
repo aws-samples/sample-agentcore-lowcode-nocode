@@ -669,6 +669,39 @@ export class ApiClient {
     return this.request(`/api/registry/aws-search?q=${encodeURIComponent(q)}`);
   }
 
+  /** Phase 7 (opt-in) — multi-region/account deployment targets config. */
+  async getDeployTargets(): Promise<{
+    enabled: boolean;
+    regions: string[];
+    accounts: Array<{ account_id: string; role_arn: string; region: string }>;
+  }> {
+    return this.request(`/api/admin/deploy-targets`);
+  }
+
+  /** Phase 7 — explicitly enable/disable multi-region/account deployment. */
+  async enableDeployTargets(enabled: boolean): Promise<{ enabled: boolean }> {
+    return this.request(`/api/admin/deploy-targets/enable`, {
+      method: 'POST',
+      body: JSON.stringify({ enabled }),
+    });
+  }
+
+  /** Phase 7 — add an allowlisted deploy region. */
+  async addDeployRegion(region: string): Promise<{ regions: string[] }> {
+    return this.request(`/api/admin/deploy-targets/regions`, {
+      method: 'POST',
+      body: JSON.stringify({ region }),
+    });
+  }
+
+  /** Phase 7 — register a cross-account deploy target (validated server-side). */
+  async addDeployAccount(accountId: string, roleArn: string, region: string): Promise<{ account_id: string; validated: boolean }> {
+    return this.request(`/api/admin/deploy-targets/accounts`, {
+      method: 'POST',
+      body: JSON.stringify({ account_id: accountId, role_arn: roleArn, region }),
+    });
+  }
+
   // ==========================================================================
   // Scheduled / event triggers (Phase 3 Gap 3F)
   // ==========================================================================

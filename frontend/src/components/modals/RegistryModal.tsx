@@ -18,6 +18,7 @@ import {
 } from '../../services/api';
 import { useIsRegistryAdmin } from '../../auth/useIsRegistryAdmin';
 import { AwsRegistryPanel } from './AwsRegistryPanel';
+import { DeployTargetsPanel } from './DeployTargetsPanel';
 
 // ============================================================================
 // Props
@@ -191,6 +192,10 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
           {/* Phase 6 (Loom) — AWS Agent Registry federation (opt-in). */}
           <div className="mt-3">
             <AwsRegistryPanel />
+          </div>
+          {/* Phase 7 — multi-region / multi-account deployment targets (opt-in). */}
+          <div className="mt-3">
+            <DeployTargetsPanel />
           </div>
         </div>
 

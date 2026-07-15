@@ -274,6 +274,7 @@ from app.routers.versions import router as versions_router  # noqa: E402
 from app.routers.evaluations import router as evaluations_router  # noqa: E402
 from app.routers.registry import router as registry_router  # noqa: E402
 from app.routers.cost import router as cost_router  # noqa: E402
+from app.routers.cost import budgets_router  # noqa: E402  # Phase 4 FinOps budgets
 from app.routers.hitl import router as hitl_router  # noqa: E402
 from app.routers.prompts import router as prompts_router  # noqa: E402  # Phase 3 Gap 3H
 from app.routers.connectors import router as connectors_router  # noqa: E402
@@ -291,6 +292,9 @@ deployment_app.include_router(registry_router)
 # Phase 2 Gap 2B — cost analytics. Queries CloudWatch Logs Insights for
 # per-runtime token/cost rollups (same grant set as evaluations).
 deployment_app.include_router(cost_router)
+# Phase 4 (Loom) FinOps — cost budgets (/api/cost/budgets). Reads spend from the
+# same CloudWatch cost pipeline; owns the Budget DDB table grant.
+deployment_app.include_router(budgets_router)
 # Phase 2 Gap 2D — human-in-the-loop approval queue. Reads the HITL table's
 # owner_sub GSI and decides requests; deployment Lambda has the table grant.
 deployment_app.include_router(hitl_router)

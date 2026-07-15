@@ -118,4 +118,83 @@ async def get_runtime_cost(
             "runtime_id": runtime_id,
         }
     )
+    # Phase 4 (Loom) FinOps — annotate the rollup with the caller's owner budget
+    # status (if set), so the cost panel can render a spend-vs-budget bar without
+    # a second round-trip. Best-effort: never fail the cost read on a budget error.
+    try:
+        from app.services.budget_store import evaluate_budget, get_budget_store
+
+        b = get_budget_store().get("default", "owner", caller_sub)
+        if b is not None:
+            summary["owner_budget"] = evaluate_budget(
+                b.limit_usd, b.warn_pct, float(summary.get("total_cost", 0.0))
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("owner budget annotation skipped: %s", exc)
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 (Loom) FinOps — cost budgets. Separate /api/cost prefix (org/owner
+# scoped, not per-runtime). Budgets read actual spend from the SAME CloudWatch
+# cost pipeline as the dashboard, so no new metering is required.
+# ---------------------------------------------------------------------------
+
+from pydantic import BaseModel, Field  # noqa: E402
+
+budgets_router = APIRouter(prefix="/api/cost", tags=["cost-budgets"])
+
+
+class BudgetRequest(BaseModel):
+    scope: str = Field(pattern=r"^(owner|agent|tag)$")
+    key: str = Field(min_length=1, max_length=256)
+    limit_usd: float = Field(gt=0)
+    warn_pct: int = Field(default=80, ge=0, le=100)
+
+
+def _budget_key_for_scope(scope: str, key: str, caller_sub: str) -> str:
+    """Owner budgets are always keyed to the caller (no cross-tenant budgets)."""
+    if scope == "owner":
+        return caller_sub
+    return key
+
+
+@budgets_router.get("/budgets", dependencies=[Depends(require_scopes("cost:read"))])
+async def list_budgets(caller_sub: str = Depends(get_caller_sub)) -> list[dict]:
+    from app.services.budget_store import get_budget_store
+
+    budgets = get_budget_store().list_all("default")
+    # Only surface the caller's own owner-budget + shared agent/tag budgets.
+    out = []
+    for b in budgets:
+        if b.scope == "owner" and b.key != caller_sub:
+            continue
+        out.append({"scope": b.scope, "key": b.key, "limit_usd": b.limit_usd,
+                    "warn_pct": b.warn_pct, "period": b.period})
+    return out
+
+
+@budgets_router.post("/budgets", dependencies=[Depends(require_scopes("cost:write"))])
+async def upsert_budget(
+    body: BudgetRequest, caller_sub: str = Depends(get_caller_sub)
+) -> dict:
+    from app.services.budget_store import Budget, get_budget_store
+
+    key = _budget_key_for_scope(body.scope, body.key, caller_sub)
+    b = get_budget_store().put(
+        Budget(org_id="default", scope=body.scope, key=key,  # type: ignore[arg-type]
+               limit_usd=body.limit_usd, warn_pct=body.warn_pct)
+    )
+    return {"scope": b.scope, "key": b.key, "limit_usd": b.limit_usd, "warn_pct": b.warn_pct}
+
+
+@budgets_router.delete("/budgets/{scope}/{key}",
+                       dependencies=[Depends(require_scopes("cost:write"))])
+async def delete_budget(scope: str, key: str, caller_sub: str = Depends(get_caller_sub)) -> dict:
+    if scope not in ("owner", "agent", "tag"):
+        raise HTTPException(status_code=400, detail="Invalid scope")
+    from app.services.budget_store import get_budget_store
+
+    resolved_key = _budget_key_for_scope(scope, key, caller_sub)
+    get_budget_store().delete("default", scope, resolved_key)  # type: ignore[arg-type]
+    return {"deleted": {"scope": scope, "key": resolved_key}}

@@ -199,6 +199,14 @@ export interface CostSummary {
   from_ts?: number;
   to_ts?: number;
   currency?: string;
+  // Phase 4 (Loom) FinOps — owner budget status annotated by the cost endpoint
+  // when the caller has an owner budget set.
+  owner_budget?: {
+    spend: number;
+    limit: number;
+    used_pct: number;
+    status: 'ok' | 'warn' | 'over';
+  };
 }
 
 // Phase 3 Gap 3F — scheduled / event triggers.

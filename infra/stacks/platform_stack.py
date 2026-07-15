@@ -126,6 +126,8 @@ class PlatformStack(cdk.Stack):
         self.prompt_library_table = self._create_prompt_library_table()
         # Phase 2 (Loom) governance tagging — tag policies + tag profiles table.
         self.tag_policy_table = self._create_tag_policy_table()
+        # Phase 4 (Loom) FinOps — cost budgets table.
+        self.budget_table = self._create_budget_table()
         self.logging_bucket = self._create_logging_bucket()
         self.artifacts_bucket = self._create_artifacts_bucket()
         self._upload_agentcore_deps()
@@ -544,6 +546,30 @@ class PlatformStack(cdk.Stack):
             sort_key=dynamodb.Attribute(
                 name="sk",
                 type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=self._removal_policy,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+
+    def _create_budget_table(self) -> dynamodb.Table:
+        """Phase 4 (Loom) FinOps — cost budgets table.
+
+        PK ``org_id``, SK ``BUDGET#<scope>#<key>`` (single-table; see
+        services/budget_store). Low-volume org config; no GSI.
+        """
+        return dynamodb.Table(
+            self,
+            "BudgetTable",
+            table_name=f"{self._project}-{self._env}-budget",
+            partition_key=dynamodb.Attribute(
+                name="org_id", type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="sk", type=dynamodb.AttributeType.STRING,
             ),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=self._removal_policy,
@@ -1076,6 +1102,8 @@ class PlatformStack(cdk.Stack):
         # Phase 2 (Loom) governance tagging. routers/tags.py + the deploy-time
         # tag resolver (services/tag_policy_store) read/write this table.
         self.tag_policy_table.grant_read_write_data(role)
+        # Phase 4 (Loom) FinOps — cost budgets (routers/cost.py budgets_router).
+        self.budget_table.grant_read_write_data(role)
         # states:StartExecution on the state machine (granted after SM creation)
         # SSM read
         role.add_to_policy(
@@ -1442,6 +1470,8 @@ class PlatformStack(cdk.Stack):
                 # Phase 2 (Loom) governance tagging table (routers/tags.py +
                 # deploy-time tag resolver).
                 "TAG_POLICY_TABLE_NAME": self.tag_policy_table.table_name,
+                # Phase 4 (Loom) FinOps — cost budgets table (routers/cost.py).
+                "BUDGET_TABLE_NAME": self.budget_table.table_name,
                 "ARTIFACTS_BUCKET_NAME": self.artifacts_bucket.bucket_name,
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
@@ -3171,6 +3201,18 @@ class PlatformStack(cdk.Stack):
         # Lambda. Bug 21 enumeration: HTTP API needs explicit routes per path.
         api.add_routes(
             path="/api/settings/{proxy+}",
+            methods=[
+                apigwv2.HttpMethod.GET,
+                apigwv2.HttpMethod.POST,
+                apigwv2.HttpMethod.DELETE,
+            ],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Phase 4 (Loom) FinOps — routers/cost.py budgets_router mounts
+        # /api/cost/budgets on the deployment Lambda.
+        api.add_routes(
+            path="/api/cost/{proxy+}",
             methods=[
                 apigwv2.HttpMethod.GET,
                 apigwv2.HttpMethod.POST,

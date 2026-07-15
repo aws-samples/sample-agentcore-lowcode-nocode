@@ -19,6 +19,7 @@ import time
 import boto3
 
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
+from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
 
 logger = logging.getLogger(__name__)
@@ -239,13 +240,13 @@ def handler(event: dict, context) -> dict:
                 },
             }
 
-        agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
+        agentcore_ctrl = step_clients.client(event, "bedrock-agentcore-control")
 
         # Bug 134: deploy_gateway does not return the gateway ARN, but Cedar
         # `resource ==` needs it. Construct it (and verify via get_gateway).
         if not gateway_arn:
             try:
-                account_id = boto3.client("sts", region_name=region).get_caller_identity()["Account"]
+                account_id = step_clients.account_id_for_event(event)
                 gateway_arn = f"arn:aws:bedrock-agentcore:{region}:{account_id}:gateway/{gateway_id}"
             except Exception as e:  # noqa: BLE001
                 logger.warning("Could not construct gateway ARN: %s", e)

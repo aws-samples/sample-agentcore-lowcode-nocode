@@ -116,7 +116,7 @@ def test_update_guardrail_includes_required_name_field(deployment_store_stub, mo
     # No real sleeps in the wait loop.
     monkeypatch.setattr(guardrails_step.time, "sleep", lambda *_: None)
 
-    with patch("boto3.client", return_value=bedrock):
+    with patch.object(guardrails_step.step_clients, "client", return_value=bedrock):
         result = guardrails_step.handler(
             {
                 "deployment_id": "dep-test-123",
@@ -207,7 +207,7 @@ def test_create_data_source_does_not_leak_bda_sentinel(deployment_store_stub, mo
     s3v = MagicMock()
     s3v.list_indexes.return_value = {"indexes": [{"indexName": "default-index"}]}
 
-    def _client(name, **_kw):
+    def _client(_event, name, **_kw):
         if name == "bedrock-agent":
             return bedrock_agent
         if name == "iam":
@@ -230,7 +230,7 @@ def test_create_data_source_does_not_leak_bda_sentinel(deployment_store_stub, mo
         "kbRoleArn": "arn:aws:iam::123456789012:role/kb-role",
     }
 
-    with patch("boto3.client", side_effect=_client):
+    with patch.object(knowledge_base_step.step_clients, "client", side_effect=_client):
         knowledge_base_step.handler(
             {
                 "deployment_id": "dep-kb-test",

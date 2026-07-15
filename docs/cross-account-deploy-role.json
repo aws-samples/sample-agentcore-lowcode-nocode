@@ -1,0 +1,94 @@
+{
+  "_README": "Phase 7 (opt-in) cross-account deployment. Create this role in EACH target AWS account you want the AgentCore Visual Workflow Platform to deploy agents into. The role name MUST be exactly 'AgentCoreFlowsDeploymentRole' (the platform's sts:AssumeRole grant is name-scoped to it). Replace <PLATFORM_ACCOUNT_ID> with the platform/home account (166827918465 in the reference deployment). Apply with: aws iam create-role --role-name AgentCoreFlowsDeploymentRole --assume-role-policy-document file://trust-policy.json ; then attach permissions-policy.json.",
+
+  "trust-policy.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "TrustPlatformAccountToAssume",
+        "Effect": "Allow",
+        "Principal": { "AWS": "arn:aws:iam::<PLATFORM_ACCOUNT_ID>:root" },
+        "Action": "sts:AssumeRole",
+        "Condition": {
+          "StringEquals": { "sts:RoleSessionName": "agentcore-flows-deploy" }
+        }
+      }
+    ]
+  },
+
+  "permissions-policy.json": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "AgentCoreControlPlane",
+        "Effect": "Allow",
+        "Action": [
+          "bedrock-agentcore:CreateAgentRuntime",
+          "bedrock-agentcore:GetAgentRuntime",
+          "bedrock-agentcore:UpdateAgentRuntime",
+          "bedrock-agentcore:DeleteAgentRuntime",
+          "bedrock-agentcore:ListAgentRuntimes",
+          "bedrock-agentcore:InvokeAgentRuntime",
+          "bedrock-agentcore:CreateAgentRuntimeEndpoint",
+          "bedrock-agentcore:DeleteAgentRuntimeEndpoint",
+          "bedrock-agentcore:CreateGateway",
+          "bedrock-agentcore:GetGateway",
+          "bedrock-agentcore:DeleteGateway",
+          "bedrock-agentcore:CreateGatewayTarget",
+          "bedrock-agentcore:DeleteGatewayTarget",
+          "bedrock-agentcore:ListGatewayTargets",
+          "bedrock-agentcore:SynchronizeGatewayTargets",
+          "bedrock-agentcore:CreateOauth2CredentialProvider",
+          "bedrock-agentcore:GetOauth2CredentialProvider",
+          "bedrock-agentcore:DeleteOauth2CredentialProvider",
+          "bedrock-agentcore:CreateApiKeyCredentialProvider",
+          "bedrock-agentcore:DeleteApiKeyCredentialProvider",
+          "bedrock-agentcore:CreateMemory",
+          "bedrock-agentcore:GetMemory",
+          "bedrock-agentcore:DeleteMemory",
+          "bedrock-agentcore:CreateWorkloadIdentity",
+          "bedrock-agentcore:GetWorkloadIdentity",
+          "bedrock-agentcore:DeleteWorkloadIdentity"
+        ],
+        "Resource": "*",
+        "_note": "Wildcard Resource: AgentCore resource ARNs are created dynamically at deploy time. Scope by tag/condition in a hardened deployment."
+      },
+      {
+        "Sid": "BedrockModelInvoke",
+        "Effect": "Allow",
+        "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream", "bedrock:Converse", "bedrock:ConverseStream"],
+        "Resource": "*"
+      },
+      {
+        "Sid": "RuntimeExecRoleManagement",
+        "Effect": "Allow",
+        "Action": [
+          "iam:CreateRole", "iam:GetRole", "iam:DeleteRole",
+          "iam:PutRolePolicy", "iam:DeleteRolePolicy", "iam:AttachRolePolicy",
+          "iam:DetachRolePolicy", "iam:TagRole", "iam:ListRolePolicies",
+          "iam:PassRole"
+        ],
+        "Resource": [
+          "arn:aws:iam::*:role/AgentCoreRuntime-*",
+          "arn:aws:iam::*:role/AgentCoreGateway-*",
+          "arn:aws:iam::*:role/AgentCoreMemory-*"
+        ]
+      },
+      {
+        "Sid": "SupportingServices",
+        "Effect": "Allow",
+        "Action": [
+          "s3:GetObject", "s3:PutObject",
+          "logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents",
+          "logs:StartQuery", "logs:GetQueryResults", "logs:DescribeLogGroups",
+          "secretsmanager:CreateSecret", "secretsmanager:GetSecretValue",
+          "secretsmanager:DeleteSecret",
+          "cognito-idp:CreateUserPool", "cognito-idp:DeleteUserPool",
+          "cognito-idp:CreateUserPoolClient", "cognito-idp:CreateUserPoolDomain"
+        ],
+        "Resource": "*",
+        "_note": "Tighten per-resource in a hardened target-account deployment."
+      }
+    ]
+  }
+}

@@ -202,6 +202,11 @@ class DeploymentState(BaseModel):
     # carries enough to delete it; the type-dispatched deleter no-ops on unknown
     # types so older records (no manifest) still fall back to *_result cleanup.
     created_resources: Optional[list[dict]] = None
+    # Phase 7 (opt-in) — the account/region this deploy targeted (None → home).
+    # Recorded so the SEPARATE delete request can assume the same cross-account
+    # role to tear down, without the original SFN event.
+    target_account_id: Optional[str] = None
+    target_region: Optional[str] = None
 
 
 # ============================================================================
@@ -442,6 +447,16 @@ class DeployRequest(BaseModel):
     # applies the resolved set to every AWS resource the deploy creates.
     resource_tags: Optional[dict] = Field(alias="resourceTags", default=None)
     tag_profile: Optional[str] = Field(alias="tagProfile", default=None, max_length=128)
+    # Phase 7 (opt-in) deployment targets. Default None → deploy to the
+    # platform's home account + region (unchanged). When multi-region/account is
+    # enabled, targetAccountId routes the deploy through a cross-account
+    # sts:AssumeRole and targetRegion selects an allowlisted region.
+    target_account_id: Optional[str] = Field(
+        alias="targetAccountId", default=None, pattern=r"^\d{12}$"
+    )
+    target_region: Optional[str] = Field(
+        alias="targetRegion", default=None, max_length=32
+    )
 
     @model_validator(mode="after")
     def _check_kb_config(self) -> "DeployRequest":

@@ -502,6 +502,11 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         # Phase B — persist the chosen path up-front so the delete/test handlers
         # know whether to route to harness_deployer even on partial-failed deploys.
         deployment_mode=request.deployment_mode or "runtime",
+        # Phase 7 (opt-in) — persist the deploy target so the SEPARATE delete
+        # request can assume the same cross-account role to tear down. None →
+        # home account (unchanged). Validated below before the SFN starts.
+        target_account_id=request.target_account_id,
+        target_region=request.target_region,
     )
 
     store = _get_state_store()
@@ -582,6 +587,28 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
             raise HTTPException(status_code=400, detail=str(exc))
         logger.warning("Tag resolution skipped (non-fatal): %s", exc)
 
+    # Phase 7 (opt-in) deployment targets — resolve the target account/region
+    # BEFORE starting the deploy so a disabled feature / bad target / non-allowed
+    # region fails fast with HTTP 400 (rather than mid-SFN). Default (no target)
+    # → home account + region, threaded as None so step_clients uses the default
+    # session (unchanged path). A registered target is validated (assumable +
+    # landed-account) at registration time; here we only enforce the gate.
+    target_account_id: Optional[str] = None
+    target_region: Optional[str] = None
+    if request.target_account_id or request.target_region:
+        from app.services.deploy_target import TargetError, resolve_region, targets_enabled
+
+        if not targets_enabled():
+            raise HTTPException(
+                status_code=400,
+                detail="Deployment targets are disabled; enable them (admin) before targeting an account/region",
+            )
+        try:
+            target_region = resolve_region(request.target_region)
+            target_account_id = request.target_account_id
+        except TargetError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
     sfn_input = {
         "deployment_id": deployment_id,
         "workflow_id": request.node_id,
@@ -591,6 +618,10 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         # Phase 2 (Loom) governance tagging — resolved tag set applied to every
         # AWS resource the step handlers create (threaded via sfn_input).
         "resource_tags": resolved_tags,
+        # Phase 7 (opt-in) — target account/region for the deploy's boto3 clients
+        # (services/step_clients reads these). None → home account (unchanged).
+        "target_account_id": target_account_id,
+        "target_region": target_region,
         # Phase 1 Gap 1A — every step handler keys S3 paths and AgentCore
         # runtime names off the version. friendly_runtime_name is the user's
         # input; agentcore_runtime_name is what we actually pass to AgentCore.
@@ -1166,13 +1197,35 @@ def _delete_managed_resource(res: dict, region: str) -> str:
     Type-dispatched + idempotent (NotFound is treated as success). Returns a
     human log line, or "" for an unknown type (so older/foreign entries no-op
     rather than fail the whole teardown).
+
+    Phase 7 (opt-in) cross-account teardown: when the manifest recorded an
+    ``account`` for this resource, we assume the same cross-account deployment
+    role to delete it. All the ``boto3.client(...)`` calls below transparently
+    route through that session because ``boto3`` is rebound to a target-aware
+    shim. Same-account resources (no recorded account) use the default session —
+    unchanged behavior.
     """
-    import boto3
+    import boto3 as _boto3_real
 
     rtype = res.get("type", "")
     rid = res.get("id") or res.get("name") or ""
     rname = res.get("name") or ""
     res_region = res.get("region") or region
+    res_account = res.get("account")
+
+    class _TargetBoto3:
+        """Minimal boto3 shim: routes .client() through the resource's target."""
+        def __init__(self, account, region_):
+            self._event = (
+                {"target_account_id": account, "target_region": region_}
+                if account else {}
+            )
+
+        def client(self, service, **kwargs):
+            from app.services import step_clients
+            return step_clients.client(self._event, service, **kwargs)
+
+    boto3 = _TargetBoto3(res_account, res_region)
 
     def _gone(e: Exception) -> bool:
         s = str(e)
@@ -1503,8 +1556,14 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
             deployment_record.get("created_resources") or [],
             key=lambda r: _DELETE_PRIORITY.get(str(r.get("type")), 4),
         )
+        # Phase 7 (opt-in) — if this deploy targeted another account, inject that
+        # account onto each manifest resource that didn't record its own, so
+        # _delete_managed_resource assumes the same cross-account role to delete.
+        _dep_target_account = deployment_record.get("target_account_id")
         for _res in _ordered:
             try:
+                if _dep_target_account and not _res.get("account"):
+                    _res = {**_res, "account": _dep_target_account}
                 key = (str(_res.get("type")), str(_res.get("id") or _res.get("name")))
                 if key in seen_mres:
                     continue

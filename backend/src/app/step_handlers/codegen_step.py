@@ -21,6 +21,7 @@ from app.models.deployment_models import (
     DeploymentStepName,
     RuntimeConfig,
 )
+from app.services import step_clients
 from app.services.code_generator import generate_agent_code, generate_requirements
 from app.services.deployment_state_store import DeploymentStateStore
 
@@ -160,7 +161,7 @@ def handler(event: dict, context) -> dict:
         # the 30s runtime initialization window.
         deps_bundle = None
         if bucket:
-            s3_client = boto3.client("s3", region_name=region)
+            s3_client = step_clients.client(event, "s3")
 
             bundle_key = STRANDS_BUNDLE_KEY if _needs_strands_bundle(agent_code) else BASE_BUNDLE_KEY
             logger.info("Downloading dependency bundle: s3://%s/%s", bucket, bundle_key)

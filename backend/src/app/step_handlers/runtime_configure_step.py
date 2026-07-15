@@ -17,6 +17,7 @@ from app.models.deployment_models import (
     DeploymentStepName,
     RuntimeConfig,
 )
+from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.observability import build_otel_env_vars, get_platform_observability_defaults
 from app.services.runtime_deployer import create_agent_runtime, sanitize_runtime_name
@@ -88,7 +89,7 @@ def handler(event: dict, context) -> dict:
         if not s3_bucket:
             raise RuntimeError("No s3_bucket provided from codegen step")
 
-        agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
+        agentcore_ctrl = step_clients.client(event, "bedrock-agentcore-control")
 
         # Build environment variables for the runtime
         env_vars = {}

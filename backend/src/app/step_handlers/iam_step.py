@@ -13,6 +13,7 @@ import os
 import boto3
 
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
+from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.observability import (
     _validate_user_otel_secret_arn,
@@ -95,8 +96,8 @@ def handler(event: dict, context) -> dict:
             from app.services import per_agent_identity
             import time as _time
 
-            account_id = boto3.client("sts").get_caller_identity()["Account"]
-            iam_client = boto3.client("iam")
+            account_id = step_clients.account_id_for_event(event)
+            iam_client = step_clients.client(event, "iam")
             agentcore_runtime_name = (
                 event.get("agentcore_runtime_name")
                 or sanitize_runtime_name(config.get("name", "agent"))
@@ -205,8 +206,8 @@ def handler(event: dict, context) -> dict:
         # Legacy per-deploy role path (kept for backward compat with stacks
         # that don't have SHARED_RUNTIME_ROLE_ARN injected).
         role_name = f"AgentCoreRuntime-{runtime_name}"
-        iam_client = boto3.client("iam")
-        account_id = boto3.client("sts").get_caller_identity()["Account"]
+        iam_client = step_clients.client(event, "iam")
+        account_id = step_clients.account_id_for_event(event)
 
         # Pass through the OTEL auth secret ARN so the role can resolve
         # OTLP headers at agent boot via secretsmanager:GetSecretValue.

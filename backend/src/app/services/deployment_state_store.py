@@ -553,6 +553,31 @@ class DeploymentStateStore:
 
         return [deserialize_deployment_state(_convert_decimals_to_floats(item)) for item in items]
 
+    def set_registry_record(
+        self, deployment_id: str, record_id: str, record_status: str
+    ) -> None:
+        """Persist the AWS Agent Registry record id + status onto a deployment.
+
+        Written directly as top-level attributes (aws_registry_record_id /
+        aws_registry_status) rather than adding them to the DeploymentState model
+        + serializer — keeps the auto-register hook (Loom-study 0.4) additive and
+        avoids a schema migration. Read back opportunistically by the teardown
+        cascade (0.7) and any future governance-sync. Best-effort caller.
+        """
+        self._table.update_item(
+            Key={"deployment_id": deployment_id},
+            UpdateExpression="SET aws_registry_record_id = :r, aws_registry_status = :s",
+            ExpressionAttributeValues={":r": record_id, ":s": record_status},
+        )
+
+    def get_registry_record_id(self, deployment_id: str) -> Optional[str]:
+        """Return the stored AWS Agent Registry record id, or None."""
+        try:
+            item = self._table.get_item(Key={"deployment_id": deployment_id}).get("Item") or {}
+            return item.get("aws_registry_record_id") or None
+        except Exception:  # noqa: BLE001
+            return None
+
     def scan_pending_enforce(self, max_items: int = 200) -> list[DeploymentState]:
         """Return deployments whose Cedar ENFORCE promotion is still pending.
 

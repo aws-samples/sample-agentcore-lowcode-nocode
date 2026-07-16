@@ -24,6 +24,7 @@ These are bugs/dead-config in OUR code, independent of the Loom roadmap.
 | 0.5 | **`session_uuid` never populated** in the audit store (field exists, always empty) — blocks any per-session analytics. | `audit_store.py` | S |
 | 0.6 | **Cedar promoter re-drive gap** (found live in P-PLAT-027) — the lazy promoter stops re-attempting `update_policy` once `enforce_pending` state is mutated, even while the policy is still `UPDATE_FAILED`. A direct `update_policy` converged instantly. Re-drive on ANY non-ACTIVE state until ACTIVE. | `policy_promoter.py` | S |
 | 0.7 | **Registry status not synced / not deleted on teardown** — stale AWS-registry records persist after resource delete + across enable/disable. | `registry.py`, teardown paths | S |
+| — | *0.7 scope note:* delete-on-teardown is DONE (the main orphan risk). The `_sync_registry_statuses` reconciliation on aws-config re-enable (validate all stored record ids vs the live registry) remains a documented follow-up. | | |
 
 ---
 

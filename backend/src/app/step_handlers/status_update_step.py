@@ -13,6 +13,7 @@ import logging
 import os
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 import boto3
 
@@ -229,6 +230,68 @@ def _get_deployment_store() -> DeploymentStateStore:
     )
 
 
+def _auto_register_in_aws_registry(
+    *,
+    store: DeploymentStateStore,
+    deployment_id: str,
+    runtime_arn: Optional[str],
+    runtime_endpoint: Optional[str],
+    friendly_runtime_name: str,
+    is_a2a: bool,
+) -> None:
+    """Register a just-deployed agent into the AWS Agent Registry as DRAFT.
+
+    No-op when the feature is disabled (no configured registry id) or the
+    deployment already has a record. Builds an A2A agentCard descriptor for A2A
+    runtimes, else a CUSTOM descriptor with the agent's identity/endpoint. The
+    record starts in DRAFT — a curator approves it via the registry router
+    (visibility/integration gating enforced elsewhere). Loom-study 0.4.
+    """
+    from app.services.aws_agent_registry import (
+        build_a2a_descriptor,
+        build_custom_descriptor,
+        get_registry,
+    )
+
+    registry = get_registry()
+    if registry is None:
+        return  # federation disabled — nothing to do
+    if store.get_registry_record_id(deployment_id):
+        return  # idempotent — already registered
+
+    if is_a2a:
+        descriptor_type = "a2a"
+        descriptors = build_a2a_descriptor(
+            name=friendly_runtime_name,
+            description=f"Agent {friendly_runtime_name} deployed via the platform",
+            url=runtime_endpoint or runtime_arn or "",
+        )
+    else:
+        descriptor_type = "custom"
+        descriptors = build_custom_descriptor(
+            {
+                "name": friendly_runtime_name,
+                "runtimeArn": runtime_arn or "",
+                "endpoint": runtime_endpoint or "",
+                "deploymentId": deployment_id,
+            }
+        )
+
+    result = registry.register(
+        name=friendly_runtime_name,
+        descriptor_type=descriptor_type,
+        descriptors=descriptors,
+        description=f"Auto-registered on deploy: {friendly_runtime_name}",
+    )
+    record_id = result.get("record_id")
+    if record_id:
+        store.set_registry_record(deployment_id, record_id, result.get("status") or "DRAFT")
+        logger.info(
+            "AWS Agent Registry: registered %s as %s (%s)",
+            friendly_runtime_name, record_id, result.get("status"),
+        )
+
+
 def handler(event: dict, context) -> dict:
     """Lambda handler for the final status update step.
 
@@ -435,6 +498,26 @@ def handler(event: dict, context) -> dict:
                     friendly_runtime_name,
                     version_id,
                 )
+
+        # Loom-study 0.4 — auto-register the deployed agent into the AWS Agent
+        # Registry as a DRAFT record when the federation feature is enabled. Was
+        # entirely un-wired: aws_agent_registry.register() had ZERO callers, so the
+        # governance/discovery integration never fired on deploy. Best-effort: a
+        # registry failure must NOT fail an already-succeeded deploy. Idempotent:
+        # skip when the deployment already carries a registry_record_id.
+        try:
+            _cfg = event.get("config") or {}
+            _protocol = (_cfg.get("protocol") if isinstance(_cfg, dict) else None) or event.get("protocol", "")
+            _auto_register_in_aws_registry(
+                store=store,
+                deployment_id=deployment_id,
+                runtime_arn=runtime_arn,
+                runtime_endpoint=runtime_endpoint,
+                friendly_runtime_name=friendly_runtime_name or runtime_id or deployment_id,
+                is_a2a=str(_protocol).upper() == "A2A",
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning("AWS Agent Registry auto-register skipped (best-effort)")
 
         return {
             "deployment_id": deployment_id,

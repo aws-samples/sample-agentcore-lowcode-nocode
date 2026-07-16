@@ -1554,6 +1554,19 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
     except Exception as exc:
         cleanup_messages.append(f"State lookup error: {exc}")
 
+    # Loom-study 0.7: delete the AWS Agent Registry record this deploy auto-created
+    # (0.4), so teardown doesn't leave a stale/orphaned governance record pointing
+    # at a runtime that no longer exists. Best-effort — never blocks teardown.
+    _aws_rec_id = (deployment_record or {}).get("aws_registry_record_id")
+    if _aws_rec_id:
+        try:
+            from app.services.aws_agent_registry import get_registry
+            _reg = get_registry()
+            if _reg is not None and _reg.delete(_aws_rec_id):
+                cleanup_messages.append(f"AWS registry record {_aws_rec_id} deleted")
+        except Exception as exc:  # noqa: BLE001
+            cleanup_messages.append(f"AWS registry record delete error: {exc}")
+
     # Step 0a: GENERIC manifest-driven teardown. Iterate created_resources[] and
     # delete every recorded sub-resource by type. This is the primary teardown
     # path that makes cleanup complete-by-construction (no orphans when a new

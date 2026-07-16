@@ -3450,3 +3450,161 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: Opti
         cleanup_log.append(f"Connector spec object {uri} deleted")
 
     return cleanup_log
+
+
+# ---------------------------------------------------------------------------
+# External MCP-server Gateway targets (Tiers 1-3 of docs/MCP_GATEWAY_INTEGRATION)
+# ---------------------------------------------------------------------------
+#
+# Unlike the platform-deployed Runtime-MCP target (which builds its endpoint from
+# an AgentCore Runtime ARN and authenticates with the platform's own Cognito),
+# these functions wire an ARBITRARY EXTERNAL remote MCP endpoint from the MCP
+# catalog (services/mcp_catalog.py) as a `mcp.mcpServer` target, selecting the
+# outbound credential provider from the entry's `auth_type`:
+#
+#   none                       → no credential provider (Tier 1)
+#   api_key                    → API_KEY provider (header/query/bearer)   (Tier 2)
+#   oauth2_client_credentials  → OAUTH provider, CLIENT_CREDENTIALS grant (Tier 3)
+#   iam_sigv4                  → GATEWAY_IAM_ROLE (SigV4 outbound)         (Tier 3)
+#
+# `adapter-3lo` / `adapter-stdio` tiers are NOT handled here — they require the
+# platform to host an MCP proxy on Runtime first (that adapter is then wired via
+# the existing `mcp_server_runtime_arn` path). Passing such an entry raises.
+#
+# Verified against the live bedrock-agentcore-control model (boto3 1.43.8):
+# McpServerTargetConfiguration requires only `endpoint`; credentialProvider-
+# Configurations is OPTIONAL, so a no-auth target is valid.
+
+
+def _mcp_api_key_cred_config(provider_arn: str, descriptor: dict) -> dict:
+    """Build an API_KEY credentialProviderConfiguration from a catalog descriptor.
+
+    ``descriptor`` = {location: HEADER|QUERY_PARAMETER, parameter_name, prefix}.
+    """
+    api_key_cfg: dict = {
+        "providerArn": provider_arn,
+        "credentialParameterName": descriptor.get("parameter_name") or "Authorization",
+        "credentialLocation": descriptor.get("location") or "HEADER",
+    }
+    prefix = descriptor.get("prefix")
+    if prefix:
+        api_key_cfg["credentialPrefix"] = prefix
+    return {
+        "credentialProviderType": "API_KEY",
+        "credentialProvider": {"apiKeyCredentialProvider": api_key_cfg},
+    }
+
+
+def build_external_mcp_target_params(
+    agentcore_ctrl,
+    *,
+    gateway_id: str,
+    target_name: str,
+    catalog_entry: dict,
+    endpoint: str,
+    secret_arn: Optional[str] = None,
+    oauth_provider_arn: Optional[str] = None,
+    oauth_scopes: Optional[list] = None,
+) -> dict:
+    """Assemble CreateGatewayTarget params for an external MCP catalog entry.
+
+    Pure w.r.t. AWS EXCEPT it may create an API_KEY credential provider (Tier 2)
+    from ``secret_arn``. OAuth providers (Tier 3) are expected to be created by
+    the caller and passed as ``oauth_provider_arn`` (they need client-id/secret
+    wiring the caller owns). Raises for adapter-* tiers.
+    """
+    tier = catalog_entry.get("tier", "")
+    auth_type = catalog_entry.get("auth_type", "none")
+
+    if tier.startswith("adapter"):
+        raise ValueError(
+            f"MCP '{catalog_entry.get('id')}' is tier '{tier}' — it requires a hosted "
+            "adapter (Runtime/container) and cannot be wired as a direct external target. "
+            "See docs/MCP_GATEWAY_INTEGRATION.md."
+        )
+    if not re.match(r"^https://", endpoint or ""):
+        raise ValueError(f"MCP endpoint must be an https:// URL, got: {endpoint!r}")
+
+    params: dict = {
+        "gatewayIdentifier": gateway_id,
+        "name": target_name,
+        # Gateway crawls tools/list dynamically — no mcpToolSchema required.
+        "targetConfiguration": {"mcp": {"mcpServer": {"endpoint": endpoint}}},
+    }
+
+    cred_configs: list = []
+    if auth_type == "none":
+        pass  # Tier 1 — no credential provider (valid per API model).
+    elif auth_type == "api_key":
+        if not secret_arn:
+            raise RuntimeError(
+                f"MCP '{catalog_entry.get('id')}' needs an API key — provide a secret_arn."
+            )
+        descriptor = catalog_entry.get("api_key_descriptor") or {}
+        provider_arn = _ensure_api_key_credential_provider(
+            agentcore_ctrl, f"mcp-{target_name}", secret_arn=secret_arn
+        )
+        cred_configs.append(_mcp_api_key_cred_config(provider_arn, descriptor))
+    elif auth_type == "oauth2_client_credentials":
+        if not oauth_provider_arn:
+            raise RuntimeError(
+                f"MCP '{catalog_entry.get('id')}' needs an OAuth provider ARN (client-credentials)."
+            )
+        cred_configs.append(
+            {
+                "credentialProviderType": "OAUTH",
+                "credentialProvider": {
+                    "oauthCredentialProvider": {
+                        "providerArn": oauth_provider_arn,
+                        "scopes": oauth_scopes or [],
+                    }
+                },
+            }
+        )
+    elif auth_type == "iam_sigv4":
+        # SigV4 outbound signed by the gateway's own execution role.
+        cred_configs.append({"credentialProviderType": "GATEWAY_IAM_ROLE"})
+    else:
+        raise ValueError(f"Unsupported MCP auth_type: {auth_type!r}")
+
+    if cred_configs:
+        params["credentialProviderConfigurations"] = cred_configs
+    return params
+
+
+def deploy_external_mcp_target(
+    agentcore_ctrl,
+    *,
+    gateway_id: str,
+    catalog_entry: dict,
+    endpoint: Optional[str] = None,
+    secret_arn: Optional[str] = None,
+    oauth_provider_arn: Optional[str] = None,
+    oauth_scopes: Optional[list] = None,
+    target_name: Optional[str] = None,
+) -> Optional[dict]:
+    """Create a Gateway `mcpServer` target for an external MCP catalog entry.
+
+    ``endpoint`` overrides the catalog endpoint (needed when the catalog URL has
+    ``{placeholders}`` like a Databricks workspace or a Shopify store domain).
+    Returns the created/reused target dict, or None if creation was non-fatally
+    skipped. Target name is derived from the catalog id (kept short so the
+    resulting ``<target>___<tool>`` qualified names stay under 64 chars).
+    """
+    ep = endpoint or catalog_entry.get("endpoint")
+    name = target_name or _sanitize_provider_name(f"mcp-{catalog_entry.get('id', 'ext')}")[:48]
+    params = build_external_mcp_target_params(
+        agentcore_ctrl,
+        gateway_id=gateway_id,
+        target_name=name,
+        catalog_entry=catalog_entry,
+        endpoint=ep,
+        secret_arn=secret_arn,
+        oauth_provider_arn=oauth_provider_arn,
+        oauth_scopes=oauth_scopes,
+    )
+    logger.info(
+        "Creating external MCP target '%s' (tier=%s, auth=%s)",
+        name, catalog_entry.get("tier"), catalog_entry.get("auth_type"),
+    )
+    return _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, name, params)

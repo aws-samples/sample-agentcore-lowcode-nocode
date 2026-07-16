@@ -171,7 +171,9 @@ def test_create_data_source_does_not_leak_bda_sentinel(deployment_store_stub, mo
     monkeypatch.setattr(
         knowledge_base_step,
         "_start_and_wait_ingestion",
-        lambda *_a, **_kw: None,
+        # Returns (job_id, ingestion_status) — the call site unpacks a 2-tuple so
+        # a still-ingesting KB is reported honestly (P-E2E matrix finding).
+        lambda *_a, **_kw: ("job-1", "COMPLETE"),
     )
 
     # Drive _build_data_source_config to a deterministic result so the test

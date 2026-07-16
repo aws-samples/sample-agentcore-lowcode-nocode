@@ -203,6 +203,30 @@ def handler(event: dict, context) -> dict:
                 env_vars["HITL_RUNTIME_ID"] = runtime_name
                 env_vars["RUNTIME_OWNER_SUB"] = event.get("owner_sub", "")
 
+        # Loom-study 2.2 — inject org-configured HITL approval policies so the
+        # generated agent's BeforeToolInvocation hook (2.1) GUARANTEES a gate on
+        # matching tools, independent of whether the model calls human_approval.
+        # Also needs the HITL table (the hook records PENDING rows) even when the
+        # "hitl" tool node isn't wired, so set the table when policies exist.
+        try:
+            from app.services.approval_policy_store import ApprovalPolicyStore, serialize_for_agent
+            _pol_table = _get_env("TAG_POLICY_TABLE_NAME", "")
+            if _pol_table:
+                _region = _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
+                _policies = ApprovalPolicyStore(_pol_table, _region).list(
+                    event.get("owner_org") or "default"
+                )
+                _serialized = serialize_for_agent(_policies)
+                if _serialized:
+                    env_vars["LOOM_APPROVAL_POLICIES"] = _serialized
+                    _hitl_table = _get_env("HITL_REQUESTS_TABLE_NAME", "")
+                    if _hitl_table:
+                        env_vars.setdefault("HITL_REQUESTS_TABLE_NAME", _hitl_table)
+                        env_vars.setdefault("HITL_RUNTIME_ID", runtime_name)
+                        env_vars.setdefault("RUNTIME_OWNER_SUB", event.get("owner_sub", ""))
+        except Exception:  # noqa: BLE001 — policy injection must never fail a deploy
+            logger.warning("approval-policy injection skipped")
+
         # Gap 3A - A2A. Inject agent-card + peer-allowlist env when the runtime
         # is A2A (by protocol OR by an 'a2a' tool node). The self-contained
         # agent reads these at runtime; absent vars fail-closed (no allowlist =>

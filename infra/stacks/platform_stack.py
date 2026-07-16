@@ -135,6 +135,7 @@ class PlatformStack(cdk.Stack):
         self.budget_table = self._create_budget_table()
         # Phase 5 (Loom) — action-audit trail table.
         self.audit_table = self._create_audit_table()
+        self.permission_requests_table = self._create_permission_requests_table()
         self.logging_bucket = self._create_logging_bucket()
         self.artifacts_bucket = self._create_artifacts_bucket()
         self._upload_agentcore_deps()
@@ -449,6 +450,43 @@ class PlatformStack(cdk.Stack):
             sort_key=dynamodb.Attribute(
                 name="request_id",
                 type=dynamodb.AttributeType.STRING,
+            ),
+        )
+        return table
+
+    def _create_permission_requests_table(self) -> dynamodb.Table:
+        """Loom-study 1.6 — JIT IAM permission-request workflow table.
+
+        PK ``org_id`` (tenant), SK ``request_id`` (sortable). GSI
+        ``status-request_id-index`` powers the admin pending-review queue. A
+        builder requests specific IAM actions+resources on a managed role with a
+        justification; a security approver approves, and on approval the role's
+        inline policy is widened. No TTL — an auditable escalation history.
+        """
+        table = dynamodb.Table(
+            self,
+            "PermissionRequestsTable",
+            table_name=f"{self._project}-{self._env}-permission-requests",
+            partition_key=dynamodb.Attribute(
+                name="org_id", type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="request_id", type=dynamodb.AttributeType.STRING,
+            ),
+            billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
+            removal_policy=self._removal_policy,
+            encryption=dynamodb.TableEncryption.AWS_MANAGED,
+            point_in_time_recovery_specification=dynamodb.PointInTimeRecoverySpecification(
+                point_in_time_recovery_enabled=True,
+            ),
+        )
+        table.add_global_secondary_index(
+            index_name="status-request_id-index",
+            partition_key=dynamodb.Attribute(
+                name="status", type=dynamodb.AttributeType.STRING,
+            ),
+            sort_key=dynamodb.Attribute(
+                name="request_id", type=dynamodb.AttributeType.STRING,
             ),
         )
         return table
@@ -1161,6 +1199,15 @@ class PlatformStack(cdk.Stack):
         )
         # DynamoDB deployments table: read/write
         self.deployments_table.grant_read_write_data(role)
+        # Loom-study 1.6 — JIT IAM permission-request workflow. The router
+        # (create/list/approve/reject) is on the deployment Lambda; on approve it
+        # widens a managed role's inline policy, so grant PutRolePolicy scoped to
+        # the platform's own AgentCore* managed roles (never arbitrary roles).
+        self.permission_requests_table.grant_read_write_data(role)
+        role.add_to_policy(iam.PolicyStatement(
+            actions=["iam:PutRolePolicy", "iam:GetRolePolicy"],
+            resources=[f"arn:aws:iam::{self.account}:role/AgentCore*"],
+        ))
         # Phase 1 Gap 1A — versions + slots tables. The deployment Lambda is
         # the read-write owner: handle_deploy() seeds the AgentVersion row,
         # and the versions router promotes/rolls back slots.
@@ -1589,6 +1636,8 @@ class PlatformStack(cdk.Stack):
                 "BUDGET_TABLE_NAME": self.budget_table.table_name,
                 # Phase 5 (Loom) — audit trail table (middleware + admin router).
                 "AUDIT_TABLE_NAME": self.audit_table.table_name,
+                # Loom-study 1.6 — JIT IAM permission-request workflow table.
+                "PERMISSION_REQUESTS_TABLE_NAME": self.permission_requests_table.table_name,
                 "ARTIFACTS_BUCKET_NAME": self.artifacts_bucket.bucket_name,
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
@@ -3373,6 +3422,13 @@ class PlatformStack(cdk.Stack):
         # GET /token-info + POST /test-obo on the deployment Lambda (routers/identity).
         api.add_routes(
             path="/api/identity/{proxy+}",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Loom-study 1.6 — JIT IAM permission requests (create/list/approve/reject).
+        api.add_routes(
+            path="/api/permissions/{proxy+}",
             methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
             integration=deployment_integration,
             authorizer=jwt_authorizer,

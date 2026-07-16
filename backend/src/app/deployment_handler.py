@@ -323,6 +323,7 @@ from app.routers.hitl import router as hitl_router  # noqa: E402
 from app.routers.prompts import router as prompts_router  # noqa: E402  # Phase 3 Gap 3H
 from app.routers.connectors import router as connectors_router  # noqa: E402
 from app.routers.identity import router as identity_router  # noqa: E402
+from app.routers.permissions import router as permissions_router  # noqa: E402
 from app.routers.mcp_servers import router as mcp_servers_router  # noqa: E402
 from app.routers.triggers import router as triggers_router  # noqa: E402
 from app.routers.tags import router as tags_router  # noqa: E402  # Phase 2 governance tagging
@@ -363,6 +364,8 @@ deployment_app.include_router(mcp_servers_router)
 # endpoints (token-info + test-obo) on the deployment Lambda (owns the
 # bedrock-agentcore identity permissions via harness/gateway steps' grants).
 deployment_app.include_router(identity_router)
+# Loom-study 1.6 — JIT IAM permission-request workflow (request/approve/reject).
+deployment_app.include_router(permissions_router)
 # Phase 3 Gap 3F — scheduled / event triggers registry. Mounted here because
 # the deployment Lambda owns the TriggersTable grant + the agentcore-trigger/*
 # Secrets Manager grant and already has the get_caller_sub auth helper.

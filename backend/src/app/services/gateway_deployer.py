@@ -2594,6 +2594,7 @@ def deploy_gateway(
     deployment_id: Optional[str] = None,
     gateway_retry: int = 0,
     connectors: Optional[list[dict]] = None,
+    external_mcp_servers: Optional[list[dict]] = None,
     owner_sub: str = "",
 ) -> dict:
     """Deploy a Gateway using pure boto3 APIs.
@@ -2614,6 +2615,7 @@ def deploy_gateway(
         gateway_tools = gateway_tools or []
         custom_tools = custom_tools or []
         connectors = connectors or []
+        external_mcp_servers = external_mcp_servers or []
         agentcore_ctrl = _create_agentcore_control_client(region)
         cognito_client = _create_cognito_client(region)
 
@@ -3081,6 +3083,26 @@ def deploy_gateway(
             connector_secret_arns = conn_result["secret_arns"]
             connector_spec_s3_uris = conn_result.get("spec_s3_uris", [])
 
+        # Step 4d: Wire external MCP catalog servers as `mcpServer` gateway targets
+        # (Tier 1 no-auth / Tier 2 API-key / Tier 3 OAuth-CC / SigV4). Their
+        # credential providers + secrets are captured for teardown alongside the
+        # connector refs (same cleanup path).
+        mcp_credential_providers: list[str] = []
+        mcp_secret_arns: list[str] = []
+        if external_mcp_servers:
+            mcp_result = _deploy_external_mcp_targets(
+                agentcore_ctrl,
+                gateway["gatewayId"],
+                region,
+                external_mcp_servers,
+                owner_sub=owner_sub,
+            )
+            mcp_credential_providers = mcp_result["credential_provider_names"]
+            mcp_secret_arns = mcp_result["secret_arns"]
+            # Fold into the connector teardown refs so DELETE cleans them up.
+            connector_credential_providers = connector_credential_providers + mcp_credential_providers
+            connector_secret_arns = connector_secret_arns + mcp_secret_arns
+
         # Step 5: Synchronize NON-LAMBDA targets (OpenAPI / external MCP) so their
         # tools are crawled into the servable MCP plane. Bug 134:
         # synchronize_gateway_targets REQUIRES a targetIdList (the old call omitted
@@ -3089,7 +3111,7 @@ def deploy_gateway(
         # tools directly. Connector (OpenAPI) targets MUST be crawled regardless of
         # the semantic-search toggle, so we always sync the non-lambda set whenever
         # any crawled target exists (or semantic search was explicitly requested).
-        if connectors or mcp_server_runtime_arn or gateway_config.get("semanticSearchEnabled"):
+        if connectors or external_mcp_servers or mcp_server_runtime_arn or gateway_config.get("semanticSearchEnabled"):
             try:
                 _sync_ids = []
                 for _t in _get_targets_from_response(
@@ -3633,3 +3655,134 @@ def deploy_external_mcp_target(
         name, catalog_entry.get("tier"), catalog_entry.get("auth_type"),
     )
     return _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, name, params)
+
+
+def _fill_endpoint_placeholders(endpoint: str, endpoint_vars: dict) -> str:
+    """Substitute ``{placeholder}`` tokens in a catalog endpoint from user input.
+
+    Catalog endpoints like ``https://{store_domain}/api/mcp`` carry per-deploy
+    placeholders the UI collects. Every ``{name}`` must be supplied, else the
+    unresolved endpoint would fail the ``https://`` validation downstream. Values
+    are lightly sanitized (no scheme, no path-escaping) so a value can't inject a
+    different host segment.
+    """
+    filled = endpoint or ""
+    for token in re.findall(r"\{([a-zA-Z0-9_]+)\}", endpoint or ""):
+        val = str((endpoint_vars or {}).get(token, "")).strip()
+        if not val:
+            raise RuntimeError(f"External MCP endpoint needs a value for '{token}'.")
+        # Placeholders are host/segment tokens (e.g. a store domain), never a
+        # scheme or path — reject a value carrying "/", "://", or whitespace so it
+        # can't rewrite the endpoint's host/path structure.
+        if "://" in val or "/" in val or any(c in val for c in (" ", "\t", "\n")):
+            raise RuntimeError(f"Invalid value for MCP placeholder '{token}'.")
+        filled = filled.replace("{" + token + "}", val)
+    return filled
+
+
+def _deploy_external_mcp_targets(
+    agentcore_ctrl,
+    gateway_id: str,
+    region: str,
+    external_mcp_servers: list[dict],
+    owner_sub: str = "",
+) -> dict:
+    """Wire external MCP catalog servers as Gateway ``mcpServer`` targets.
+
+    Mirrors ``_deploy_connector_targets``: each selection dict carries
+    ``server_id`` (catalog key), optional ``endpoint_vars`` (fills ``{...}``
+    placeholders), optional ``secret_value`` (Tier-2 API key — minted here) or
+    ``secret_arn`` (pre-minted), and optional ``oauth`` ``{client_id, client_secret,
+    token_url, scopes}`` for Tier-3 client-credentials. ``adapter-*`` tiers are
+    rejected up front (they need a hosted proxy).
+
+    Returns ``{credential_provider_names, secret_arns}`` for teardown. Partial
+    resources are rolled back best-effort on a mid-loop failure before re-raising.
+    """
+    from app.services.mcp_catalog import get_mcp_server
+
+    created_providers: list[str] = []
+    created_secrets: list[str] = []
+
+    def _rollback_partial() -> None:
+        for pname in created_providers:
+            _delete_connector_credential_provider(agentcore_ctrl, pname)
+        if created_secrets:
+            sm = _create_secrets_client(region)
+            for sarn in created_secrets:
+                try:
+                    sm.delete_secret(SecretId=sarn, ForceDeleteWithoutRecovery=True)
+                except Exception:  # noqa: BLE001
+                    pass
+
+    try:
+        for sel in external_mcp_servers:
+            server_id = (sel or {}).get("server_id") or (sel or {}).get("serverId")
+            if not server_id:
+                raise RuntimeError("External MCP selection missing 'server_id'.")
+            entry = get_mcp_server(server_id)
+            if entry is None:
+                raise RuntimeError(f"Unknown MCP server id: {server_id}")
+
+            endpoint = _fill_endpoint_placeholders(
+                entry.get("endpoint") or "", sel.get("endpoint_vars") or sel.get("endpointVars") or {}
+            )
+            auth_type = entry.get("auth_type", "none")
+
+            secret_arn = sel.get("secret_arn") or sel.get("secretArn")
+            oauth_provider_arn = None
+            oauth_scopes = None
+
+            # Tier 2 — mint an owner-scoped secret for a raw API key.
+            if auth_type == "api_key" and not secret_arn:
+                raw_key = sel.get("secret_value") or sel.get("secretValue")
+                if not raw_key:
+                    raise RuntimeError(f"MCP '{server_id}' needs an API key (secret_value).")
+                secret_arn = _put_connector_secret(region, owner_sub, {"apiKey": raw_key})
+                created_secrets.append(secret_arn)
+
+            # Tier 3 — create the OAuth2 client-credentials provider from user creds.
+            if auth_type == "oauth2_client_credentials":
+                oauth = sel.get("oauth") or {}
+                client_id = oauth.get("client_id") or oauth.get("clientId")
+                client_secret = oauth.get("client_secret") or oauth.get("clientSecret")
+                # A CustomOauth2 client-credentials provider resolves its token
+                # endpoint from the IdP's OIDC discovery document.
+                discovery_url = (
+                    oauth.get("discovery_url") or oauth.get("discoveryUrl")
+                    or oauth.get("token_url") or oauth.get("tokenUrl")
+                )
+                if not (client_id and client_secret and discovery_url):
+                    raise RuntimeError(
+                        f"MCP '{server_id}' needs oauth {{client_id, client_secret, discovery_url}}."
+                    )
+                cs_arn = _put_connector_secret(region, owner_sub, {"clientSecret": client_secret})
+                created_secrets.append(cs_arn)
+                oauth_provider_arn = _ensure_oauth2_credential_provider(
+                    agentcore_ctrl, f"mcp-{server_id}",
+                    vendor="CustomOauth2", client_id=client_id,
+                    client_secret_arn=cs_arn, discovery_url=discovery_url,
+                )
+                created_providers.append(_sanitize_provider_name(f"mcp-{server_id}"))
+                oauth_scopes = oauth.get("scopes") or (entry.get("oauth_descriptor") or {}).get("scopes")
+
+            # Tier-2's API-key provider is created inside deploy_external_mcp_target;
+            # track its name so teardown can remove it (target_name → mcp-<id>).
+            if auth_type == "api_key":
+                created_providers.append(_sanitize_provider_name(f"mcp-mcp-{server_id}"))
+
+            deploy_external_mcp_target(
+                agentcore_ctrl,
+                gateway_id=gateway_id,
+                catalog_entry=entry,
+                endpoint=endpoint,
+                secret_arn=secret_arn,
+                oauth_provider_arn=oauth_provider_arn,
+                oauth_scopes=oauth_scopes,
+            )
+    except Exception:
+        logger.error("External MCP deploy failed mid-loop; rolling back partial resources")
+        _rollback_partial()
+        raise
+
+    return {"credential_provider_names": created_providers, "secret_arns": created_secrets}

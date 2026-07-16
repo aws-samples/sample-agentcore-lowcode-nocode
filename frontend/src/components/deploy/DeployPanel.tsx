@@ -130,6 +130,28 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
   // ============================================================
   const [deploymentStatus, setDeploymentStatus] = useState<DeploymentStatus>({ state: 'idle' });
   const { setNodeExecutionStateByType, resetAllExecutionStates } = useWorkflowStore();
+
+  // When the Gateway's target is an external MCP catalog server, translate it
+  // into the DeployRequest `externalMcpServers` array the backend consumes
+  // (deploy_gateway wires each as an `mcpServer` target). Raw api key / oauth
+  // secret ride ONLY on this request (minted → dropped backend-side).
+  const externalMcpServers = useMemo(() => {
+    if (!gatewayConfig || gatewayConfig.targetType !== 'mcp_server') return undefined;
+    const tc = gatewayConfig.targetConfig as { serverId?: string; endpointVars?: Record<string, string>; apiKey?: string; oauth?: { clientId?: string; clientSecret?: string; discoveryUrl?: string; scopes?: string[] } } | undefined;
+    if (!tc?.serverId) return undefined;
+    const entry: Record<string, unknown> = { server_id: tc.serverId };
+    if (tc.endpointVars && Object.keys(tc.endpointVars).length) entry.endpoint_vars = tc.endpointVars;
+    if (tc.apiKey) entry.secret_value = tc.apiKey;
+    if (tc.oauth?.clientId) {
+      entry.oauth = {
+        client_id: tc.oauth.clientId,
+        client_secret: tc.oauth.clientSecret,
+        discovery_url: tc.oauth.discoveryUrl,
+        scopes: tc.oauth.scopes,
+      };
+    }
+    return [entry];
+  }, [gatewayConfig]);
   const [testInput, setTestInput] = useState('');
   const [, setTestResult] = useState<TestResult | null>(null);
   const [isTesting, setIsTesting] = useState(false);
@@ -246,6 +268,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
           } : undefined,
           customTools: customTools.length > 0 ? customTools : undefined,
           connectors: connectors.length > 0 ? connectors : undefined,
+          externalMcpServers,
           memoryConfig: memoryConfig || undefined,
           evaluationConfig: evaluationConfig || undefined,
           policyConfig: policyConfig || undefined,
@@ -399,7 +422,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
         message,
       });
     }
-  }, [config, nodeId, deploymentMode, connectedTools, gatewayConfig, gatewayTools, templateId, identityConfig, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, a2aConfig, knowledgeBaseConfig, observabilityConfig, warmupRuntime, resetAllExecutionStates, setNodeExecutionStateByType]);
+  }, [config, nodeId, deploymentMode, connectedTools, gatewayConfig, externalMcpServers, gatewayTools, templateId, identityConfig, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, a2aConfig, knowledgeBaseConfig, observabilityConfig, warmupRuntime, resetAllExecutionStates, setNodeExecutionStateByType]);
 
   // ============================================================
   // CFN Download UI
@@ -446,6 +469,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
           } : undefined,
           customTools: customTools.length > 0 ? customTools : undefined,
           connectors: connectors.length > 0 ? connectors : undefined,
+          externalMcpServers,
           memoryConfig: memoryConfig || undefined,
           evaluationConfig: evaluationConfig || undefined,
           policyConfig: policyConfig || undefined,
@@ -491,7 +515,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
     } finally {
       setIsExportingPython(false);
     }
-  }, [config, nodeId, connectedTools, gatewayConfig, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, observabilityConfig, a2aConfig, identityConfig]);
+  }, [config, nodeId, connectedTools, gatewayConfig, externalMcpServers, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, observabilityConfig, a2aConfig, identityConfig]);
 
   const handleDownloadCfn = useCallback(async () => {
     if (!config || !nodeId) return;
@@ -523,6 +547,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
           } : undefined,
           customTools: customTools.length > 0 ? customTools : undefined,
           connectors: connectors.length > 0 ? connectors : undefined,
+          externalMcpServers,
           memoryConfig: memoryConfig || undefined,
           evaluationConfig: evaluationConfig || undefined,
           policyConfig: policyConfig || undefined,
@@ -570,7 +595,7 @@ export function DeployPanel({ config, nodeId, connectedTools = [], gatewayConfig
     } finally {
       setIsDownloadingCfn(false);
     }
-  }, [config, nodeId, connectedTools, gatewayConfig, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, identityConfig, a2aConfig, observabilityConfig]);
+  }, [config, nodeId, connectedTools, gatewayConfig, externalMcpServers, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, identityConfig, a2aConfig, observabilityConfig]);
 
   // Gap 2A — publish the deployed agent's canvas as a reusable registry blueprint.
   // This closes the deploy -> registry -> Browse -> Clone-to-canvas loop: the

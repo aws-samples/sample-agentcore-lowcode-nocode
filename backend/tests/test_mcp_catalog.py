@@ -189,3 +189,87 @@ def test_non_https_endpoint_rejected():
             _FakeCtrl(), gateway_id="gw", target_name="mcp-x",
             catalog_entry=get_mcp_server("aws-knowledge"), endpoint="http://insecure/mcp",
         )
+
+
+# ---------------------------------------------------------------------------
+# Orchestration helper: _deploy_external_mcp_targets (the deploy-path wiring)
+# ---------------------------------------------------------------------------
+
+from app.services import gateway_deployer as gd  # noqa: E402
+from app.services.gateway_deployer import _fill_endpoint_placeholders  # noqa: E402
+
+
+def test_fill_endpoint_placeholders_ok_and_missing_and_injection():
+    assert (
+        _fill_endpoint_placeholders("https://{store_domain}/api/mcp", {"store_domain": "shop.myshopify.com"})
+        == "https://shop.myshopify.com/api/mcp"
+    )
+    with pytest.raises(RuntimeError, match="store_domain"):
+        _fill_endpoint_placeholders("https://{store_domain}/api/mcp", {})
+    with pytest.raises(RuntimeError, match="Invalid value"):
+        _fill_endpoint_placeholders("https://{h}/mcp", {"h": "evil.com/../x"})  # path escape
+    with pytest.raises(RuntimeError, match="Invalid value"):
+        _fill_endpoint_placeholders("https://{h}/mcp", {"h": "http://evil"})   # scheme injection
+
+
+def _patch_target_capture(monkeypatch):
+    """Capture CreateGatewayTarget params instead of calling AWS."""
+    captured = []
+    monkeypatch.setattr(
+        gd, "_create_gateway_target_with_retry",
+        lambda ctrl, gw, name, params: captured.append({"name": name, "params": params}) or {"targetId": "t-1"},
+    )
+    monkeypatch.setattr(gd, "_put_connector_secret", lambda region, owner, payload: "arn:aws:secretsmanager:...:secret:fake")
+    return captured
+
+
+def test_deploy_external_mcp_tier1_no_auth(monkeypatch):
+    captured = _patch_target_capture(monkeypatch)
+    out = gd._deploy_external_mcp_targets(
+        _FakeCtrl(), "gw-1", "us-east-1",
+        [{"server_id": "aws-knowledge"}], owner_sub="alice",
+    )
+    assert len(captured) == 1
+    tc = captured[0]["params"]["targetConfiguration"]["mcp"]["mcpServer"]
+    assert tc["endpoint"] == "https://knowledge-mcp.global.api.aws"
+    assert "credentialProviderConfigurations" not in captured[0]["params"]  # Tier 1
+    assert out["secret_arns"] == []
+
+
+def test_deploy_external_mcp_tier2_mints_secret_and_provider(monkeypatch):
+    captured = _patch_target_capture(monkeypatch)
+    out = gd._deploy_external_mcp_targets(
+        _FakeCtrl(), "gw-1", "us-east-1",
+        [{"server_id": "exa", "secret_value": "sk-test-123"}], owner_sub="alice",
+    )
+    assert len(captured) == 1
+    # secret minted from raw key; API_KEY credential provider attached
+    assert out["secret_arns"] == ["arn:aws:secretsmanager:...:secret:fake"]
+    cfgs = captured[0]["params"]["credentialProviderConfigurations"]
+    assert cfgs[0]["credentialProviderType"] == "API_KEY"
+
+
+def test_deploy_external_mcp_tier2_missing_key_raises(monkeypatch):
+    _patch_target_capture(monkeypatch)
+    with pytest.raises(RuntimeError, match="API key"):
+        gd._deploy_external_mcp_targets(
+            _FakeCtrl(), "gw-1", "us-east-1", [{"server_id": "exa"}], owner_sub="alice",
+        )
+
+
+def test_deploy_external_mcp_placeholder_endpoint(monkeypatch):
+    captured = _patch_target_capture(monkeypatch)
+    gd._deploy_external_mcp_targets(
+        _FakeCtrl(), "gw-1", "us-east-1",
+        [{"server_id": "shopify-storefront", "endpoint_vars": {"store_domain": "shop.myshopify.com"}}],
+        owner_sub="alice",
+    )
+    assert captured[0]["params"]["targetConfiguration"]["mcp"]["mcpServer"]["endpoint"] == "https://shop.myshopify.com/api/mcp"
+
+
+def test_deploy_external_mcp_unknown_id_raises(monkeypatch):
+    _patch_target_capture(monkeypatch)
+    with pytest.raises(RuntimeError, match="Unknown MCP server id"):
+        gd._deploy_external_mcp_targets(
+            _FakeCtrl(), "gw-1", "us-east-1", [{"server_id": "does-not-exist"}], owner_sub="alice",
+        )

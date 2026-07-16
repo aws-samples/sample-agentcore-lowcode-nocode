@@ -171,6 +171,7 @@ def _gateway_implied(
     gateway_tools: Optional[list],
     connectors: Optional[list],
     connected_tools: Optional[list],
+    external_mcp_servers: Optional[list] = None,
 ) -> bool:
     """Whether a gateway must be deployed even if no explicit ``gateway_config`` was sent.
 
@@ -186,7 +187,12 @@ def _gateway_implied(
     from ``"gateway" in connected_tools`` and synthesizes ``{"name": ...}``
     itself — this mirrors that so BOTH paths behave identically.
     """
-    return bool(gateway_tools or connectors or "gateway" in (connected_tools or []))
+    return bool(
+        gateway_tools
+        or connectors
+        or external_mcp_servers
+        or "gateway" in (connected_tools or [])
+    )
 
 
 def _maybe_promote_policy(deployment_state: Optional[dict], region: str) -> bool:
@@ -753,7 +759,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     # gateway step actually runs. See _gateway_implied for the full rationale.
     if request.gateway_config:
         sfn_input["gateway_config"] = request.gateway_config
-    elif _gateway_implied(request.gateway_tools, request.connectors, auto_connected):
+    elif _gateway_implied(request.gateway_tools, request.connectors, auto_connected, request.external_mcp_servers):
         # deploy_gateway only requires `name`; it fills the rest. Reuse the
         # friendly runtime/harness name so the gateway is recognizably paired
         # with its agent.
@@ -777,6 +783,11 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
             if c.secret_value:
                 conn["secret_value"] = c.secret_value
             sfn_input["connectors"].append(conn)
+    if request.external_mcp_servers:
+        # External MCP catalog targets. Same secret-hygiene as connectors: the
+        # transient raw api key rides ONLY on the SFN input so the gateway step
+        # can mint the secret and thread back the ARN — never persisted/logged.
+        sfn_input["external_mcp_servers"] = request.external_mcp_servers
     if request.memory_config:
         sfn_input["memory_config"] = request.memory_config
     if request.evaluation_config:

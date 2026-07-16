@@ -446,6 +446,11 @@ class DeployRequest(BaseModel):
     # entry's secret_value is write-only (minted into Secrets Manager in the
     # gateway step, then dropped); only secret_arn is ever persisted.
     connectors: Optional[list[ConnectorConfig]] = Field(default=None, max_length=20)
+    # External MCP catalog servers wired as Gateway `mcpServer` targets (Loom
+    # external-MCP path). Each entry: {server_id, endpoint_vars?, secret_value?
+    # (write-only, minted then dropped), secret_arn?, oauth?}. Only direct-* tier
+    # catalog entries are wireable; adapter-* are rejected server-side.
+    external_mcp_servers: Optional[list[dict]] = Field(alias="externalMcpServers", default=None, max_length=20)
     memory_config: Optional[dict] = Field(alias="memoryConfig", default=None)
     evaluation_config: Optional[dict] = Field(alias="evaluationConfig", default=None)
     policy_config: Optional[dict] = Field(alias="policyConfig", default=None)

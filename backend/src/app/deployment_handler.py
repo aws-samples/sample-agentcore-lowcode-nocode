@@ -288,6 +288,11 @@ async def _audit_middleware(request, call_next):
                 actor = _gcs(request)
             except Exception:  # noqa: BLE001
                 actor = "unknown"
+            # Loom-study 0.5: populate session_uuid from the per-browser-session
+            # id the frontend sends as X-Session-Id (was always empty). Lets admin
+            # analytics distinguish activity streams on a shared account and build
+            # a per-session timeline. Bounded to avoid unbounded header abuse.
+            _sid = (request.headers.get("x-session-id") or "")[:128] or None
             get_audit_store().record(
                 AuditEvent(
                     org_id="default",
@@ -296,6 +301,7 @@ async def _audit_middleware(request, call_next):
                     method=request.method,
                     path=request.url.path,
                     status_code=getattr(response, "status_code", 0),
+                    session_uuid=_sid,
                 )
             )
     except Exception as exc:  # noqa: BLE001

@@ -1261,6 +1261,10 @@ class PlatformStack(cdk.Stack):
                 actions=[
                     "bedrock:InvokeModel",
                     "bedrock:InvokeModelWithResponseStream",
+                    # Loom-study 5.1 — live model catalog (/api/models) discovers
+                    # available Bedrock models + inference profiles at request time.
+                    "bedrock:ListFoundationModels",
+                    "bedrock:ListInferenceProfiles",
                     # KB cleanup on runtime delete (Bug 90).
                     "bedrock:GetKnowledgeBase",
                     "bedrock:ListKnowledgeBases",
@@ -3539,6 +3543,13 @@ class PlatformStack(cdk.Stack):
         api.add_routes(
             path="/api/permissions/{proxy+}",
             methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Loom-study 5.1 — live model catalog.
+        api.add_routes(
+            path="/api/models",
+            methods=[apigwv2.HttpMethod.GET],
             integration=deployment_integration,
             authorizer=jwt_authorizer,
         )

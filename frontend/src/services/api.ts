@@ -1321,6 +1321,28 @@ export async function streamInvokeApi(
   return { sessionId: data.sessionId || params.sessionId || null, fullText: text };
 }
 
+export interface LiveModelOption {
+  provider: string;
+  modelId: string;
+  label: string;
+  maxTokens: number;
+  source?: string;
+}
+
+/**
+ * Fetch the live Bedrock model catalog (Loom-study 5.1). The model picker can
+ * call this to reflect models actually available in the account instead of the
+ * hardcoded list; callers should fall back to the static AVAILABLE_MODELS on
+ * error so the picker is never empty.
+ */
+export async function listModelsApi(baseUrl: string = API_BASE_URL): Promise<LiveModelOption[]> {
+  const response = await authFetch(`${baseUrl}/api/models`, { method: 'GET' });
+  if (!response.ok) {
+    throw new Error(`Model catalog fetch failed (${response.status})`);
+  }
+  return (await response.json()) as LiveModelOption[];
+}
+
 /** Fetch the signed-in caller's decoded identity (claims + groups + scopes). */
 export async function getTokenInfoApi(baseUrl: string = API_BASE_URL): Promise<TokenInfo> {
   const response = await authFetch(`${baseUrl}/api/identity/token-info`, { method: 'GET' });

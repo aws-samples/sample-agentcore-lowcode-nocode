@@ -1881,6 +1881,10 @@ class PlatformStack(cdk.Stack):
         # and these tables hold no secrets.
         self.agent_versions_table.grant_read_write_data(role)
         self.runtime_slots_table.grant_read_write_data(role)
+        # Loom-study 2.2 — runtime_configure/harness steps READ approval policies
+        # (tag-policy table) to inject LOOM_APPROVAL_POLICIES into the runtime.
+        if step_name in {"runtime_configure", "harness"}:
+            self.tag_policy_table.grant_read_data(role)
         role.add_to_policy(iam.PolicyStatement(
             actions=["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
             resources=[f"arn:aws:ssm:{self.region}:{self.account}:parameter/agentcore-workflow/{self._env}/*"],
@@ -2616,6 +2620,10 @@ class PlatformStack(cdk.Stack):
                     # Phase 2 Gap 2D — HITL table name so runtime_configure_step
                     # injects it into the runtime's environmentVariables.
                     "HITL_REQUESTS_TABLE_NAME": self.hitl_requests_table.table_name,
+                    # Loom-study 2.2 — approval policies live in the tag-policy
+                    # table; runtime_configure_step reads them to inject
+                    # LOOM_APPROVAL_POLICIES into the runtime (guaranteed HITL hook).
+                    "TAG_POLICY_TABLE_NAME": self.tag_policy_table.table_name,
                     "ARTIFACTS_BUCKET_NAME": self.artifacts_bucket.bucket_name,
                     "ENVIRONMENT": self._env,
                     "APP_AWS_REGION": self.region,

@@ -414,6 +414,38 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
             status_code=400,
             detail="provider_api_key_ref must be a Secrets Manager ARN in the agentcore-provider/ namespace",
         )
+
+    # Integration gating (Loom-study 1.4): when AWS Agent Registry federation is
+    # enabled, an agent may only be wired to APPROVED external MCP servers / A2A
+    # peers. Collect the connected external identifiers (endpoint URLs / names)
+    # and reject the deploy if any is not APPROVED. No-op when federation is off.
+    try:
+        from app.services.aws_agent_registry import unapproved_integrations
+
+        _idents: list[str] = []
+        _mcp = request.mcp_server_config or {}
+        if isinstance(_mcp, dict):
+            for k in ("endpoint", "url", "name", "server_url", "serverUrl"):
+                if _mcp.get(k):
+                    _idents.append(str(_mcp[k]))
+        _a2a = request.a2a_config or {}
+        if isinstance(_a2a, dict):
+            for u in (_a2a.get("peer_allowlist") or _a2a.get("peerAllowlist") or []):
+                _idents.append(str(u))
+        _blocked = unapproved_integrations(_idents)
+        if _blocked:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "These integrations are not APPROVED in the Agent Registry and "
+                    f"cannot be used in a deployment: {_blocked}"
+                ),
+            )
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001 — gating must not crash deploy on a registry hiccup
+        logger.warning("integration gating skipped (registry check errored)")
+
     deployment_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     user_id = _get_user_id(raw_request)

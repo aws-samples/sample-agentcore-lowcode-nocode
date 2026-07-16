@@ -205,3 +205,45 @@ def get_registry() -> Optional[AwsAgentRegistry]:
     if not rid:
         return None
     return AwsAgentRegistry(rid)
+
+
+def unapproved_integrations(identifiers: list[str]) -> list[str]:
+    """Integration gating (Loom-study 1.4): of the given external MCP/A2A
+    identifiers (server name or endpoint URL), return those that are NOT
+    APPROVED in the AWS Agent Registry.
+
+    No-op ([]) when federation is disabled — gating only applies once an org
+    opts into registry governance. Matching is by record name OR by a URL
+    substring within any descriptor, so a connected server is considered
+    approved when an APPROVED record names it or points at it. An identifier
+    with NO matching record at all is treated as UNAPPROVED (fail-closed: an
+    unreviewed integration must not ship into a governed deployment).
+    """
+    if not identifiers:
+        return []
+    reg = get_registry()
+    if reg is None:
+        return []  # federation off → no gating
+
+    records = reg.list_records()
+    approved_names: set[str] = set()
+    approved_blobs: list[str] = []
+    for r in records:
+        if (r.get("status") or "").upper() != "APPROVED":
+            continue
+        nm = r.get("name") or r.get("recordName")
+        if nm:
+            approved_names.add(str(nm))
+        # keep a coarse text blob per record for URL substring matching
+        approved_blobs.append(json.dumps(r))
+
+    unapproved: list[str] = []
+    for ident in identifiers:
+        if not ident:
+            continue
+        if ident in approved_names:
+            continue
+        if any(ident in blob for blob in approved_blobs):
+            continue
+        unapproved.append(ident)
+    return unapproved

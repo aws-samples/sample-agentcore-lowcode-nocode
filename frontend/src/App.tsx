@@ -39,10 +39,18 @@ import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration,
 import { CONNECTOR_TOOL_PREFIX } from './types/components';
 import type { DeployConnector } from './components/deploy/DeployPanel';
 import type { GeneratedTool } from './services/api';
+import { useScopes } from './auth/scopes';
+import { ChatPage } from './components/chat/ChatPage';
 import './App.css';
 
 function App() {
   const { activeFlowId, activeFlowName } = useFlowStore();
+
+  // Loom-study Phase 3 — persona routing. t-user (non-admin) accounts land on the
+  // end-user ChatPage; admins get the builder. isTypeAdmin comes from the Cognito
+  // type group (t-admin). `previewAsEndUser` lets an admin preview the chat (3.2).
+  const { isTypeAdmin, loaded: scopesLoaded } = useScopes();
+  const [previewAsEndUser, setPreviewAsEndUser] = useState(false);
 
   // Auto-save active flow workflow (only saves when activeFlowId is set).
   // Audit issue #8: surface auto-save errors via a toast so users can see
@@ -529,6 +537,22 @@ function App() {
     </div>
   );
 
+  // Loom-study Phase 3 — end-user chat routing. A non-admin (t-user) lands on the
+  // ChatPage; an admin can preview it via View-as. Wait for scopes to load so we
+  // don't flash the builder before resolving the persona. (Local dev with no
+  // Cognito token resolves as admin — the builder — matching the backend default.)
+  if (scopesLoaded && (!isTypeAdmin || previewAsEndUser)) {
+    const banner = previewAsEndUser ? (
+      <div className="px-4 py-2 text-xs flex items-center justify-between" style={{ background: 'rgba(245,166,35,.12)', borderBottom: '1px solid var(--accent)', color: 'var(--color-text-secondary)' }}>
+        <span>👁 Previewing the end-user experience (View as).</span>
+        <button type="button" onClick={() => setPreviewAsEndUser(false)} className="font-medium hover:underline" style={{ color: 'var(--accent)' }}>
+          Exit preview
+        </button>
+      </div>
+    ) : undefined;
+    return <ChatPage previewBanner={banner} />;
+  }
+
   // Harness mode swaps in the additive form-based authoring path. The visual
   // canvas (palette + canvas + deploy) below is rendered UNCHANGED otherwise.
   if (authoringMode === 'harness') {
@@ -627,6 +651,19 @@ function App() {
                 <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" /><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
               </svg>
               Registry
+            </button>
+            {/* Loom-study 3.2 — admin previews the end-user chat experience */}
+            <button
+              onClick={() => setPreviewAsEndUser(true)}
+              className="px-3 py-1.5 rounded-md text-sm text-white/85 hover:text-white hover:bg-white/10 transition-colors duration-200 flex items-center gap-1.5"
+              style={{ transitionTimingFunction: 'var(--ease-out-quint)' }}
+              title="Preview the end-user chat experience"
+              aria-label="View as end-user"
+            >
+              <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" />
+              </svg>
+              View as user
             </button>
             {/* Phase 2 Gap 2D — HITL approvals inbox */}
             <button

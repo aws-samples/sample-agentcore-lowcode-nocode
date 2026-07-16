@@ -38,6 +38,16 @@ These are bugs/dead-config in OUR code, independent of the Loom roadmap.
 
 ---
 
+> **Phase 1 status: SHIPPED + verified live (2026-07-16).** All 6 items built,
+> tested (21 phase tests + 454 regression), deployed to agentcore-workflow-dev.
+> A deploy-time Lambda-policy-size limit (per-route permissions on the ~29-route
+> deployment Lambda) was hit + fixed (scope_permission_to_route=False, ~29→3
+> permissions). Verified live: token-info returns annotated claims (1.3); JIT
+> request→approve WIDENED the shared role with a real inline policy + the iam:*
+> escalation guard returns 400 (1.6); import bad-ARN → 400 (1.5); gating no-ops
+> with federation off so a normal deploy→invoke returns its canary (1.4). Both
+> OIDC synth paths (with/without context) clean (1.1). Zero orphans.
+
 ## Phase 1 — Identity & governance completeness (highest enterprise value, fits serverless)
 
 | # | Capability | Approach (serverless-fit) | Effort |

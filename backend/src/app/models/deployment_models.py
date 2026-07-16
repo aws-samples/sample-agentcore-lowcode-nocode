@@ -255,6 +255,9 @@ class RuntimeConfig(BaseModel):
     # mode with these subnets/SGs so it can reach VPC-private resources. Accepts a
     # {subnet_ids, security_group_ids} dict; None → PUBLIC network mode.
     vpc_config: Optional[dict] = Field(alias="vpcConfig", default=None)
+    # Loom-study 4.2 — a named VPC profile (subnets/SGs defined once, picked here).
+    # Resolved to vpc_config at the deploy boundary; explicit vpc_config wins.
+    vpc_profile: Optional[str] = Field(alias="vpcProfile", default=None, max_length=64)
     # Multi-agent pattern
     multi_agent_pattern: str = Field(alias="multiAgentPattern", default="none")
     multi_agent_config: Optional[dict] = Field(alias="multiAgentConfig", default=None)

@@ -325,6 +325,7 @@ from app.routers.connectors import router as connectors_router  # noqa: E402
 from app.routers.identity import router as identity_router  # noqa: E402
 from app.routers.permissions import router as permissions_router  # noqa: E402
 from app.routers.approvals import router as approvals_router  # noqa: E402
+from app.routers.vpc_profiles import router as vpc_profiles_router  # noqa: E402
 from app.routers.mcp_servers import router as mcp_servers_router  # noqa: E402
 from app.routers.triggers import router as triggers_router  # noqa: E402
 from app.routers.tags import router as tags_router  # noqa: E402  # Phase 2 governance tagging
@@ -369,6 +370,8 @@ deployment_app.include_router(identity_router)
 deployment_app.include_router(permissions_router)
 # Loom-study 2.2 — HITL approval-policy CRUD (/api/settings/approval-policies).
 deployment_app.include_router(approvals_router)
+# Loom-study 4.2 — named VPC config profiles (/api/settings/vpc-profiles).
+deployment_app.include_router(vpc_profiles_router)
 # Phase 3 Gap 3F — scheduled / event triggers registry. Mounted here because
 # the deployment Lambda owns the TriggersTable grant + the agentcore-trigger/*
 # Secrets Manager grant and already has the get_caller_sub auth helper.
@@ -421,6 +424,24 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
             status_code=400,
             detail="provider_api_key_ref must be a Secrets Manager ARN in the agentcore-provider/ namespace",
         )
+
+    # Loom-study 4.2 — resolve a named VPC profile to a concrete vpc_config before
+    # the SFN starts, so runtime_configure_step sees the subnets/SGs (Phase-0 0.1).
+    # An explicit vpc_config wins; an unknown profile name is a loud 400.
+    _vpc_profile = getattr(request.config, "vpc_profile", None)
+    if _vpc_profile and not getattr(request.config, "vpc_config", None):
+        try:
+            from app.services.vpc_profile_store import resolve_vpc_config
+            _resolved = resolve_vpc_config(
+                "default", _vpc_profile,
+                os.environ.get("TAG_POLICY_TABLE_NAME", ""),
+                os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")),
+            )
+        except Exception:  # noqa: BLE001
+            _resolved = None
+        if _resolved is None:
+            raise HTTPException(status_code=400, detail=f"Unknown VPC profile: {_vpc_profile}")
+        request.config.vpc_config = _resolved
 
     # Integration gating (Loom-study 1.4): when AWS Agent Registry federation is
     # enabled, an agent may only be wired to APPROVED external MCP servers / A2A

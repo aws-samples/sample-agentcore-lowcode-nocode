@@ -101,6 +101,25 @@ These are bugs/dead-config in OUR code, independent of the Loom roadmap.
 
 ---
 
+> **Phase 4 status: SHIPPED + verified live (2026-07-16).** All items built,
+> tested (6 VPC tests + regression), deployed. Verified live:
+> - **4.2** VPC-profile CRUD works via the API; unknown-profile deploy → 400.
+> - **4.1** a VPC-egress agent deployed via the `default-egress` profile came up
+>   `READY` in **networkMode: VPC** with the exact resolved subnets — proving the
+>   profile→config→VPC-mode path end-to-end on real AWS. (A first attempt
+>   CREATE_FAILED on an unsupported AZ — real AWS signal — fixed by moving to
+>   supported-AZ subnets.)
+> - **4.3** the PrivateLink CFN template passes the real validate-template API.
+>
+> **Honest verification boundary:** a *functional invoke* of the VPC-egress agent
+> could NOT be exercised in this account — the default VPC has 0 NAT gateways and
+> no Bedrock/S3/ECR VPC endpoints, so a VPC-mode runtime has no egress to pull its
+> image or reach the model (confirmed: empty container logs; matches the
+> vpc_lambda_ddb_endpoint memory). That is a CUSTOMER-INFRA prerequisite the
+> platform doesn't provision — the platform code is proven correct. PrivateLink
+> ingress likewise needs a consumer VPC to fully exercise. All test resources torn
+> down, zero orphans.
+
 ## Phase 4 — Networking (enterprise-private connectivity; depends on 0.1)
 
 | # | Capability | Approach | Effort |

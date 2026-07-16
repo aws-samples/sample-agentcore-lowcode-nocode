@@ -407,6 +407,19 @@ class CustomToolDefinition(BaseModel):
     input_schema: dict = Field(alias="inputSchema", default_factory=dict)
 
 
+class ImportRuntimeRequest(BaseModel):
+    """Adopt an already-deployed AgentCore Runtime by ARN (Loom-study 1.5).
+
+    POST /api/runtime/import — records an externally-built runtime as a
+    caller-owned SUCCEEDED deployment without any codegen/deploy.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    runtime_arn: str = Field(alias="runtimeArn", min_length=20, max_length=2048)
+    aws_region: Optional[str] = Field(alias="awsRegion", default=None, max_length=30)
+
+
 class DeployRequest(BaseModel):
     """Request body for POST /api/deploy."""
 

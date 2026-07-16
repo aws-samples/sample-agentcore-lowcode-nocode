@@ -3237,7 +3237,9 @@ class PlatformStack(cdk.Stack):
         )
         api.add_routes(
             path="/api/runtime/{proxy+}",
-            methods=[apigwv2.HttpMethod.DELETE, apigwv2.HttpMethod.GET],
+            # POST added for /api/runtime/import (Loom-study 1.5 — adopt an
+            # externally-built runtime by ARN).
+            methods=[apigwv2.HttpMethod.DELETE, apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
             integration=deployment_integration,
             authorizer=jwt_authorizer,
         )

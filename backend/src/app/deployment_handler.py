@@ -35,6 +35,7 @@ from app.models.deployment_models import (
     DeployRequest,
     DeployResponse,
     DeleteResponse,
+    ImportRuntimeRequest,
     TestRequest,
     TestResponse,
 )
@@ -1542,6 +1543,64 @@ def _delete_managed_resource(res: dict, region: str) -> str:
         if _gone(e):
             return f"[manifest] {rtype} {rid or rname} already gone"
         raise
+
+
+@deployment_app.post("/api/runtime/import", status_code=201)
+async def handle_import_runtime(request: ImportRuntimeRequest, raw_request: Request) -> dict:
+    """Import (adopt) an externally-built AgentCore Runtime into the platform.
+
+    Loom-study 1.5. Describes the runtime by ARN and records it as a SUCCEEDED,
+    caller-owned deployment WITHOUT any codegen/deploy — so a team can bring a
+    pre-existing runtime under the platform's observability/cost/registry
+    governance. Does NOT create AWS resources; teardown of an imported runtime is
+    the same DELETE path (the caller opts in there).
+    """
+    arn = request.runtime_arn
+    m = re.match(r"^arn:aws:bedrock-agentcore:([a-z0-9-]+):(\d{12}):runtime/([A-Za-z0-9_-]+)$", arn)
+    if not m:
+        raise HTTPException(status_code=400, detail="Invalid AgentCore Runtime ARN")
+    region = request.aws_region or m.group(1)
+    runtime_id = m.group(3)
+    user_id = _get_user_id(raw_request)
+
+    try:
+        ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
+        rt = ctrl.get_agent_runtime(agentRuntimeId=runtime_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=404, detail=f"Runtime not found or not describable: {exc}")
+
+    store = _get_state_store()
+    # Idempotency + tenant safety: if this runtime is already recorded by another
+    # owner, refuse (mirrors the deploy-time cross-tenant guard).
+    existing = _scan_for_runtime(store._table, runtime_id)
+    if existing and existing.get("user_id") and existing.get("user_id") != user_id:
+        raise HTTPException(status_code=409, detail="Runtime already imported by another user")
+
+    now = datetime.now(timezone.utc)
+    deployment_id = str(uuid.uuid4())
+    endpoint = f"{arn}/runtime-endpoint/DEFAULT"
+    state = DeploymentState(
+        deployment_id=deployment_id,
+        workflow_id=f"imported-{runtime_id[:32]}",
+        user_id=user_id,
+        status=DeploymentStatusEnum.SUCCEEDED,
+        started_at=now,
+        completed_at=now,
+        runtime_id=runtime_id,
+        runtime_arn=arn,
+        runtime_endpoint=endpoint,
+        agentcore_runtime_name=rt.get("agentRuntimeName") or runtime_id,
+        deployment_mode="runtime",
+    )
+    store.create(state)
+    logger.info("Imported external runtime %s as deployment %s", runtime_id, deployment_id)
+    return {
+        "deploymentId": deployment_id,
+        "runtimeId": runtime_id,
+        "runtimeArn": arn,
+        "status": rt.get("status", "READY"),
+        "imported": True,
+    }
 
 
 @deployment_app.delete(

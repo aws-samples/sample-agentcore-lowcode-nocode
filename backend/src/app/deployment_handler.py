@@ -321,6 +321,7 @@ from app.routers.cost import budgets_router  # noqa: E402  # Phase 4 FinOps budg
 from app.routers.hitl import router as hitl_router  # noqa: E402
 from app.routers.prompts import router as prompts_router  # noqa: E402  # Phase 3 Gap 3H
 from app.routers.connectors import router as connectors_router  # noqa: E402
+from app.routers.identity import router as identity_router  # noqa: E402
 from app.routers.mcp_servers import router as mcp_servers_router  # noqa: E402
 from app.routers.triggers import router as triggers_router  # noqa: E402
 from app.routers.tags import router as tags_router  # noqa: E402  # Phase 2 governance tagging
@@ -357,6 +358,10 @@ deployment_app.include_router(connectors_router)
 # /api/mcp-servers + /api/mcp-servers/{proxy+} are added in platform_stack.py per
 # the Bug 21 router-enumeration rule.
 deployment_app.include_router(mcp_servers_router)
+# Phase 1 (Loom-study 1.2/1.3) — identity inspection + OBO verification. Read
+# endpoints (token-info + test-obo) on the deployment Lambda (owns the
+# bedrock-agentcore identity permissions via harness/gateway steps' grants).
+deployment_app.include_router(identity_router)
 # Phase 3 Gap 3F — scheduled / event triggers registry. Mounted here because
 # the deployment Lambda owns the TriggersTable grant + the agentcore-trigger/*
 # Secrets Manager grant and already has the get_caller_sub auth helper.

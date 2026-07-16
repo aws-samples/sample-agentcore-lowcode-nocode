@@ -1233,6 +1233,11 @@ class PlatformStack(cdk.Stack):
                     # cascades through Get/Delete on runtime + endpoint +
                     # gateway + memory + policy resources.
                     "bedrock-agentcore:InvokeAgentRuntime",
+                    # Phase 1 (Loom-study 1.2) — OBO dry-run (routers/identity
+                    # test-obo) exchanges the caller's JWT for an on-behalf-of
+                    # downstream token to PROVE delegation runs as the user.
+                    "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
+                    "bedrock-agentcore:GetResourceOauth2Token",
                     "bedrock-agentcore:CreateAgentRuntime",
                     "bedrock-agentcore:GetAgentRuntime",
                     "bedrock-agentcore:UpdateAgentRuntime",
@@ -3359,6 +3364,14 @@ class PlatformStack(cdk.Stack):
         api.add_routes(
             path="/api/mcp-servers/{proxy+}",
             methods=[apigwv2.HttpMethod.GET],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        # Phase 1 (Loom-study 1.2/1.3) — identity inspection + OBO dry-run.
+        # GET /token-info + POST /test-obo on the deployment Lambda (routers/identity).
+        api.add_routes(
+            path="/api/identity/{proxy+}",
+            methods=[apigwv2.HttpMethod.GET, apigwv2.HttpMethod.POST],
             integration=deployment_integration,
             authorizer=jwt_authorizer,
         )

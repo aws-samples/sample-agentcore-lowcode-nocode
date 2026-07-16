@@ -281,6 +281,11 @@ class ConnectorConfig(BaseModel):
     obo_grant_type: Optional[Literal["TOKEN_EXCHANGE", "JWT_AUTHORIZATION_GRANT"]] = Field(
         alias="oboGrantType", default=None
     )
+    # Phase 1 (Loom-study 1.2): explicit RFC 8693 `audience` for the OBO exchange.
+    # Okta custom authorization servers REJECT a token exchange without an
+    # explicit audience — a hard blocker for a common enterprise IdP. Threaded
+    # into the exchange call; falls back to the subject token's aud when unset.
+    oauth_audience: Optional[str] = Field(alias="oauthAudience", default=None, max_length=512)
 
     # api_key only (catalog provides defaults).
     credential_location: Optional[str] = Field(alias="credentialLocation", default=None)

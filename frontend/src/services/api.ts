@@ -1210,6 +1210,32 @@ export async function getMcpServerApi(
   return (await response.json()) as McpServerDetail;
 }
 
+// ---------------------------------------------------------------------------
+// Identity: token-info (Loom-study 1.3) — the caller's decoded claims/scopes
+// ---------------------------------------------------------------------------
+
+export interface AnnotatedClaim {
+  claim: string;
+  value: unknown;
+  note: string;
+}
+
+export interface TokenInfo {
+  sub: string;
+  claims: AnnotatedClaim[];
+  groups: string[];
+  scopes: string[];
+}
+
+/** Fetch the signed-in caller's decoded identity (claims + groups + scopes). */
+export async function getTokenInfoApi(baseUrl: string = API_BASE_URL): Promise<TokenInfo> {
+  const response = await authFetch(`${baseUrl}/api/identity/token-info`, { method: 'GET' });
+  if (!response.ok) {
+    throw new Error(`Token info fetch failed (${response.status})`);
+  }
+  return (await response.json()) as TokenInfo;
+}
+
 /** Publish a deployed agent's canvas snapshot to the org registry. */
 export async function publishToRegistryApi(
   data: PublishRegistryRequest,

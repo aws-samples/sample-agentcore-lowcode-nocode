@@ -137,6 +137,26 @@ def extract_cognito_groups(request: Request) -> list[str]:
     return []
 
 
+def get_caller_claims(request: Request) -> dict:
+    """Return ALL JWT claims the authorizer injected for the caller (or {}).
+
+    Reuses the same authorizer-context extraction as get_caller_sub /
+    extract_cognito_groups. Used by the token-info endpoint (Loom-study 1.3) to
+    show the signed-in user their decoded identity/claims. Returns {} in local
+    dev or when no authorizer context is present.
+    """
+    aws_event = request.scope.get("aws.event") if request.scope else None
+    if aws_event is None:
+        return {}
+    try:
+        authz = aws_event["requestContext"]["authorizer"]
+        jwt = authz.get("jwt") or authz
+        claims = jwt.get("claims") or jwt
+        return dict(claims) if isinstance(claims, dict) else {}
+    except (KeyError, TypeError, AttributeError):
+        return {}
+
+
 # Gap 2E: org-wide RBAC role from the Cognito group claim. ADVISORY ONLY.
 # The per-workflow ACL (services/workspace_acl.py) is the authoritative authz
 # check for view/edit/share; this role must NEVER bypass that ACL (a group=

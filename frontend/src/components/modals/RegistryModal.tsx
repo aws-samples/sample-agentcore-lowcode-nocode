@@ -21,6 +21,7 @@ import { AwsRegistryPanel } from './AwsRegistryPanel';
 import { DeployTargetsPanel } from './DeployTargetsPanel';
 import { RegistryEntryDetail } from './registry/RegistryEntryDetail';
 import { McpServersPanel } from './registry/McpServersPanel';
+import { TokenInfoCard } from './registry/TokenInfoCard';
 
 // ============================================================================
 // Props
@@ -51,8 +52,9 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
   const [selected, setSelected] = useState<RegistryEntry | null>(null);
   // Status filter tabs (with live counts), ported from the reference registry.
   const [statusFilter, setStatusFilter] = useState<'all' | 'approved' | 'pending' | 'rejected'>('all');
-  // Top-level view: agent blueprints vs the verified external MCP-server catalog.
-  const [view, setView] = useState<'agents' | 'mcp'>('agents');
+  // Top-level view: agent blueprints, external MCP-server catalog, or the
+  // signed-in user's identity/scopes (Loom-study 1.3).
+  const [view, setView] = useState<'agents' | 'mcp' | 'identity'>('agents');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -190,7 +192,7 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
 
         {/* Top-level view toggle: agent blueprints vs external MCP-server catalog. */}
         <div className="flex gap-1 px-6 pt-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
-          {([['agents', 'Agent blueprints'], ['mcp', 'MCP servers']] as const).map(([key, label]) => (
+          {([['agents', 'Agent blueprints'], ['mcp', 'MCP servers'], ['identity', 'My identity']] as const).map(([key, label]) => (
             <button
               key={key}
               type="button"
@@ -213,7 +215,11 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
           </div>
         )}
 
-        {view === 'mcp' ? (
+        {view === 'identity' ? (
+          <div className="flex-1 overflow-y-auto px-6 py-4">
+            <TokenInfoCard />
+          </div>
+        ) : view === 'mcp' ? (
           <div className="flex-1 overflow-y-auto px-6 py-4">
             <McpServersPanel />
           </div>

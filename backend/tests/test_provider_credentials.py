@@ -18,17 +18,30 @@ from app.services.code_generator import _get_model_init_code  # noqa: E402
 
 
 def test_all_provider_init_lines_are_valid_python():
-    for prov in ["bedrock", "openai", "anthropic", "gemini", "litellm", "mistral", "groq", "deepseek"]:
+    for prov in ["bedrock", "openai", "anthropic", "gemini", "litellm", "mistral", "groq", "deepseek", "together", "writer"]:
         _imp, init = _get_model_init_code(prov, "m", "us-east-1")
         ast.parse(init)  # malformed f-string would raise
 
 
 def test_non_bedrock_providers_read_provider_api_key():
-    # Every credentialed non-Bedrock provider must reference PROVIDER_API_KEY
-    # (or a provider-specific env key for the built-in groq/deepseek/writer).
-    for prov in ["openai", "anthropic", "gemini", "litellm", "mistral"]:
+    # Every credentialed non-Bedrock provider must reference PROVIDER_API_KEY —
+    # including the OpenAI-compatible shims (groq/deepseek/writer) and the
+    # LiteLLM-backed together, which previously read ONLY a provider-specific env
+    # var that the deploy path never sets, so they deployed keyless and 401'd
+    # (Loom-study 5.4).
+    for prov in ["openai", "anthropic", "gemini", "litellm", "mistral", "groq", "deepseek", "together", "writer"]:
         _imp, init = _get_model_init_code(prov, "m", "us-east-1")
         assert "PROVIDER_API_KEY" in init, f"{prov} does not read PROVIDER_API_KEY: {init}"
+
+
+def test_openai_compat_shims_prefer_injected_key_then_fallback():
+    # The deploy-injected PROVIDER_API_KEY must take precedence, with the
+    # provider-specific var kept as a local/manual-run fallback.
+    for prov, fallback in [("groq", "GROQ_API_KEY"), ("deepseek", "DEEPSEEK_API_KEY"),
+                           ("writer", "WRITER_API_KEY"), ("together", "TOGETHER_API_KEY")]:
+        _imp, init = _get_model_init_code(prov, "m", "us-east-1")
+        assert 'os.environ.get("PROVIDER_API_KEY")' in init, f"{prov} missing injected-key precedence"
+        assert fallback in init, f"{prov} dropped its {fallback} fallback"
 
 
 def test_openai_and_litellm_support_base_url():

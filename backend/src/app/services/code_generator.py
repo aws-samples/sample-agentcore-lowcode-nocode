@@ -1634,22 +1634,29 @@ def _get_model_init_code(provider: str, model_id: str, region: str) -> tuple[str
     elif provider == "groq":
         return (
             "from strands.models.openai import OpenAIModel",
-            f'model = OpenAIModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("GROQ_API_KEY", ""), "base_url": "https://api.groq.com/openai/v1"}})',
+            # Prefer the deploy-injected PROVIDER_API_KEY (runtime_configure_step
+            # resolves provider_api_key_ref into it); fall back to the
+            # provider-specific var for local/manual runs. Without the fallback
+            # chain, a deployed groq agent read an unset GROQ_API_KEY and 401'd.
+            f'model = OpenAIModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("PROVIDER_API_KEY") or os.environ.get("GROQ_API_KEY", ""), "base_url": "https://api.groq.com/openai/v1"}})',
         )
     elif provider == "deepseek":
         return (
             "from strands.models.openai import OpenAIModel",
-            f'model = OpenAIModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("DEEPSEEK_API_KEY", ""), "base_url": "https://api.deepseek.com/v1"}})',
+            f'model = OpenAIModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("PROVIDER_API_KEY") or os.environ.get("DEEPSEEK_API_KEY", ""), "base_url": "https://api.deepseek.com/v1"}})',
         )
     elif provider == "together":
         return (
             "from strands.models.litellm import LiteLLMModel",
-            f'model = LiteLLMModel(model_id="together_ai/{model_id}")',
+            # LiteLLM reads TOGETHER_API_KEY from env by default; mirror the
+            # deploy-injected PROVIDER_API_KEY into it so the resolved secret is
+            # actually used (otherwise together deploys keyless and 401s).
+            f'model = LiteLLMModel(model_id="together_ai/{model_id}", client_args={{k: v for k, v in {{"api_key": os.environ.get("PROVIDER_API_KEY") or os.environ.get("TOGETHER_API_KEY", "")}}.items() if v}})',
         )
     elif provider == "writer":
         return (
             "from strands.models.openai import OpenAIModel",
-            f'model = OpenAIModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("WRITER_API_KEY", ""), "base_url": "https://api.writer.com/v1"}})',
+            f'model = OpenAIModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("PROVIDER_API_KEY") or os.environ.get("WRITER_API_KEY", ""), "base_url": "https://api.writer.com/v1"}})',
         )
     # Fallback to Bedrock
     return (

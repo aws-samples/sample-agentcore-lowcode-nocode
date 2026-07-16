@@ -53,6 +53,37 @@ export function AuditDashboard() {
         <div className="text-xs text-gray-500">No audit events yet — perform a deploy or config change.</div>
       ) : (
         <>
+          {/* Loom-study 5.2 — summary tiles + activity-over-time. */}
+          <div className="grid grid-cols-3 gap-3">
+            {([
+              ['Events', data.total],
+              ['Distinct users', data.distinct_actors ?? Object.keys(data.by_actor).length],
+              ['Sessions', data.distinct_sessions ?? '—'],
+            ] as const).map(([label, value]) => (
+              <div key={label} className="rounded-lg border border-gray-200 p-3">
+                <div className="text-[11px] text-gray-500">{label}</div>
+                <div className="text-xl font-semibold text-gray-800" style={{ fontVariantNumeric: 'tabular-nums' }}>{value}</div>
+              </div>
+            ))}
+          </div>
+
+          {data.by_day && data.by_day.length > 0 && (
+            <div className="rounded-lg border border-gray-200 p-3">
+              <div className="text-xs font-semibold text-gray-800 mb-2">Activity over time</div>
+              <div className="flex items-end gap-1 h-24">
+                {(() => {
+                  const max = Math.max(...data.by_day!.map((d) => d.count), 1);
+                  return data.by_day!.map((d) => (
+                    <div key={d.day} className="flex-1 flex flex-col items-center justify-end" title={`${d.day}: ${d.count}`}>
+                      <div className="w-full rounded-t" style={{ height: `${(d.count / max) * 100}%`, background: 'var(--accent, #4f9cff)', minHeight: '2px' }} />
+                      <div className="text-[8px] text-gray-400 mt-1 truncate w-full text-center">{d.day.slice(5)}</div>
+                    </div>
+                  ));
+                })()}
+              </div>
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-3">
             <div className="rounded-lg border border-gray-200 p-3">
               <div className="text-xs font-semibold text-gray-800 mb-2">By action</div>

@@ -130,17 +130,35 @@ class AuditStore:
         return [AuditEvent.from_item(i) for i in resp.get("Items", [])]
 
     def summarize(self, org_id: str, limit: int = 500) -> dict:
-        """Return {by_action, by_actor, total, events[]} over recent events."""
+        """Return audit analytics over recent events.
+
+        Loom-study 5.2 adds time-series (``by_day``) + session/actor counts on top
+        of the original by_action/by_actor rollups, so the admin dashboard can
+        chart activity-over-time and distinct-session usage — not just flat lists.
+        """
         events = self.list_recent(org_id, limit=limit)
         by_action: dict[str, int] = {}
         by_actor: dict[str, int] = {}
+        by_day: dict[str, int] = {}
+        sessions: set[str] = set()
         for e in events:
             by_action[e.action] = by_action.get(e.action, 0) + 1
             by_actor[e.actor_sub] = by_actor.get(e.actor_sub, 0) + 1
+            # ts is ISO 8601 (e.g. 2026-07-16T...); the date prefix is the day.
+            day = (e.ts or "")[:10]
+            if day:
+                by_day[day] = by_day.get(day, 0) + 1
+            if e.session_uuid:
+                sessions.add(e.session_uuid)
+        # by_day as a sorted list of {day, count} — chart-ready.
+        by_day_series = [{"day": d, "count": c} for d, c in sorted(by_day.items())]
         return {
             "total": len(events),
+            "distinct_actors": len(by_actor),
+            "distinct_sessions": len(sessions),
             "by_action": by_action,
             "by_actor": by_actor,
+            "by_day": by_day_series,
             "events": [e.to_item() for e in events[:100]],
         }
 

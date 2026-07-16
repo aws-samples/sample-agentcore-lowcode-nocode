@@ -233,6 +233,11 @@ export interface AuditSummary {
   total: number;
   by_action: Record<string, number>;
   by_actor: Record<string, number>;
+  // Loom-study 5.2 — analytics extras (optional for backward compat with older
+  // backends that don't return them).
+  distinct_actors?: number;
+  distinct_sessions?: number;
+  by_day?: Array<{ day: string; count: number }>;
   events: Array<{
     action: string; actor_sub: string; method: string; path: string;
     status_code: number; ts: string;

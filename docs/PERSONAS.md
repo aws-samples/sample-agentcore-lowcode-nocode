@@ -49,6 +49,14 @@ hitl, observability, settings`.
 
 ## Assigning a user to a persona (AWS-side)
 
+> **New users start in NO group.** `AdminCreateUser` (and the `COGNITO_USERS`
+> deploy var, which calls it) creates the user but assigns **no group**, so they
+> sign in with an empty `cognito:groups` claim → **zero scopes**. The UI fails
+> closed on missing scopes (e.g. the registry **Clone** button, gated on
+> `registry:read`, is disabled) even though the advisory backend still lets them
+> browse. Assign a group below to grant capabilities. Changes take effect on the
+> **next token issuance** — the user must sign out/in.
+
 ```bash
 aws cognito-idp admin-add-user-to-group \
   --user-pool-id <POOL_ID> --username alice@example.com --group-name g-admins-super

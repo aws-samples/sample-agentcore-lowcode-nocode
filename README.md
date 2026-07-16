@@ -267,6 +267,33 @@ aws cloudformation describe-stacks \
 
 Look for `CloudFrontUrl` (frontend), `ApiGatewayUrl` (API), and `S3BucketName` (frontend assets).
 
+### First sign-in — assign a persona (why a fresh user is "read-only")
+
+> **Important:** `COGNITO_USERS="you@example.com"` pre-creates a Cognito **user** but assigns it to **no group**. Group membership is what grants capability **scopes** (see [Personas & access](#agent-registry--roles--approval)), so a brand-new user signs in with an **empty `cognito:groups` claim → zero scopes**. The backend ships **advisory** (`RBAC_ENFORCE=false`), so the API still lets you *browse*, but the UI fails closed on scopes it can't find — the **"Clone to canvas" button is disabled**, publish is hidden, etc. That "read-only" experience is expected until you assign a group. The registry detail view's **Access tab** shows exactly which actions you can/can't perform and why.
+
+Assign yourself a persona after the first deploy (identity is an AWS/IdP responsibility — there is no in-app user-management screen by design):
+
+```bash
+POOL_ID=$(aws cognito-idp list-user-pools --max-results 40 \
+  --query "UserPools[?Name=='agentcore-workflow-dev-users'].Id | [0]" --output text)
+
+# Full access (all scopes) + admin UI + registry approver:
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username you@example.com --group-name g-admins-super
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username you@example.com --group-name t-admin
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username you@example.com --group-name registry-admin
+
+# ...or a standard end-user who can build/deploy/invoke + browse & clone the registry:
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username you@example.com --group-name g-users-default
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username you@example.com --group-name t-user
+```
+
+**Sign out and back in** (or refresh the token) after changing groups — scopes are read from the ID token at sign-in, so the change takes effect on the next token issuance. See the [group → scope map](#agent-registry--roles--approval) and [`docs/PERSONAS.md`](docs/PERSONAS.md) for the full model.
+
 ### Configuration
 
 | Variable | Default | Description |
@@ -274,7 +301,7 @@ Look for `CloudFrontUrl` (frontend), `ApiGatewayUrl` (API), and `S3BucketName` (
 | `ENVIRONMENT_NAME` | `dev` | Environment identifier (e.g., `dev`, `staging`, `prod`) |
 | `AWS_REGION` | `us-east-1` | Target AWS region |
 | `PROJECT_NAME` | `agentcore-workflow` | Project name used for resource naming and tagging |
-| `COGNITO_USERS` | *(none)* | Comma-separated emails for pre-created Cognito users (e.g., `user1@example.com,user2@example.com`) |
+| `COGNITO_USERS` | *(none)* | Comma-separated emails for pre-created Cognito users (e.g., `user1@example.com,user2@example.com`). **Users are created in NO group → no scopes → read-only until you assign a persona** (see [First sign-in](#first-sign-in--assign-a-persona-why-a-fresh-user-is-read-only)). |
 | `OTEL_ENDPOINT` | *(unset)* | OTLP HTTP endpoint for platform-level observability (e.g. `https://cloud.langfuse.com/api/public/otel`). When set, every platform Lambda + every deployed agent exports traces here. Per-canvas Observability nodes can still add resource attributes additively but cannot override the endpoint. |
 | `OTEL_AUTH_SECRET_ARN` | *(unset)* | ARN of a Secrets Manager secret holding the precomputed `Authorization` header value (e.g. `Basic <base64>`). Created by `scripts/bootstrap-otel-secret.sh`. Required when `OTEL_ENDPOINT` is set. |
 | `OTEL_SAMPLE_RATE` | `1.0` | Trace sampling ratio (0.0–1.0). |
@@ -754,13 +781,31 @@ The CFN generator supports both built-in templates (all 7) and free-form diagram
 
 ## Agent Registry — Roles & Approval
 
-The registry turns a deployed agent into a reusable, governed blueprint others can discover and clone. It uses a **two-persona model driven entirely by Cognito groups** — no separate auth system.
+The registry turns a deployed agent into a reusable, governed blueprint others can discover and clone. Access is **driven entirely by Cognito groups** — no separate auth system. Two group families cooperate:
 
-### Personas
+1. **Scope groups** (`g-admins-*` / `g-users-*`) grant capability **scopes** — the actual enforcement boundary. Registry actions map to `registry:read` (browse, view, **clone**) and `registry:write` (publish, edit, delete, approve, reject).
+2. **Registry-persona groups** (`registry-admin` / `registry-developer`) drive the **two-persona approval workflow** (who may approve vs only publish).
+
+> **A user in NO group has NO scopes → effectively read-only.** `registry:read` gates the **Clone to canvas** button, so a freshly-provisioned user (e.g. one created via `COGNITO_USERS`, which assigns no group) can browse but **cannot clone or publish** until a scope group is assigned. This is the most common "why is Clone greyed out?" cause — see [First sign-in — assign a persona](#first-sign-in--assign-a-persona-why-a-fresh-user-is-read-only). The registry detail **Access tab** renders exactly which actions the signed-in user can/can't perform, and why.
+
+### Group → scope map (source of truth: `backend/src/app/services/rbac.py` `GROUP_SCOPES`)
+
+| Cognito group | Scopes granted | Registry capability |
+|---------------|----------------|---------------------|
+| `g-admins-super` (legacy `org-admin`) | `admin` (implies all) + `invoke` | Everything |
+| `g-admins-registry` (legacy `registry-admin`) | `registry:read`, `registry:write` | Publish, clone, edit/delete, approve/reject |
+| `g-users-default` | `invoke`, `agent:read`, `cost:read`, `prompt:read`, **`registry:read`** | Browse + **clone** approved entries; publish own via `registry-developer`; **cannot** approve |
+| `g-admins-security` | `settings:read/write`, `observability:read` | — (no registry scopes) |
+| `g-admins-cost` | `cost:read/write` | — (no registry scopes) |
+| *(no group)* | *(none)* | Browse only (advisory backend); **Clone disabled** |
+
+`t-admin` / `t-user` are a separate **UI dimension** — they decide which admin sections render, not what you're authorized to do (scopes do that). A typical user gets one type group + one scope group. Mirrored in the UI at `frontend/src/auth/scopes.ts` (keep in sync).
+
+### Registry personas (the approval workflow, on top of scopes)
 
 | Persona | Cognito group | Can do | Cannot do |
 |---------|---------------|--------|-----------|
-| **Developer** | `registry-developer` (or any signed-in user) | Publish (entry enters `pending`); view **approved** entries + their **own** (any status); clone approved/own; edit/delete their own | Approve or reject; see other users' pending entries |
+| **Developer** | `registry-developer` (+ a scope group granting `registry:read`/`registry:write`) | Publish (entry enters `pending`); view **approved** entries + their **own** (any status); clone approved/own; edit/delete their own | Approve or reject; see other users' pending entries |
 | **Admin** | `registry-admin` (legacy `org-admin` also honored) | Everything a developer can, **plus**: see the pending-review queue, approve/reject submissions, delete any entry | — |
 
 ### Entry lifecycle
@@ -783,15 +828,29 @@ developer publishes ──▶ pending ──▶ (admin approves) ──▶ appro
 
 ### Assigning personas
 
+All groups below are created by the CDK stack at deploy time (`platform_stack.py`), so you only *assign* users. Give each user a **scope group** (what they can do) plus the matching **registry-persona group** (approver vs publisher):
+
 ```bash
-# Create the two Cognito groups (the CDK stack also defines them at deploy time)
-aws cognito-idp admin-add-user-to-group \
-  --user-pool-id <POOL_ID> --username alice@example.com --group-name registry-admin
-aws cognito-idp admin-add-user-to-group \
-  --user-pool-id <POOL_ID> --username bob@example.com   --group-name registry-developer
+POOL_ID=$(aws cognito-idp list-user-pools --max-results 40 \
+  --query "UserPools[?Name=='agentcore-workflow-dev-users'].Id | [0]" --output text)
+
+# An approver: registry admin scopes + the approver persona + admin UI
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username alice@example.com --group-name g-admins-registry
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username alice@example.com --group-name registry-admin
+
+# A standard developer: read-only defaults incl. registry:read (browse + clone),
+# plus the developer persona so they can publish their own blueprints
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username bob@example.com --group-name g-users-default
+aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+  --username bob@example.com --group-name registry-developer
 ```
 
-In the UI: developers click **Publish to Registry** in the Deploy panel after a deploy, and **Registry** in the component palette to browse and **Clone to Canvas**. Admins additionally see a **Pending review** tab with Approve / Reject actions.
+> Group changes take effect on the **next token issuance** — have the user **sign out and back in** (or refresh the session). If Cognito is federated to Okta/Entra, map the IdP group claim to these names and assign in the IdP instead — zero platform change.
+
+In the UI: developers click **Publish to Registry** in the Deploy panel after a deploy, and **Registry** in the component palette to browse and **Clone to Canvas** (Clone requires `registry:read`). Admins additionally see a **Pending review** tab with Approve / Reject actions.
 
 > The registry roles above are one slice of the platform-wide persona/scope model. For the full group→scope map (super-admin, security, cost, standard-user, …), how personas are *defined* (`rbac.py` `GROUP_SCOPES`), *created* (CDK `CfnUserPoolGroup`), and *assigned* (AWS Cognito / federated IdP), see [`docs/PERSONAS.md`](docs/PERSONAS.md).
 

@@ -21,6 +21,7 @@ heuristic ever returns False on a production code path (Critic Finding 3).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 from fastapi import HTTPException, Request
@@ -115,10 +116,38 @@ def extract_cognito_groups(request: Request) -> list[str]:
         authz = aws_event["requestContext"]["authorizer"]
         jwt = authz.get("jwt") or authz
         claims = jwt.get("claims") or jwt
-        raw = claims.get("cognito:groups")
     except (KeyError, TypeError, AttributeError) as e:
-        logger.warning("Could not extract cognito:groups from authorizer: %s", e)
+        logger.warning("Could not extract claims from authorizer: %s", e)
         return []
+
+    groups = _parse_group_claim(claims.get("cognito:groups"))
+
+    # Loom-study 1.1 — 3rd-party IdP federation. A federated user's groups arrive
+    # under the IdP's own claim (e.g. Okta "groups"), NOT cognito:groups. When
+    # OIDC_GROUPS_CLAIM is configured, ALSO read that claim and map its values to
+    # our internal g-*/t-* vocabulary via OIDC_GROUP_MAP (JSON {external:internal}).
+    # Unmapped external groups are dropped (fail-closed: an unknown IdP group
+    # grants nothing). This keeps rbac.GROUP_SCOPES keyed on our own names.
+    ext_claim = os.environ.get("OIDC_GROUPS_CLAIM")
+    if ext_claim:
+        ext_groups = _parse_group_claim(claims.get(ext_claim))
+        if ext_groups:
+            try:
+                mapping = _json.loads(os.environ.get("OIDC_GROUP_MAP") or "{}")
+            except ValueError:
+                mapping = {}
+            for g in ext_groups:
+                mapped = mapping.get(g)
+                if mapped:
+                    groups.append(str(mapped))
+    # De-dup while preserving order.
+    seen: set[str] = set()
+    return [g for g in groups if not (g in seen or seen.add(g))]
+
+
+def _parse_group_claim(raw) -> list[str]:
+    """Parse a group claim that may be a list, JSON-array string, or delimited."""
+    import json as _json
 
     if isinstance(raw, list):
         return [str(g) for g in raw]
@@ -131,7 +160,6 @@ def extract_cognito_groups(request: Request) -> list[str]:
                     return [str(g) for g in parsed]
             except ValueError:
                 pass
-        # Cognito also delivers groups as a bracketed/space/comma list.
         s = s.strip("[]")
         return [g.strip() for g in s.replace(",", " ").split() if g.strip()]
     return []

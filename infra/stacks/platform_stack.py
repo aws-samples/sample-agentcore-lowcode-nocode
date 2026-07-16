@@ -1638,6 +1638,12 @@ class PlatformStack(cdk.Stack):
                 "AUDIT_TABLE_NAME": self.audit_table.table_name,
                 # Loom-study 1.6 — JIT IAM permission-request workflow table.
                 "PERMISSION_REQUESTS_TABLE_NAME": self.permission_requests_table.table_name,
+                # Loom-study 1.1 — 3rd-party IdP group-claim mapping. When OIDC
+                # federation is configured, a federated user's groups arrive under
+                # this claim and are mapped to internal g-*/t-* groups by
+                # services/auth.extract_cognito_groups. Empty when not federated.
+                "OIDC_GROUPS_CLAIM": self.node.try_get_context("oidc_groups_claim") or "",
+                "OIDC_GROUP_MAP": self.node.try_get_context("oidc_group_map") or "",
                 "ARTIFACTS_BUCKET_NAME": self.artifacts_bucket.bucket_name,
                 "ENVIRONMENT": self._env,
                 "APP_AWS_REGION": self.region,
@@ -3051,6 +3057,32 @@ class PlatformStack(cdk.Stack):
             refresh_token_validity=Duration.days(7),
         )
 
+        # Loom-study 1.1 — OPT-IN 3rd-party OIDC IdP federation (Entra/Okta/Auth0/
+        # generic OIDC). Federating INTO Cognito (vs Loom's in-app multi-issuer
+        # validation) keeps the API-Gateway Cognito JWT authorizer unchanged —
+        # the serverless-correct fit. Enabled only when oidc_* context is set, so
+        # the default password-auth flow is undisturbed. Config:
+        #   -c oidc_provider_name=Okta -c oidc_issuer=https://... \
+        #   -c oidc_client_id=... -c oidc_client_secret=... \
+        #   [-c oidc_groups_claim=groups] [-c oidc_hosted_domain_prefix=...]
+        _oidc_name = self.node.try_get_context("oidc_provider_name")
+        _oidc_issuer = self.node.try_get_context("oidc_issuer")
+        _oidc_client_id = self.node.try_get_context("oidc_client_id")
+        _oidc_client_secret = self.node.try_get_context("oidc_client_secret")
+        if _oidc_name and _oidc_issuer and _oidc_client_id and _oidc_client_secret:
+            self._configure_oidc_federation(
+                pool, client,
+                provider_name=str(_oidc_name),
+                issuer=str(_oidc_issuer),
+                client_id=str(_oidc_client_id),
+                client_secret=str(_oidc_client_secret),
+                groups_claim=str(self.node.try_get_context("oidc_groups_claim") or "groups"),
+                domain_prefix=str(
+                    self.node.try_get_context("oidc_hosted_domain_prefix")
+                    or f"{self._project}-{self._env}-{self.account}"
+                )[:63],
+            )
+
         # Two-persona approval workflow groups for the agent registry.
         # 'registry-admin' members can approve/reject submissions and manage any
         # entry; 'registry-developer' members publish (pending) and manage their
@@ -3159,6 +3191,66 @@ class PlatformStack(cdk.Stack):
                 user_cr.node.add_dependency(pool)
 
         return pool, client
+
+    def _configure_oidc_federation(
+        self, pool, client, *, provider_name: str, issuer: str,
+        client_id: str, client_secret: str, groups_claim: str, domain_prefix: str,
+    ) -> None:
+        """Attach an external OIDC IdP to the Cognito pool (Loom-study 1.1).
+
+        Adds (1) an OIDC identity provider with attribute mapping (email + the
+        external group claim mapped to the Cognito ``custom:ext_groups`` attribute
+        via a pre-token trigger downstream / or directly into a group claim), (2)
+        a hosted-UI domain so the SPA can redirect to the IdP, and (3) supported
+        identity providers + OAuth flows on the app client. Idempotent-by-name.
+
+        Group→internal-group mapping: the external claim (e.g. Okta ``groups``) is
+        surfaced so services/auth can normalize it — see docs/PERSONAS.md. Cognito
+        maps OIDC claims to standard/custom attributes; the group claim is carried
+        through and read by the backend group resolver.
+        """
+        idp = cognito.CfnUserPoolIdentityProvider(
+            self,
+            "OidcIdentityProvider",
+            user_pool_id=pool.user_pool_id,
+            provider_name=provider_name,
+            provider_type="OIDC",
+            provider_details={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "oidc_issuer": issuer,
+                "authorize_scopes": "openid email profile",
+                "attributes_request_method": "GET",
+            },
+            # Map the OIDC email claim to the Cognito email attribute so federated
+            # users resolve to an email identity. The group claim is carried in the
+            # token and normalized backend-side (services/auth group resolver).
+            attribute_mapping={"email": "email"},
+        )
+
+        # Hosted-UI domain — required for the federated authorization-code redirect.
+        cognito.CfnUserPoolDomain(
+            self,
+            "CognitoHostedDomain",
+            user_pool_id=pool.user_pool_id,
+            domain=domain_prefix,
+        )
+
+        # Wire the app client to accept the federated IdP + code flow. The client
+        # must depend on the IdP existing first (CFN ordering).
+        cfn_client = client.node.default_child
+        cfn_client.supported_identity_providers = ["COGNITO", provider_name]
+        cfn_client.allowed_o_auth_flows = ["code"]
+        cfn_client.allowed_o_auth_scopes = ["openid", "email", "profile"]
+        cfn_client.allowed_o_auth_flows_user_pool_client = True
+        cfn_client.add_dependency(idp)
+
+        CfnOutput(self, "OidcProviderName", value=provider_name)
+        CfnOutput(self, "OidcGroupsClaim", value=groups_claim)
+        CfnOutput(
+            self, "CognitoHostedUiDomain",
+            value=f"https://{domain_prefix}.auth.{self.region}.amazoncognito.com",
+        )
 
     # ------------------------------------------------------------------
     # API Gateway HTTP API

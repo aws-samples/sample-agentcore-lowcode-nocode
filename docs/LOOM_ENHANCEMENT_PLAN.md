@@ -82,6 +82,16 @@ These are bugs/dead-config in OUR code, independent of the Loom roadmap.
 
 ---
 
+> **Phase 3 status: SHIPPED + verified live (2026-07-16).** Both items built,
+> tested (3 stream-invoke tests + 232 frontend suite), deployed. A real
+> stream-error-swallow bug was caught by the new test + fixed. Verified live: the
+> deployed CloudFront bundle contains the ChatPage; the agent-picker data path
+> (GET /api/deployments?status=succeeded) returns 200; and a freshly-created
+> t-user's token resolves to groups [t-user, g-users-default] + consumer scopes
+> (invoke/agent:read, no admin) — confirming the isTypeAdmin→ChatPage routing.
+> Test end-user removed. NOTE: agent visibility is owner-scoped today; Loom's
+> group-shared visibility is a documented backend follow-up.
+
 ## Phase 3 — End-user Chat persona (biggest NEW capability; we're builder-only)
 
 | # | Capability | Approach | Effort |

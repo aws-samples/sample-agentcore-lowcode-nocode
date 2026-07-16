@@ -23,6 +23,8 @@ from aws_cdk import aws_cloudfront as cloudfront
 from aws_cdk import aws_cloudfront_origins as origins
 from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
+from aws_cdk import aws_events as events
+from aws_cdk import aws_events_targets as events_targets
 from aws_cdk import aws_iam as iam
 from aws_cdk import aws_lambda as _lambda
 from aws_cdk import aws_logs as logs
@@ -1619,6 +1621,29 @@ class PlatformStack(cdk.Stack):
                     f"{self._project}-{self._env}-deployment"
                 ],
             )
+        )
+
+        # Loom-study 0.6 — scheduled Cedar-ENFORCE promotion sweep. A Cedar
+        # ENFORCE gateway attaches FAIL-CLOSED with its permit pending until the
+        # gateway's authorization plane converges (20-59+ min, AWS-side). The lazy
+        # promoter only fires on USER touchpoints (invoke / status GET); an idle
+        # ENFORCE agent with no touchpoints would stay deny-all indefinitely
+        # (observed live in P-PLAT-027). This rule self-drives the promoter every
+        # 5 min by invoking the deployment Lambda with a {"policy_sweep": true}
+        # sentinel (handled in deployment_handler.handler → policy_sweep_step).
+        events.Rule(
+            self,
+            "PolicySweepSchedule",
+            rule_name=f"{self._project}-{self._env}-policy-sweep",
+            description="Self-drive pending Cedar ENFORCE promotions (Loom-study 0.6)",
+            schedule=events.Schedule.rate(Duration.minutes(5)),
+            targets=[
+                events_targets.LambdaFunction(
+                    fn,
+                    event=events.RuleTargetInput.from_object({"policy_sweep": True}),
+                    retry_attempts=2,
+                )
+            ],
         )
         return fn
 

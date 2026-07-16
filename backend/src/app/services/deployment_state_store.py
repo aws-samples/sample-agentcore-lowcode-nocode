@@ -552,3 +552,35 @@ class DeploymentStateStore:
             kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
 
         return [deserialize_deployment_state(_convert_decimals_to_floats(item)) for item in items]
+
+    def scan_pending_enforce(self, max_items: int = 200) -> list[DeploymentState]:
+        """Return deployments whose Cedar ENFORCE promotion is still pending.
+
+        Used by the scheduled policy-sweep (EventBridge) so a permit converges to
+        ACTIVE even when NO user touchpoint (invoke/status poll) fires after the
+        gateway's authorization plane finishes converging (20-59+ min, AWS-side).
+        Without this self-drive, a deployed-and-idle ENFORCE agent's tool plane
+        can stay fail-closed (deny-all) indefinitely (observed live in P-PLAT-027).
+
+        A bounded FilterExpression scan is acceptable here: pending-enforce rows
+        are rare and short-lived, and this runs on a schedule (not per-request).
+        `max_items` caps the sweep so a large table can't blow the Lambda budget;
+        the next tick picks up any remainder.
+        """
+        items: list[dict] = []
+        kwargs: dict = {
+            "FilterExpression": "attribute_exists(policy_result.enforce_pending) "
+                                "AND policy_result.enforce_pending <> :null",
+            "ExpressionAttributeValues": {":null": None},
+        }
+        while len(items) < max_items:
+            resp = self._table.scan(**kwargs)
+            items.extend(resp.get("Items", []))
+            if "LastEvaluatedKey" not in resp:
+                break
+            kwargs["ExclusiveStartKey"] = resp["LastEvaluatedKey"]
+
+        return [
+            deserialize_deployment_state(_convert_decimals_to_floats(item))
+            for item in items[:max_items]
+        ]

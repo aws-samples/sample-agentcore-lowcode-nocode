@@ -2293,6 +2293,12 @@ def handler(event, context):
             return _handle_async_test(event)
         if event.get("_async_generate"):
             return _handle_async_generate(event)
+        # EventBridge-scheduled Cedar-ENFORCE promotion sweep (Loom-study 0.6):
+        # self-drives pending permits to ACTIVE without a user touchpoint.
+        if event.get("policy_sweep") or (event.get("source") == "aws.events"
+                                         and event.get("detail-type") == "policy-sweep"):
+            from app.step_handlers.policy_sweep_step import handler as _sweep
+            return _sweep(event, context)
 
     # Normal API Gateway request → Mangum/FastAPI
     return _mangum_handler(event, context)

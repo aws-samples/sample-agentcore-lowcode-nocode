@@ -11,6 +11,15 @@ Each item: **value × fit-to-our-arch**, effort (S/M/L), and whether it's a
 
 ---
 
+> **Phase 0 status: SHIPPED + verified live (2026-07-16).** Deployed to
+> agentcore-workflow-dev (us-east-1) via `deploy.sh`. Verified end-to-end:
+> baseline deploy→invoke returned its canary; the EventBridge policy-sweep rule
+> is ENABLED at rate(5min) and a direct invoke returned `{swept:2, promoted:0,
+> failed:0}`; the runtime_configure step role carries `iam:CreateServiceLinkedRole`
+> (0.1) + `secretsmanager:GetSecretValue` (0.2); an audited call with X-Session-Id
+> produced an audit row carrying that session_uuid (0.5). All test resources torn
+> down, zero orphans.
+
 ## Phase 0 — Real defects the study exposed (fix first; low risk, high correctness)
 
 These are bugs/dead-config in OUR code, independent of the Loom roadmap.

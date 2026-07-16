@@ -61,6 +61,16 @@ These are bugs/dead-config in OUR code, independent of the Loom roadmap.
 
 ---
 
+> **Phase 2 status: SHIPPED + verified live (2026-07-16).** All 4 items built,
+> tested (12 phase tests + 162 regression), deployed to agentcore-workflow-dev.
+> Live verify caught a real wiring bug — the runtime_configure STEP Lambda lacked
+> TAG_POLICY_TABLE_NAME env + tag-policy read grant, so LOOM_APPROVAL_POLICIES was
+> never injected; fixed + redeployed. Confirmed live: approval-policy CRUD works
+> (2.2); a deployed runtime now carries the injected
+> LOOM_APPROVAL_POLICIES=[{danger-tools,require}] env so the guaranteed
+> BeforeToolInvocation hook enforces it (2.1); GET /api/hitl/logs is live (2.3);
+> harness invoke-boundary approval detection (2.4). Zero orphans.
+
 ## Phase 2 — HITL hardening (we have voluntary HITL; Loom has guaranteed HITL)
 
 | # | Capability | Approach | Effort |

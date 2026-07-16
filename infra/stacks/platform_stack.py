@@ -3294,11 +3294,20 @@ class PlatformStack(cdk.Stack):
         )
 
         # Workflow Lambda integration
-        workflow_integration = apigw_integrations.HttpLambdaIntegration("WorkflowIntegration", self.workflow_lambda)
+        # scope_permission_to_route=False grants ONE broad lambda:InvokeFunction
+        # permission per integration instead of one AWS::Lambda::Permission per
+        # route. The deployment Lambda backs ~29 routes; per-route permissions
+        # pushed its resource-based policy past the 20,480-byte hard limit
+        # (deploy failed with "final policy size ... bigger than the limit").
+        # A single wildcard-source-ARN permission is functionally equivalent
+        # (API Gateway is still the only invoker) and keeps the policy tiny.
+        workflow_integration = apigw_integrations.HttpLambdaIntegration(
+            "WorkflowIntegration", self.workflow_lambda, scope_permission_to_route=False
+        )
 
         # Deployment Lambda integration
         deployment_integration = apigw_integrations.HttpLambdaIntegration(
-            "DeploymentIntegration", self.deployment_lambda
+            "DeploymentIntegration", self.deployment_lambda, scope_permission_to_route=False
         )
 
         # JWT Authorizer (Cognito)

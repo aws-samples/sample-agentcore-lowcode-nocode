@@ -1741,8 +1741,14 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
     # Step 1.5: Clean up Knowledge Base resources
     kb_result = (deployment_record or {}).get("knowledge_base_result") or {}
     dep_id = (deployment_record or {}).get("deployment_id", "")
+    # NOTE: run this EVEN WHEN manifest_used. The KB-as-gateway-tool Lambda and
+    # its execution role (AgentCoreKBToolRole-<dep8>) are created by the gateway
+    # deployer with deterministic names derived from the deployment id, but they
+    # are NOT recorded in the teardown manifest — so manifest-driven teardown
+    # would orphan the IAM role (observed live in the E2E matrix run). Deleting
+    # by deterministic name is idempotent and safe in both paths.
     kb_lambda_suffix = dep_id[:8] if dep_id else ""
-    if kb_lambda_suffix and not manifest_used:
+    if kb_lambda_suffix:
         try:
             lambda_client = boto3.client("lambda", region_name=region)
             kb_fn_name = f"AgentCore-KBTool-{kb_lambda_suffix}"
@@ -1773,7 +1779,16 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
             kb_id = kb_result.get("kb_id")
             ds_id = kb_result.get("data_source_id")
             if ds_id and kb_id:
-                bedrock_agent.delete_data_source(knowledgeBaseId=kb_id, dataSourceId=ds_id)
+                # A KB delete with dataDeletionPolicy=DELETE cascades and removes
+                # the data source first, so an explicit DeleteDataSource can race
+                # to ResourceNotFoundException. That is SUCCESS (the DS is gone),
+                # not a cleanup failure — swallow not-found so the KB leg isn't
+                # falsely reported success=false while everything actually deleted.
+                try:
+                    bedrock_agent.delete_data_source(knowledgeBaseId=kb_id, dataSourceId=ds_id)
+                except Exception as ds_exc:  # noqa: BLE001
+                    if "NotFound" not in str(ds_exc) and "does not exist" not in str(ds_exc).lower():
+                        raise
             if kb_id:
                 bedrock_agent.delete_knowledge_base(knowledgeBaseId=kb_id)
                 cleanup_messages.append(f"Knowledge Base deleted: {kb_id}")

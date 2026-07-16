@@ -1910,6 +1910,21 @@ class PlatformStack(cdk.Stack):
                     f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:agentcore-provider/*",
                 ],
             ))
+            # VPC egress (Loom-study 0.1): a VPC-mode runtime makes AWS lazily
+            # create the AWSServiceRoleForBedrockAgentCoreNetwork service-linked
+            # role on first use. Without CreateServiceLinkedRole (scoped to that
+            # SLR) the FIRST VPC-mode deploy in an account fails. Scoped by the
+            # iam:AWSServiceName condition so it can only create THIS SLR.
+            role.add_to_policy(iam.PolicyStatement(
+                actions=["iam:CreateServiceLinkedRole"],
+                resources=[
+                    f"arn:aws:iam::{self.account}:role/aws-service-role/"
+                    "network.bedrock-agentcore.amazonaws.com/AWSServiceRoleForBedrockAgentCoreNetwork*"
+                ],
+                conditions={"StringEquals": {
+                    "iam:AWSServiceName": "network.bedrock-agentcore.amazonaws.com"
+                }},
+            ))
 
         # policy step calls update_gateway(roleArn=...) when binding the
         # PolicyEngine — re-passing the gateway's existing role triggers

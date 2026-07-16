@@ -244,6 +244,7 @@ def handler(event: dict, context) -> dict:
             python_runtime=config.python_runtime or "PYTHON_3_13",
             protocol=server_protocol,
             env_vars=env_vars if env_vars else None,
+            vpc_config=getattr(config, "vpc_config", None),
         )
 
         # Manifest: record the runtime for generic teardown right after create

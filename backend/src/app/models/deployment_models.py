@@ -251,6 +251,10 @@ class RuntimeConfig(BaseModel):
     # Optional base URL for OpenAI-compatible providers / a self-hosted LiteLLM
     # proxy. Injected as PROVIDER_BASE_URL and read by the generated model init.
     provider_base_url: Optional[str] = Field(alias="providerBaseUrl", default=None, max_length=512)
+    # VPC egress (Loom-study 0.1). When set, the runtime is created in VPC network
+    # mode with these subnets/SGs so it can reach VPC-private resources. Accepts a
+    # {subnet_ids, security_group_ids} dict; None → PUBLIC network mode.
+    vpc_config: Optional[dict] = Field(alias="vpcConfig", default=None)
     # Multi-agent pattern
     multi_agent_pattern: str = Field(alias="multiAgentPattern", default="none")
     multi_agent_config: Optional[dict] = Field(alias="multiAgentConfig", default=None)

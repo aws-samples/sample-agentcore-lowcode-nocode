@@ -341,6 +341,27 @@ def create_runtime_iam_role(
     return role_arn
 
 
+def _build_network_configuration(vpc_config: Optional[dict]) -> dict:
+    """Build the AgentCore networkConfiguration block.
+
+    VPC mode (Loom-study 0.1) when vpc_config carries subnets + security groups;
+    PUBLIC otherwise. Accepts both snake_case (our model) and camelCase keys.
+    Verified against the live control-plane model: networkModeConfig = VpcConfig
+    {subnets, securityGroups}.
+    """
+    if not vpc_config:
+        return {"networkMode": "PUBLIC"}
+    subnets = vpc_config.get("subnet_ids") or vpc_config.get("subnets") or []
+    sgs = vpc_config.get("security_group_ids") or vpc_config.get("securityGroups") or []
+    if not subnets or not sgs:
+        # Incomplete VPC config → fail safe to PUBLIC rather than a rejected call.
+        return {"networkMode": "PUBLIC"}
+    return {
+        "networkMode": "VPC",
+        "networkModeConfig": {"subnets": list(subnets), "securityGroups": list(sgs)},
+    }
+
+
 def create_agent_runtime(
     agentcore_ctrl,
     runtime_name: str,
@@ -352,11 +373,19 @@ def create_agent_runtime(
     protocol: str = "HTTP",
     env_vars: Optional[dict] = None,
     authorizer_config: Optional[dict] = None,
+    vpc_config: Optional[dict] = None,
 ) -> dict:
     """Create an AgentCore runtime using the boto3 control API.
 
+    ``vpc_config`` (Loom-study 0.1): when supplied ({subnet_ids, security_group_ids})
+    the runtime is created in VPC network mode so it can reach VPC-private
+    resources. Previously networkMode was HARDCODED to PUBLIC and the modeled
+    vpc_config field was read by no deployer (dead config). Falls back to PUBLIC
+    when absent.
+
     Returns dict with runtime_id, arn, status.
     """
+    network_configuration = _build_network_configuration(vpc_config)
     create_params = {
         "agentRuntimeName": runtime_name,
         "agentRuntimeArtifact": {
@@ -372,7 +401,7 @@ def create_agent_runtime(
             }
         },
         "roleArn": role_arn,
-        "networkConfiguration": {"networkMode": "PUBLIC"},
+        "networkConfiguration": network_configuration,
         "protocolConfiguration": {"serverProtocol": protocol},
     }
 

@@ -18,6 +18,7 @@ These are bugs/dead-config in OUR code, independent of the Loom roadmap.
 | # | Defect | Where | Effort |
 |---|--------|-------|--------|
 | 0.1 | **VPC config is modeled but never read** — `RuntimeConfiguration.vpc_config` exists but `runtime_deployer.py` + `cfn_template_generator.py` hardcode `networkMode=PUBLIC`. The field is dead. | `runtime_deployer.py`, `cfn_template_generator.py` | M |
+| — | *0.1 scope note:* the LIVE deploy path (runtime_configure → create/update_agent_runtime) is now VPC-capable + the VPC service-linked-role IAM grant is added. The **CFN-export** path (`cfn_template_generator.py` lines ~1983/2256) still hardcodes PUBLIC — threading VPC into the downloadable template is an additive follow-up. | | |
 | 0.2 | **Alternate-provider model init emits NO credentials** — selecting litellm/openai/anthropic generates a model with no `base_url`/`api_key` (only groq/deepseek/writer get env keys). Selecting those providers produces a broken agent. | `code_generator.py:_get_model_init_code` | S |
 | 0.3 | **OBO gateway target hardcodes `CLIENT_CREDENTIALS`** even when `delegation_mode=obo` — the OBO provider is minted correctly but the target still requests client-credentials, so OBO never actually exchanges. | `gateway_deployer.py` (~target cred config) | S |
 | 0.4 | **AWS Agent Registry auto-registration has zero callers** — `aws_agent_registry.register()` exists but nothing invokes it on deploy; the federation feature is wired but never fires. | `step_handlers/status_update_step.py` | M |

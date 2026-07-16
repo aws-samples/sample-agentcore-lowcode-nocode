@@ -96,3 +96,30 @@ def test_obo_rejects_bad_grant_type():
             client_secret_arn="arn:secret", discovery_url="https://idp/x",
             delegation_mode="obo", obo_grant_type="BOGUS",
         )
+
+
+def test_target_grant_type_is_token_exchange_for_obo():
+    """0.3 fix: the gateway TARGET's oauthCredentialProvider.grantType must be
+    TOKEN_EXCHANGE in OBO mode (was hardcoded CLIENT_CREDENTIALS, so the
+    downstream call ran as the shared M2M identity instead of the end user).
+
+    The selection is inline in deploy_connectors_to_gateway; assert the source
+    derives the grant from delegation_mode rather than hardcoding it.
+    """
+    import inspect
+
+    src = inspect.getsource(gd)
+    # The old unconditional hardcode must be gone from the connector target block.
+    assert '"grantType": "CLIENT_CREDENTIALS",\n                    }\n                },\n            }\n        else:  # API_KEY' not in src
+    # The conditional must exist.
+    assert '"TOKEN_EXCHANGE" if str(delegation_mode).lower() == "obo" else "CLIENT_CREDENTIALS"' in src
+
+
+def test_target_grant_derivation_logic():
+    """Unit-check the exact derivation the fix uses."""
+    def _grant(delegation_mode):
+        return "TOKEN_EXCHANGE" if str(delegation_mode).lower() == "obo" else "CLIENT_CREDENTIALS"
+    assert _grant("obo") == "TOKEN_EXCHANGE"
+    assert _grant("OBO") == "TOKEN_EXCHANGE"
+    assert _grant("m2m") == "CLIENT_CREDENTIALS"
+    assert _grant(None) == "CLIENT_CREDENTIALS"

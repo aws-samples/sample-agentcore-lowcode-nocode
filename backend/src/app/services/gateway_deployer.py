@@ -2509,13 +2509,22 @@ def _deploy_connector_targets_inner(
                 delegation_mode=delegation_mode,
                 obo_grant_type=obo_grant_type,
             )
+            # OBO fix (Loom-study 0.3): the credential PROVIDER is minted for
+            # on-behalf-of exchange when delegation_mode=obo, but the target's
+            # oauthCredentialProvider previously ALWAYS requested CLIENT_CREDENTIALS
+            # — so the downstream call ran as the shared M2M identity, never as the
+            # end user. The OAuthCredentialProvider.grantType enum is
+            # {CLIENT_CREDENTIALS, AUTHORIZATION_CODE, TOKEN_EXCHANGE}; OBO must
+            # request TOKEN_EXCHANGE so AgentCore Identity performs the RFC 8693
+            # exchange and the downstream token carries the user's identity+scopes.
+            _target_grant = "TOKEN_EXCHANGE" if str(delegation_mode).lower() == "obo" else "CLIENT_CREDENTIALS"
             cred_cfg = {
                 "credentialProviderType": "OAUTH",
                 "credentialProvider": {
                     "oauthCredentialProvider": {
                         "providerArn": provider_arn,
                         "scopes": conn.get("scopes") or catalog.get("default_scopes") or [],
-                        "grantType": "CLIENT_CREDENTIALS",
+                        "grantType": _target_grant,
                     }
                 },
             }

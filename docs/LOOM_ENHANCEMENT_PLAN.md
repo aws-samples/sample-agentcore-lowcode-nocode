@@ -130,6 +130,34 @@ These are bugs/dead-config in OUR code, independent of the Loom roadmap.
 
 ---
 
+> **Phase 5 status: SHIPPED + verified live (2026-07-16).** All 4 items built,
+> tested (full backend suite 1093 pass / 0 fail after fixing a pre-existing stale
+> KB-ingestion mock), deployed to `agentcore-workflow-dev` (UPDATE_COMPLETE, 142s,
+> no rollback). Verified live against the real API + deployment Lambda:
+> - **5.1** `GET /api/models` → HTTP 200 with **75 live models** (29 inference
+>   profiles + 46 foundation models) discovered from real Bedrock, curated overlay
+>   applying friendly labels — proving the new `bedrock:List*` grants + route +
+>   merge/dedup work end-to-end (no fallback triggered).
+> - **5.2** `GET /api/admin/audit` → HTTP 200 carrying the new analytics keys
+>   `distinct_actors` (4), `distinct_sessions` (1), and the chart-ready `by_day`
+>   time-series, over 66 real audited events.
+> - **5.3** the `{"cost_reconcile": true}` EventBridge sentinel invoked the live
+>   deployment Lambda → `{reconciled, breached, skipped, failed}`. With a real
+>   owner budget + a tag budget present it returned `reconciled:1, skipped:1`
+>   (tag scope correctly skipped — no tag→runtime index), proving the scheduled
+>   self-drive path over real DynamoDB + budget store. The `CostReconcileSchedule`
+>   rate(24h) rule + Lambda permission are live in CloudFormation.
+> - **5.4** the four OpenAI-compat/LiteLLM providers (groq/deepseek/together/writer)
+>   now read the deploy-injected `PROVIDER_API_KEY` — verified at the codegen layer
+>   (6 provider-credential tests, `ast.parse`-validated init lines).
+>
+> **Honest verification boundary:** 5.4's *functional* invoke (a live non-Bedrock
+> agent actually calling e.g. Groq) was NOT exercised — it needs a real third-party
+> API key + provider account this Bedrock-only test account doesn't have. The bug
+> fixed was a real latent 401 (the injected secret was never consumed by those four
+> providers); the fix is proven correct at the generation layer. All live test
+> artifacts (2 budgets + 1 Cognito user) torn down, zero orphans.
+
 ## Phase 5 — Analytics & alternate models (valuable; some external-infra-bound)
 
 | # | Capability | Approach | Effort / caveat |

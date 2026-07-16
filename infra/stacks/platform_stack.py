@@ -3294,6 +3294,21 @@ class PlatformStack(cdk.Stack):
             integration=deployment_integration,
             authorizer=jwt_authorizer,
         )
+        # Verified external MCP-server catalog (read-only). GET list + GET /{id}
+        # detail on the deployment Lambda (routers/mcp_servers.py). Browsable in
+        # the Registry UI alongside published agent blueprints.
+        api.add_routes(
+            path="/api/mcp-servers",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
+        api.add_routes(
+            path="/api/mcp-servers/{proxy+}",
+            methods=[apigwv2.HttpMethod.GET],
+            integration=deployment_integration,
+            authorizer=jwt_authorizer,
+        )
         # Phase 3 Gap 3H — prompt management library. POST save + GET list on
         # the collection, plus GET/PUT/DELETE on /{prompt_name} via proxy.
         # Mounted on the deployment Lambda (routers/prompts.py).

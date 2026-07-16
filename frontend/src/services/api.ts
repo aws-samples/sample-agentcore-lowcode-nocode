@@ -1159,6 +1159,57 @@ export interface RegistryCloneResponse {
   canvas_snapshot: RegistryCanvasSnapshot;
 }
 
+// ---------------------------------------------------------------------------
+// Verified external MCP-server catalog (browsable in the Registry UI)
+// ---------------------------------------------------------------------------
+
+export interface McpServerSummary {
+  id: string;
+  display_name: string;
+  publisher: string;
+  category: string;
+  /** Integration tier: direct-none | direct-apikey | direct-oauth | adapter-3lo | adapter-stdio */
+  tier: string;
+  /** live | docs | community */
+  verified: string;
+  auth_type: string;
+  live_testable: boolean;
+  endpoint?: string | null;
+}
+
+export interface McpServerDetail extends McpServerSummary {
+  credentials_needed: string;
+  example_tools: string[];
+  api_key_descriptor?: Record<string, unknown> | null;
+  oauth_descriptor?: Record<string, unknown> | null;
+}
+
+/** List the verified external MCP-server catalog (registry:read). */
+export async function listMcpServersApi(
+  baseUrl: string = API_BASE_URL,
+): Promise<McpServerSummary[]> {
+  const response = await authFetch(`${baseUrl}/api/mcp-servers`, { method: 'GET' });
+  if (!response.ok) {
+    throw new Error(`MCP servers fetch failed (${response.status})`);
+  }
+  return (await response.json()) as McpServerSummary[];
+}
+
+/** Fetch one MCP server's detail (endpoint/auth/tools). */
+export async function getMcpServerApi(
+  serverId: string,
+  baseUrl: string = API_BASE_URL,
+): Promise<McpServerDetail> {
+  const response = await authFetch(
+    `${baseUrl}/api/mcp-servers/${encodeURIComponent(serverId)}`,
+    { method: 'GET' },
+  );
+  if (!response.ok) {
+    throw new Error(`MCP server fetch failed (${response.status})`);
+  }
+  return (await response.json()) as McpServerDetail;
+}
+
 /** Publish a deployed agent's canvas snapshot to the org registry. */
 export async function publishToRegistryApi(
   data: PublishRegistryRequest,

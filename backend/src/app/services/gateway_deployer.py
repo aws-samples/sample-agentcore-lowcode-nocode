@@ -987,9 +987,25 @@ def lambda_handler(event, context):
                     "text": ref.get("content", {}).get("text", "")[:200],
                     "source": loc.get("s3Location", {}).get("uri", "") or loc.get("webLocation", {}).get("url", ""),
                 })
+        # No citations => the KB retrieved nothing. Right after deploy this almost
+        # always means ingestion has not yet produced queryable vectors (eventual
+        # consistency), not that the fact is absent. Return a RETRYABLE signal so
+        # the agent/caller retries instead of reporting a hard failure (P-E2E fix).
+        if not citations:
+            return {"statusCode": 200, "body": json.dumps({
+                "answer": answer,
+                "citations": [],
+                "still_ingesting": True,
+                "retryable": True,
+                "message": "Knowledge base returned no matches yet — it may still be ingesting. Retry shortly.",
+            })}
         return {"statusCode": 200, "body": json.dumps({"answer": answer, "citations": citations})}
     except Exception as e:
-        return {"statusCode": 200, "body": json.dumps({"error": str(e)})}
+        # Distinguish an ingestion-in-progress error from a real failure so the
+        # caller can retry the former.
+        msg = str(e)
+        retryable = any(s in msg for s in ("still", "ingest", "no data", "empty", "ResourceNotReady"))
+        return {"statusCode": 200, "body": json.dumps({"error": msg, "retryable": retryable})}
 '''
 
 

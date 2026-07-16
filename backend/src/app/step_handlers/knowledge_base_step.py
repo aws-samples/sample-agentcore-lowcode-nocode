@@ -212,8 +212,22 @@ def _wait_for_kb_active(bedrock_agent, kb_id: str, max_wait: int = 120) -> None:
     raise TimeoutError(f"Knowledge Base {kb_id} did not become ACTIVE within {max_wait}s")
 
 
-def _start_and_wait_ingestion(bedrock_agent, kb_id: str, ds_id: str, max_wait: int = 300) -> str:
-    """Start a data ingestion job and poll until complete or timeout."""
+def _start_and_wait_ingestion(bedrock_agent, kb_id: str, ds_id: str, max_wait: int = 600) -> tuple[str, str]:
+    """Start a data ingestion job and poll until complete or timeout.
+
+    Returns ``(job_id, terminal_status)`` where terminal_status is one of
+    ``COMPLETE`` (KB is queryable) or ``IN_PROGRESS`` (still ingesting — the KB
+    exists but a query may return nothing yet). ``FAILED`` raises.
+
+    Why this matters (P-E2E matrix finding): the KB used to be reported as part
+    of a ``succeeded`` deploy the moment the job STARTED, even if vectors weren't
+    queryable yet. Under a combined deploy (Runtime+Gateway+Memory+KB) the extra
+    contention meant the corpus hadn't produced queryable vectors within the old
+    300s window, so the KB tool returned nothing and the agent said "technical
+    error". We now (a) wait longer by default and (b) return the real terminal
+    status so the deploy result can tell the caller the KB is still ingesting
+    instead of silently implying it's ready.
+    """
     resp = bedrock_agent.start_ingestion_job(
         knowledgeBaseId=kb_id,
         dataSourceId=ds_id,
@@ -230,15 +244,16 @@ def _start_and_wait_ingestion(bedrock_agent, kb_id: str, ds_id: str, max_wait: i
         status = job_resp.get("ingestionJob", {}).get("status", "")
         if status == "COMPLETE":
             logger.warning("Ingestion job %s completed", job_id)
-            return job_id
+            return job_id, "COMPLETE"
         if status == "FAILED":
             failure = job_resp.get("ingestionJob", {}).get("failureReasons", [])
             raise RuntimeError(f"Ingestion job failed: {failure}")
         time.sleep(5)
 
-    # Timeout is not fatal - ingestion continues in background
+    # Timeout is not fatal — ingestion continues in the background — but report
+    # it so the deploy result / KB tool can surface "still ingesting" honestly.
     logger.warning("Ingestion job %s still running after %ds (continuing)", job_id, max_wait)
-    return job_id
+    return job_id, "IN_PROGRESS"
 
 
 def _find_existing_kb(bedrock_agent, kb_name: str) -> str | None:
@@ -894,8 +909,12 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
         ds_id = ds_resp["dataSource"]["dataSourceId"]
         logger.warning("Data source created: %s for KB %s", ds_id, kb_id)
 
-        # Step 5: Start ingestion
-        _start_and_wait_ingestion(bedrock_agent, kb_id, ds_id, max_wait=300)
+        # Step 5: Start ingestion. Wait up to 600s for queryable vectors; record
+        # the terminal status so a KB that's still ingesting is reported honestly
+        # rather than silently implied ready (P-E2E matrix finding).
+        _job_id, ingestion_status = _start_and_wait_ingestion(
+            bedrock_agent, kb_id, ds_id, max_wait=600
+        )
 
         event["knowledge_base_result"] = {
             "kb_id": kb_id,
@@ -903,6 +922,7 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
             "kb_role_arn": role_arn,
             "created_by_flow": True,
             "foundation_model_arn": foundation_model_arn,
+            "ingestion_status": ingestion_status,  # COMPLETE | IN_PROGRESS
         }
         return event
 

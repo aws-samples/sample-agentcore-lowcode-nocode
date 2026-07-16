@@ -315,6 +315,7 @@ from app.routers.cost import budgets_router  # noqa: E402  # Phase 4 FinOps budg
 from app.routers.hitl import router as hitl_router  # noqa: E402
 from app.routers.prompts import router as prompts_router  # noqa: E402  # Phase 3 Gap 3H
 from app.routers.connectors import router as connectors_router  # noqa: E402
+from app.routers.mcp_servers import router as mcp_servers_router  # noqa: E402
 from app.routers.triggers import router as triggers_router  # noqa: E402
 from app.routers.tags import router as tags_router  # noqa: E402  # Phase 2 governance tagging
 from app.routers.admin import router as admin_router  # noqa: E402  # Phase 5 audit dashboard
@@ -345,6 +346,11 @@ deployment_app.include_router(prompts_router)
 # /api/connectors + /api/connectors/{proxy+} are added in platform_stack.py per
 # the Bug 21 router-enumeration rule.
 deployment_app.include_router(connectors_router)
+# Verified external MCP-server catalog (browsable in the Registry UI). Read-only,
+# no tenant data — mounted alongside the connector catalog. Routes
+# /api/mcp-servers + /api/mcp-servers/{proxy+} are added in platform_stack.py per
+# the Bug 21 router-enumeration rule.
+deployment_app.include_router(mcp_servers_router)
 # Phase 3 Gap 3F — scheduled / event triggers registry. Mounted here because
 # the deployment Lambda owns the TriggersTable grant + the agentcore-trigger/*
 # Secrets Manager grant and already has the get_caller_sub auth helper.

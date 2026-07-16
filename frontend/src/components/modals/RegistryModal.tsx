@@ -20,6 +20,7 @@ import { useIsRegistryAdmin } from '../../auth/useIsRegistryAdmin';
 import { AwsRegistryPanel } from './AwsRegistryPanel';
 import { DeployTargetsPanel } from './DeployTargetsPanel';
 import { RegistryEntryDetail } from './registry/RegistryEntryDetail';
+import { McpServersPanel } from './registry/McpServersPanel';
 
 // ============================================================================
 // Props
@@ -50,6 +51,8 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
   const [selected, setSelected] = useState<RegistryEntry | null>(null);
   // Status filter tabs (with live counts), ported from the reference registry.
   const [statusFilter, setStatusFilter] = useState<'all' | 'approved' | 'pending' | 'rejected'>('all');
+  // Top-level view: agent blueprints vs the verified external MCP-server catalog.
+  const [view, setView] = useState<'agents' | 'mcp'>('agents');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -71,6 +74,7 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
       // Reset master-detail + filter when the modal closes so it reopens on the list.
       setSelected(null);
       setStatusFilter('all');
+      setView('agents');
     }
   }, [isOpen, load]);
 
@@ -184,6 +188,24 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
           </button>
         </div>
 
+        {/* Top-level view toggle: agent blueprints vs external MCP-server catalog. */}
+        <div className="flex gap-1 px-6 pt-3 border-b" style={{ borderColor: 'var(--color-border)' }}>
+          {([['agents', 'Agent blueprints'], ['mcp', 'MCP servers']] as const).map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              onClick={() => { setView(key); setSelected(null); }}
+              className="px-3.5 py-2 text-sm border-b-2 -mb-px transition-colors"
+              style={{
+                color: view === key ? 'var(--color-text-primary)' : 'var(--color-text-secondary)',
+                borderBottomColor: view === key ? 'var(--accent)' : 'transparent',
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         {/* Error banner — shown in both list and detail modes. */}
         {error && (
           <div className="mx-6 mt-4 px-3 py-2 rounded-lg border border-red-200 bg-red-50 text-xs text-red-700">
@@ -191,9 +213,13 @@ export function RegistryModal({ isOpen, onClose, onClone }: RegistryModalProps) 
           </div>
         )}
 
-        {/* Detail view (master-detail): render the 4-tab detail for a selected
-            entry; otherwise fall through to the browse list below. */}
-        {selected ? (
+        {view === 'mcp' ? (
+          <div className="flex-1 overflow-y-auto px-6 py-4">
+            <McpServersPanel />
+          </div>
+        ) : /* Detail view (master-detail): render the 4-tab detail for a selected
+            entry; otherwise fall through to the browse list below. */
+        selected ? (
           <RegistryEntryDetail
             entry={selected}
             isAdmin={isAdmin}

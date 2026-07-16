@@ -2444,6 +2444,13 @@ def handler(event, context):
                                          and event.get("detail-type") == "policy-sweep"):
             from app.step_handlers.policy_sweep_step import handler as _sweep
             return _sweep(event, context)
+        # EventBridge-scheduled FinOps cost reconciliation (Loom-study 5.3):
+        # self-drives budget-breach detection for idle-but-overspending agents
+        # that no human has opened the cost panel for.
+        if event.get("cost_reconcile") or (event.get("source") == "aws.events"
+                                           and event.get("detail-type") == "cost-reconcile"):
+            from app.step_handlers.cost_reconcile_step import handler as _reconcile
+            return _reconcile(event, context)
 
     # Normal API Gateway request → Mangum/FastAPI
     return _mangum_handler(event, context)

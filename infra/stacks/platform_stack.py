@@ -1709,6 +1709,30 @@ class PlatformStack(cdk.Stack):
                 )
             ],
         )
+
+        # Loom-study 5.3 — scheduled FinOps cost reconciliation. Cost analytics
+        # are QUERY-TIME (summarize_from_logs reads CloudWatch on demand), so a
+        # budget breach only emits the BudgetBreach metric when a human opens the
+        # cost panel. An idle-but-overspending agent would never trip an ops
+        # alarm. This rule self-drives breach detection DAILY by invoking the
+        # deployment Lambda with a {"cost_reconcile": true} sentinel (handled in
+        # deployment_handler.handler → cost_reconcile_step): it walks every
+        # budget, sums month-to-date actual cost from logs, and emits the metric
+        # for any warn/over budget — no user touchpoint required.
+        events.Rule(
+            self,
+            "CostReconcileSchedule",
+            rule_name=f"{self._project}-{self._env}-cost-reconcile",
+            description="Self-drive budget-breach detection month-to-date (Loom-study 5.3)",
+            schedule=events.Schedule.rate(Duration.hours(24)),
+            targets=[
+                events_targets.LambdaFunction(
+                    fn,
+                    event=events.RuleTargetInput.from_object({"cost_reconcile": True}),
+                    retry_attempts=2,
+                )
+            ],
+        )
         return fn
 
     def _create_stream_lambda(self) -> tuple:

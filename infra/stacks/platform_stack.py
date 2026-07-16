@@ -1873,6 +1873,19 @@ class PlatformStack(cdk.Stack):
                 conditions={"StringEquals": {"iam:PassedToService": "bedrock-agentcore.amazonaws.com"}},
             ))
 
+        # Non-Bedrock model providers: runtime_configure / harness resolve the
+        # agent's provider_api_key_ref secret at deploy time and inject it as the
+        # PROVIDER_API_KEY env var. Scope GetSecretValue to the agentcore-provider/
+        # namespace (same namespace-lock discipline as the OTEL secret) so a
+        # tenant cannot point provider_api_key_ref at an arbitrary foreign secret.
+        if step_name in {"runtime_configure", "harness"}:
+            role.add_to_policy(iam.PolicyStatement(
+                actions=["secretsmanager:GetSecretValue"],
+                resources=[
+                    f"arn:aws:secretsmanager:{self.region}:{self.account}:secret:agentcore-provider/*",
+                ],
+            ))
+
         # policy step calls update_gateway(roleArn=...) when binding the
         # PolicyEngine — re-passing the gateway's existing role triggers
         # iam:PassRole on the calling principal. See tasks/lessons.md Bug 76.

@@ -104,6 +104,34 @@ def handler(event: dict, context) -> dict:
                 raw_model_id = ""
             env_vars["MODEL_ID"] = _to_cross_region_model_id(raw_model_id)
 
+        # Non-Bedrock providers (openai/anthropic/gemini/litellm/mistral/…) read
+        # their credential from PROVIDER_API_KEY. Resolve it from the agent's
+        # provider_api_key_ref (a Secrets Manager ARN) at deploy time and inject
+        # the plaintext value as an env var — same pattern as COGNITO_CLIENT_SECRET
+        # below, so no extra runtime IAM grant is needed. Without this, selecting
+        # any non-Bedrock provider deploys an agent whose model calls 401
+        # (provider_api_key_ref was previously consumed NOWHERE). PROVIDER_BASE_URL
+        # supports OpenAI-compatible gateways / a LiteLLM proxy.
+        _provider = getattr(config, "model_provider", None)
+        if _provider is None and isinstance(model_cfg, dict):
+            _provider = model_cfg.get("provider")
+        elif _provider is None and hasattr(model_cfg, "provider"):
+            _provider = getattr(model_cfg, "provider", None)
+        _provider = _provider or "bedrock"
+        if str(_provider).lower() not in ("bedrock", ""):
+            _key_ref = getattr(config, "provider_api_key_ref", None)
+            if _key_ref:
+                try:
+                    _sm = step_clients.client(event, "secretsmanager")
+                    _val = _sm.get_secret_value(SecretId=_key_ref).get("SecretString", "")
+                    if _val:
+                        env_vars["PROVIDER_API_KEY"] = _val
+                except Exception:  # noqa: BLE001
+                    logger.warning("Could not resolve provider_api_key_ref for %s provider", _provider)
+            _base_url = getattr(config, "provider_base_url", None)
+            if _base_url:
+                env_vars["PROVIDER_BASE_URL"] = str(_base_url)
+
         gateway_result = event.get("gateway_result") or {}
         memory_result = event.get("memory_result") or {}
         guardrails_result = event.get("guardrails_result") or {}

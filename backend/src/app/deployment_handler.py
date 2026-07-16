@@ -392,6 +392,17 @@ async def health_check() -> dict:
 )
 async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployResponse:
     """Start a Step Functions execution for a new deployment."""
+    # Non-Bedrock providers reference a Secrets Manager secret for their API key.
+    # Lock tenant-supplied ARNs to the agentcore-provider/ namespace — the same
+    # discipline as the OTEL secret — so a tenant cannot make the deploy step read
+    # an arbitrary foreign secret. The runtime_configure step role only grants
+    # GetSecretValue on this namespace, so this validation keeps the two aligned.
+    _key_ref = getattr(request.config, "provider_api_key_ref", None)
+    if _key_ref and ":secret:agentcore-provider/" not in _key_ref:
+        raise HTTPException(
+            status_code=400,
+            detail="provider_api_key_ref must be a Secrets Manager ARN in the agentcore-provider/ namespace",
+        )
     deployment_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc)
     user_id = _get_user_id(raw_request)

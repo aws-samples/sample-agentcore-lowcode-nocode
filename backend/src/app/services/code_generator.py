@@ -1593,27 +1593,33 @@ def _get_model_init_code(provider: str, model_id: str, region: str) -> tuple[str
     elif provider == "openai":
         return (
             "from strands.models.openai import OpenAIModel",
-            f'model = OpenAIModel(model_id="{model_id}")',
+            # PROVIDER_API_KEY is injected from the agent's provider_api_key_ref
+            # secret at deploy time (runtime_configure_step). Without it a
+            # non-Bedrock provider silently initializes with no credential and
+            # every model call 401s. An optional PROVIDER_BASE_URL supports
+            # OpenAI-compatible gateways/proxies.
+            f'model = OpenAIModel(model_id="{model_id}", client_args={{k: v for k, v in {{"api_key": os.environ.get("PROVIDER_API_KEY", ""), "base_url": os.environ.get("PROVIDER_BASE_URL") or None}}.items() if v}})',
         )
     elif provider == "anthropic":
         return (
             "from strands.models.anthropic import AnthropicModel",
-            f'model = AnthropicModel(model_id="{model_id}")',
+            f'model = AnthropicModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("PROVIDER_API_KEY", "")}})',
         )
     elif provider == "gemini":
         return (
             "from strands.models.gemini import GeminiModel",
-            f'model = GeminiModel(model_id="{model_id}")',
+            f'model = GeminiModel(model_id="{model_id}", client_args={{"api_key": os.environ.get("PROVIDER_API_KEY", "")}})',
         )
     elif provider == "litellm":
         return (
             "from strands.models.litellm import LiteLLMModel",
-            f'model = LiteLLMModel(model_id="{model_id}")',
+            # LiteLLM: api_key + optional proxy base_url, both from injected env.
+            f'model = LiteLLMModel(model_id="{model_id}", client_args={{k: v for k, v in {{"api_key": os.environ.get("PROVIDER_API_KEY", ""), "base_url": os.environ.get("PROVIDER_BASE_URL") or None}}.items() if v}})',
         )
     elif provider == "mistral":
         return (
             "from strands.models.mistral import MistralModel",
-            f'model = MistralModel(model_id="{model_id}")',
+            f'model = MistralModel(model_id="{model_id}", api_key=os.environ.get("PROVIDER_API_KEY", ""))',
         )
     elif provider == "ollama":
         return (

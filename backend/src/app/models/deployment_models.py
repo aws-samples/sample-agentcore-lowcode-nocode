@@ -248,6 +248,9 @@ class RuntimeConfig(BaseModel):
         "deepseek", "groq", "together",
     ] = Field(alias="modelProvider", default="bedrock")
     provider_api_key_ref: Optional[str] = Field(alias="providerApiKeyRef", default=None)
+    # Optional base URL for OpenAI-compatible providers / a self-hosted LiteLLM
+    # proxy. Injected as PROVIDER_BASE_URL and read by the generated model init.
+    provider_base_url: Optional[str] = Field(alias="providerBaseUrl", default=None, max_length=512)
     # Multi-agent pattern
     multi_agent_pattern: str = Field(alias="multiAgentPattern", default="none")
     multi_agent_config: Optional[dict] = Field(alias="multiAgentConfig", default=None)

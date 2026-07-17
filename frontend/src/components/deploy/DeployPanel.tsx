@@ -2,7 +2,7 @@
  * DeployPanel component for deploying and testing AgentCore Runtime.
  */
 
-import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import { m } from 'motion/react';
 import { spring, tween } from '../../lib/motion';
 import type { RuntimeConfiguration, GatewayConfiguration, IdentityConfiguration } from '../../types/components';
@@ -23,6 +23,7 @@ import { DeployResult } from './DeployResult';
 import { DeployActions } from './DeployActions';
 import { useDeployment } from './useDeployment';
 import { ConfirmDialog } from '../common/ConfirmDialog';
+import { ChatInterface } from './ChatInterface';
 
 interface TestResult {
   success: boolean;
@@ -127,8 +128,6 @@ export function DeployPanel({
     latencyMs?: number;
   }>>([]);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const chatEndRef = useRef<HTMLDivElement>(null);
-  const chatInputRef = useRef<HTMLTextAreaElement>(null);
 
   const activeTemplate = useMemo(() => {
     if (!templateId) return null;
@@ -196,15 +195,6 @@ export function DeployPanel({
     onTabChange: (tab) => setActiveTab(tab),
   });
 
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatMessages, isTesting]);
-
-  useEffect(() => {
-    if (activeTab === 'chat' && deploymentStatus.state === 'deployed') {
-      setTimeout(() => chatInputRef.current?.focus(), 100);
-    }
-  }, [activeTab, deploymentStatus.state]);
 
   useEffect(() => {
     if (restoredDeployment && deploymentStatus.state === 'idle') {
@@ -809,9 +799,9 @@ export function DeployPanel({
                 </div>
               </div>
 
-              <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
-                {chatMessages.length === 0 && !isTesting && (
-                  <div className="text-center py-12">
+              {chatMessages.length === 0 && !isTesting ? (
+                <div className="flex-1 flex items-center justify-center">
+                  <div className="text-center">
                     <div className="w-12 h-12 mx-auto mb-3 rounded-xl bg-[#0972d3]/10 flex items-center justify-center">
                       <svg className="w-6 h-6 text-[#0972d3]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
@@ -820,89 +810,17 @@ export function DeployPanel({
                     <h4 className="text-sm font-medium text-[#16191f] mb-1">Chat with your Agent</h4>
                     <p className="text-xs text-[#5f6b7a]">Send a message to test your deployed agent</p>
                   </div>
-                )}
-
-                {chatMessages.map((msg) => (
-                  <div key={msg.id}>
-                    {msg.role === 'system' ? (
-                      <div className="flex justify-center">
-                        <div className="px-3 py-1.5 bg-amber-50 border border-amber-200 rounded-lg max-w-[90%]">
-                          <span className="text-xs text-amber-700">{msg.content}</span>
-                        </div>
-                      </div>
-                    ) : msg.role === 'user' ? (
-                      <div className="flex justify-end">
-                        <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-br-md bg-[#0972d3] text-white">
-                          <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="flex justify-start gap-2">
-                        <div className="w-6 h-6 rounded-full bg-[#232f3e] flex items-center justify-center flex-shrink-0 mt-1">
-                          <span className="text-[10px] text-white font-bold">A</span>
-                        </div>
-                        <div className="max-w-[85%]">
-                          <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-[#f2f3f3] text-[#16191f] border border-[#e9ebed]">
-                            <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
-                          </div>
-                          {msg.latencyMs && (
-                            <span className="text-[10px] text-[#8d99a8] mt-1 ml-2 inline-block">{msg.latencyMs}ms</span>
-                          )}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ))}
-
-                {isTesting && (
-                  <div className="flex justify-start gap-2">
-                    <div className="w-6 h-6 rounded-full bg-[#232f3e] flex items-center justify-center flex-shrink-0 mt-1">
-                      <span className="text-[10px] text-white font-bold">A</span>
-                    </div>
-                    <div className="px-4 py-3 rounded-2xl rounded-bl-md bg-[#f2f3f3] border border-[#e9ebed]">
-                      <div className="flex items-center gap-1.5">
-                        <div className="w-2 h-2 bg-[#0972d3] rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                        <div className="w-2 h-2 bg-[#0972d3] rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                        <div className="w-2 h-2 bg-[#0972d3] rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                <div ref={chatEndRef} />
-              </div>
-
-              <div className="border-t border-[#e9ebed] bg-[#fafafa] p-3 flex-shrink-0">
-                <div className="flex gap-2">
-                  <textarea
-                    ref={chatInputRef}
-                    value={testInput}
-                    onChange={(e) => setTestInput(e.target.value)}
-                    onKeyDown={handleKeyDown}
-                    placeholder="Type a message..."
-                    className="flex-1 resize-none rounded-xl border border-[#e9ebed] px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-[#0972d3] focus:border-transparent bg-white"
-                    rows={1}
-                    disabled={isTesting}
-                  />
-                  <button
-                    onClick={handleTest}
-                    disabled={!testInput.trim() || isTesting}
-                    className={`self-end p-2.5 rounded-xl transition-all ${
-                      testInput.trim() && !isTesting
-                        ? 'bg-[#0972d3] text-white hover:bg-[#0961b9]'
-                        : 'bg-[#e9ebed] text-[#8d99a8] cursor-not-allowed'
-                    }`}
-                  >
-                    {isTesting ? (
-                      <div className="w-5 h-5 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                    ) : (
-                      <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                        <path d="M22 2L11 13" /><path d="M22 2l-7 20-4-9-9-4 20-7z" />
-                      </svg>
-                    )}
-                  </button>
                 </div>
-              </div>
+              ) : (
+                <ChatInterface
+                  chatMessages={chatMessages}
+                  testInput={testInput}
+                  isTesting={isTesting}
+                  onTestInputChange={setTestInput}
+                  onSendMessage={handleTest}
+                  onKeyDown={handleKeyDown}
+                />
+              )}
             </div>
           )}
           {activeTab === 'versions' && <VersionsList runtimeName={config?.name ?? null} refreshKey={versionsRefreshKey} />}

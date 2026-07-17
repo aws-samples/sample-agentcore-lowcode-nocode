@@ -4,6 +4,18 @@ Running the platform locally, the full test-suite matrix, and the tech stack.
 
 [← Back to README](../README.md)
 
+## Quick start (Makefile)
+
+```bash
+make install   # backend + infra + frontend deps
+make dev       # both dev servers (UI on :5173, API on :8000)
+make test      # backend + infra + frontend test suites
+make lint      # ruff + eslint
+make typecheck # pyright + tsc
+```
+
+Run `make help` for the full target list.
+
 ## Local Development
 
 For contributors who want to run the platform locally without deploying to AWS. The backend falls back to in-memory storage when `DYNAMODB_TABLE_NAME` is not set **and** the process is not running inside Lambda (detected via `AWS_LAMBDA_FUNCTION_NAME`). Inside Lambda the missing table env var raises `RuntimeError` at module load, so a misconfigured deploy fails to initialize rather than silently dropping writes.

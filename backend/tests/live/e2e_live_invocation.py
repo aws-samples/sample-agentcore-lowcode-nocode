@@ -11,7 +11,7 @@ This script:
 
 Run:
     cd backend
-    PYTHONPATH=src python tests/test_e2e_live_invocation.py
+    PYTHONPATH=src python tests/live/e2e_live_invocation.py
 """
 
 import json

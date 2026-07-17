@@ -121,9 +121,7 @@ def test_rejects_orphan_support_node():
 def test_rejects_edge_referencing_unknown_suffix():
     spec = {
         "nodes": [_runtime_node("rt")],
-        "edges": [
-            {"sourceIdSuffix": "ghost", "targetIdSuffix": "rt", "connectionType": "data"}
-        ],
+        "edges": [{"sourceIdSuffix": "ghost", "targetIdSuffix": "rt", "connectionType": "data"}],
     }
     err = _validate_spec(spec)
     assert err is not None

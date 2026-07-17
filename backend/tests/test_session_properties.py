@@ -14,8 +14,8 @@ import sys
 import types
 from unittest.mock import MagicMock, patch
 
-import pytest
-from hypothesis import HealthCheck, given, settings, strategies as st
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
 sys.path.insert(0, "src")
 
@@ -25,10 +25,8 @@ if "mangum" not in sys.modules:
     sys.modules["mangum"] = types.ModuleType("mangum")
     sys.modules["mangum"].Mangum = MagicMock()  # type: ignore[attr-defined]
 
-from fastapi.testclient import TestClient
-
 from app.deployment_handler import deployment_app
-
+from fastapi.testclient import TestClient
 
 # ---------------------------------------------------------------------------
 # Strategies

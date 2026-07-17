@@ -39,8 +39,8 @@ def test_prunes_statement_for_deleted_role():
     lam = MagicMock()
     lam.get_policy.return_value = {
         "Policy": _policy(
-            "AllowAgentCoreInvoke-AgentCoreGateway-gone",   # role deleted
-            "AllowAgentCoreInvoke-AgentCoreGateway-live",   # role exists
+            "AllowAgentCoreInvoke-AgentCoreGateway-gone",  # role deleted
+            "AllowAgentCoreInvoke-AgentCoreGateway-live",  # role exists
         )
     }
     iam = _iam_with_existing({"AgentCoreGateway-live"})

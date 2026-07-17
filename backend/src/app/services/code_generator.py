@@ -44,11 +44,9 @@ If you are tempted to convert this to Jinja or a code-AST builder, please:
 """
 
 import os
-from typing import Optional
 
 from app.models.deployment_models import RuntimeConfig
 from app.services.agentic_rag_codegen import agentic_rag_tool_name, agentic_rag_tool_source
-
 
 # Provider to package mapping (Strands-only)
 PROVIDER_PACKAGES: dict[str, str] = {
@@ -91,11 +89,7 @@ def _to_cross_region_model_id(model_id: str) -> str:
         model_id = f"us.{model_id}"
     # Only legacy DATED Bedrock inference profiles require a -v1:0 style
     # version suffix. Dateless current-generation IDs must NOT get one.
-    if (
-        "anthropic." in model_id
-        and _has_date_suffix(model_id)
-        and not _has_version_suffix(model_id)
-    ):
+    if "anthropic." in model_id and _has_date_suffix(model_id) and not _has_version_suffix(model_id):
         model_id = f"{model_id}-v1:0"
     return model_id
 
@@ -103,6 +97,7 @@ def _to_cross_region_model_id(model_id: str) -> str:
 def _has_version_suffix(model_id: str) -> bool:
     """Check if model ID already has a version suffix like -v1:0 or -v2:0."""
     import re
+
     return bool(re.search(r"-v\d+:\d+$", model_id))
 
 
@@ -113,6 +108,7 @@ def _has_date_suffix(model_id: str) -> bool:
     have no date segment and must not receive a ``-v1:0`` suffix.
     """
     import re
+
     return bool(re.search(r"-\d{8}$", model_id))
 
 
@@ -207,7 +203,7 @@ def _escape_triple_quotes(text: str) -> str:
     return text
 
 
-def _extract_gateway_credentials(gateway_config: Optional[dict]) -> dict:
+def _extract_gateway_credentials(gateway_config: dict | None) -> dict:
     """Pull Cognito credentials out of a gateway_config dict.
 
     SECURITY: All values are sanitized for safe embedding in double-quoted
@@ -695,7 +691,7 @@ def _generate_tools_agent(
     has_browser: bool,
     has_code_interpreter: bool,
     has_kb: bool = False,
-    kb_config: Optional[dict] = None,
+    kb_config: dict | None = None,
 ) -> str:
     """Generate agent with built-in tools (code interpreter, browser, KB retrieve)."""
     # When the code interpreter is available, the model must ACTUALLY CALL
@@ -744,11 +740,7 @@ def _generate_tools_agent(
         # symbols) and is concatenated BEFORE the Agent(...) constructor with its
         # name inlined into tools=[...], so it is injection-safe (Bug 125).
         _kb_cfg = kb_config or {}
-        _strategy = (
-            _kb_cfg.get("retrievalStrategy")
-            or _kb_cfg.get("retrieval_strategy")
-            or "simple"
-        )
+        _strategy = _kb_cfg.get("retrievalStrategy") or _kb_cfg.get("retrieval_strategy") or "simple"
         _agentic_name = agentic_rag_tool_name(_strategy)
         if _agentic_name:
             tools_list.append(_agentic_name)
@@ -941,7 +933,7 @@ def _forced_execute(prompt):
             return stdout
     return None
 '''
-        ci_forced_call = '''    import logging as _fl
+        ci_forced_call = """    import logging as _fl
     _cilog = _fl.getLogger("agentcore.ci")
     _pl = (prompt or "").lower()
     _compute_intent = any(k in _pl for k in (
@@ -957,7 +949,7 @@ def _forced_execute(prompt):
             else:
                 _cilog.warning("forced execute returned None")
         except Exception as _fe:
-            _cilog.warning("forced execute failed: %s", _fe)'''
+            _cilog.warning("forced execute failed: %s", _fe)"""
     else:
         ci_forced_helper = ""
         ci_forced_call = "    pass"
@@ -1279,12 +1271,12 @@ def _generate_memory_agent(
     if has_gateway and creds:
         gateway_imports = """from strands.tools.mcp.mcp_client import MCPClient
 from mcp.client.streamable_http import streamablehttp_client"""
-        gateway_env = '''
+        gateway_env = """
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "")
 COGNITO_CLIENT_ID = os.environ.get("COGNITO_CLIENT_ID") or os.environ.get("OAUTH_CLIENT_ID", "")
 COGNITO_CLIENT_SECRET = os.environ.get("COGNITO_CLIENT_SECRET") or os.environ.get("OAUTH_CLIENT_SECRET", "")
 COGNITO_TOKEN_ENDPOINT = os.environ.get("COGNITO_TOKEN_ENDPOINT") or os.environ.get("OAUTH_TOKEN_ENDPOINT", "")
-COGNITO_SCOPE = os.environ.get("COGNITO_SCOPE") or os.environ.get("OAUTH_SCOPE", "")'''
+COGNITO_SCOPE = os.environ.get("COGNITO_SCOPE") or os.environ.get("OAUTH_SCOPE", "")"""
         gateway_functions = '''
 
 def _get_gateway_token():
@@ -1717,9 +1709,7 @@ def _collect_multi_agent_imports(parent_provider: str, agents: list, model_id: s
     """
     seen: set[str] = set()
     lines: list[str] = []
-    providers = [parent_provider] + [
-        ag.get("modelProvider", parent_provider) for ag in agents
-    ]
+    providers = [parent_provider] + [ag.get("modelProvider", parent_provider) for ag in agents]
     for prov in providers:
         if prov in seen:
             continue
@@ -2103,7 +2093,7 @@ def _inject_otel(code: str) -> str:
     # via a try/finally around the existing return. We do this conservatively
     # by appending a top-level decorator that wraps the invoke function.
     if "@app.entrypoint" in code and "_otel_invoke_wrap" not in code:
-        wrap_block = '''
+        wrap_block = """
 # Wrap invoke() so spans flush before AgentCore idle-stop kills the runtime.
 _otel_inner_invoke = invoke
 def _otel_invoke_wrap(payload):
@@ -2112,7 +2102,7 @@ def _otel_invoke_wrap(payload):
     finally:
         _otel_force_flush()
 invoke = _otel_invoke_wrap
-'''
+"""
         # Append after the file's existing __main__ block check, or at end.
         if 'if __name__ == "__main__":' in code:
             code = code.replace(
@@ -2149,7 +2139,7 @@ def _maybe_inject_hitl(code: str) -> str:
         if m:
             names = [n.strip() for n in m.group(1).split(",")]
             if "tool" not in names:
-                code = code[: m.start()] + "from strands import " + m.group(1).rstrip() + ", tool" + code[m.end():]
+                code = code[: m.start()] + "from strands import " + m.group(1).rstrip() + ", tool" + code[m.end() :]
         else:
             code = code.rstrip("\n") + "\nfrom strands import tool\n"
 
@@ -2165,7 +2155,7 @@ def _maybe_inject_hitl(code: str) -> str:
     if not am:
         am = _re.search(r"(?m)^def invoke\b", code)
     if am:
-        code = code[: am.start()] + _HITL_TOOL_SRC.strip("\n") + "\n\n\n" + code[am.start():]
+        code = code[: am.start()] + _HITL_TOOL_SRC.strip("\n") + "\n\n\n" + code[am.start() :]
     else:
         code = code.rstrip("\n") + "\n" + _HITL_TOOL_SRC + "\n"
 
@@ -2181,7 +2171,7 @@ def _maybe_inject_hitl(code: str) -> str:
         if not mm:
             out.append(code[i:])
             break
-        out.append(code[i:mm.end()])
+        out.append(code[i : mm.end()])
         start = mm.end()
         depth = 1
         j = start
@@ -2192,7 +2182,7 @@ def _maybe_inject_hitl(code: str) -> str:
             elif c == ")":
                 depth -= 1
             j += 1
-        args = code[start:j - 1]
+        args = code[start : j - 1]
         if "human_approval" in args:
             new_args = args  # idempotent
         elif "tools=[" in args:
@@ -2209,10 +2199,8 @@ def _maybe_inject_hitl(code: str) -> str:
                 new_args = args
             else:
                 _inner = args[_open:_close].strip().rstrip(",")
-                _replacement = (
-                    "tools=[%s]" % (_inner + ", human_approval" if _inner else "human_approval")
-                )
-                new_args = args[:_ts] + _replacement + args[_close + 1:]
+                _replacement = "tools=[%s]" % (_inner + ", human_approval" if _inner else "human_approval")
+                new_args = args[:_ts] + _replacement + args[_close + 1 :]
         elif _re.search(r"tools=\S", args):
             # Existing tools=<expr> (a var/list-comp) → concat with our list.
             new_args = _re.sub(r"(tools=)([^,\n]+)", r"\1list(\2) + [human_approval]", args, count=1)
@@ -2412,7 +2400,7 @@ def _strip_env_block(code: str) -> str:
     line before the membership test to avoid a false positive that would skip
     injection.
     """
-    return code.replace(_GUARDRAIL_KWARGS_ASSIGN, '')
+    return code.replace(_GUARDRAIL_KWARGS_ASSIGN, "")
 
 
 def _append_kwarg_to_calls(code: str, call_prefix: str, kwarg: str) -> str:
@@ -2444,9 +2432,9 @@ def _append_kwarg_to_calls(code: str, call_prefix: str, kwarg: str) -> str:
         close = -1
         for i in range(open_paren, len(code)):
             ch = code[i]
-            if ch == '(':
+            if ch == "(":
                 depth += 1
-            elif ch == ')':
+            elif ch == ")":
                 depth -= 1
                 if depth == 0:
                     # i is the matching closing paren of this constructor call.
@@ -2456,10 +2444,10 @@ def _append_kwarg_to_calls(code: str, call_prefix: str, kwarg: str) -> str:
             # Unbalanced call — emit the rest unchanged and stop.
             out.append(code[pos:])
             break
-        args = code[open_paren + 1:close]
+        args = code[open_paren + 1 : close]
         if kwarg in args:
             # Per-call idempotency: this constructor is already patched.
-            out.append(code[pos:close + 1])
+            out.append(code[pos : close + 1])
         else:
             out.append(f"{code[pos:close]}, {kwarg}{code[close]}")
         pos = close + 1
@@ -2478,10 +2466,9 @@ def _inject_guardrails(code: str) -> str:
     The injection is string-based to keep generation functions simple.
     """
     guardrail_env_block = (
-        '\n# Guardrails configuration (injected by AgentCore Flows)\n'
+        "\n# Guardrails configuration (injected by AgentCore Flows)\n"
         'GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID", "")\n'
-        'GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "")\n'
-        + _GUARDRAIL_KWARGS_ASSIGN + '\n'
+        'GUARDRAIL_VERSION = os.environ.get("GUARDRAIL_VERSION", "")\n' + _GUARDRAIL_KWARGS_ASSIGN + "\n"
     )
 
     # Inject env vars after the last top-level import or constant.
@@ -2497,14 +2484,14 @@ def _inject_guardrails(code: str) -> str:
     # env assignment is unguarded — gate the whole block on the GUARDRAIL_ID
     # assignment not already being present.
     already_has_env_block = 'GUARDRAIL_ID = os.environ.get("GUARDRAIL_ID"' in code
-    for marker in ([] if already_has_env_block else ['MODEL_ID = os.environ', 'SYSTEM_PROMPT = """']):
+    for marker in [] if already_has_env_block else ["MODEL_ID = os.environ", 'SYSTEM_PROMPT = """']:
         idx = code.find(marker)
         if idx >= 0:
             # Find end of that line
-            eol = code.find('\n', idx)
+            eol = code.find("\n", idx)
             if eol >= 0:
                 # For SYSTEM_PROMPT, find the CLOSING triple-quote.
-                if 'SYSTEM_PROMPT' in marker:
+                if "SYSTEM_PROMPT" in marker:
                     # Position right after the opening """
                     open_tq = code.find('"""', idx)
                     after_open = open_tq + 3
@@ -2512,8 +2499,8 @@ def _inject_guardrails(code: str) -> str:
                     close_idx = code.find('"""', after_open)
                     if close_idx >= 0:
                         # eol = end of the line containing the closing """
-                        eol = code.find('\n', close_idx)
-                code = code[:eol + 1] + guardrail_env_block + code[eol + 1:]
+                        eol = code.find("\n", close_idx)
+                code = code[: eol + 1] + guardrail_env_block + code[eol + 1 :]
                 break
 
     # Inject into Strands BedrockModel: splat the flat guardrail kwargs.
@@ -2527,10 +2514,8 @@ def _inject_guardrails(code: str) -> str:
     # READY but never wired into the model, silently disabling INPUT blocking
     # on the most common pattern. Balance-match the constructor's parens and
     # append the kwarg before the closing ``)`` so every shape is covered.
-    if 'BedrockModel(' in code and '**_GUARDRAIL_KWARGS' not in _strip_env_block(code):
-        code = _append_kwarg_to_calls(
-            code, 'BedrockModel(', '**_GUARDRAIL_KWARGS'
-        )
+    if "BedrockModel(" in code and "**_GUARDRAIL_KWARGS" not in _strip_env_block(code):
+        code = _append_kwarg_to_calls(code, "BedrockModel(", "**_GUARDRAIL_KWARGS")
 
     # Inject into boto3 converse() calls: add guardrailConfig parameter.
     #
@@ -2540,17 +2525,17 @@ def _inject_guardrails(code: str) -> str:
     # SINGLE braces. Using ``{{...}}`` here would land LITERAL double braces in
     # the deployed file, which Python parses as a set literal of an unhashable
     # dict (``TypeError: unhashable type: 'dict'``) and crashes at runtime.
-    if '.converse(' in code and 'guardrailConfig' not in code:
+    if ".converse(" in code and "guardrailConfig" not in code:
         guardrail_splat = (
             '\n            **({"guardrailConfig": {"guardrailIdentifier": '
             'GUARDRAIL_ID, "guardrailVersion": GUARDRAIL_VERSION}} '
-            'if GUARDRAIL_ID else {}),'
+            "if GUARDRAIL_ID else {}),"
         )
         # Tool-using converse templates anchor on toolConfig=TOOL_CONFIG,.
-        if 'toolConfig=TOOL_CONFIG,' in code:
+        if "toolConfig=TOOL_CONFIG," in code:
             code = code.replace(
-                'toolConfig=TOOL_CONFIG,',
-                'toolConfig=TOOL_CONFIG,' + guardrail_splat,
+                "toolConfig=TOOL_CONFIG,",
+                "toolConfig=TOOL_CONFIG," + guardrail_splat,
             )
         # The lightweight no-tools converse template has no toolConfig anchor;
         # wire guardrails in via its inferenceConfig line instead so guardrails
@@ -2566,15 +2551,15 @@ def _inject_guardrails(code: str) -> str:
 
 def generate_agent_code(
     config: RuntimeConfig,
-    tools: Optional[list] = None,
-    gateway_config: Optional[dict] = None,
-    template_id: Optional[str] = None,
-    gateway_tools: Optional[list] = None,
-    custom_tools: Optional[list[dict]] = None,
+    tools: list | None = None,
+    gateway_config: dict | None = None,
+    template_id: str | None = None,
+    gateway_tools: list | None = None,
+    custom_tools: list[dict] | None = None,
     portable: bool = False,
     observability_enabled: bool = False,
-    kb_config: Optional[dict] = None,
-    a2a_config: Optional[dict] = None,
+    kb_config: dict | None = None,
+    a2a_config: dict | None = None,
 ) -> str:
     """Generate agent Python code for the given configuration.
 
@@ -2672,6 +2657,7 @@ def generate_agent_code(
     protocol = (getattr(config, "protocol", "HTTP") or "HTTP").upper()
     if protocol == "A2A" or "a2a" in tools:
         from app.services.a2a_codegen import _generate_a2a_agent
+
         return _maybe_inject_guardrails(_generate_a2a_agent(system_prompt, model_id, region, a2a_config))
 
     # Template-specific code generation
@@ -2713,17 +2699,25 @@ def generate_agent_code(
     multi_agent_config_data = getattr(config, "multi_agent_config", None)
     if multi_agent_pattern != "none" and multi_agent_config_data:
         if multi_agent_pattern == "graph":
-            return _maybe_inject_guardrails(_generate_graph_agent(system_prompt, model_id, region, provider, multi_agent_config_data))
+            return _maybe_inject_guardrails(
+                _generate_graph_agent(system_prompt, model_id, region, provider, multi_agent_config_data)
+            )
         elif multi_agent_pattern == "swarm":
-            return _maybe_inject_guardrails(_generate_swarm_agent(system_prompt, model_id, region, provider, multi_agent_config_data))
+            return _maybe_inject_guardrails(
+                _generate_swarm_agent(system_prompt, model_id, region, provider, multi_agent_config_data)
+            )
         elif multi_agent_pattern == "workflow":
-            return _maybe_inject_guardrails(_generate_workflow_agent(system_prompt, model_id, region, provider, multi_agent_config_data))
+            return _maybe_inject_guardrails(
+                _generate_workflow_agent(system_prompt, model_id, region, provider, multi_agent_config_data)
+            )
 
     # Memory-connected agent (with optional gateway)
     if has_memory:
         if has_gateway:
             creds = _extract_gateway_credentials(gateway_config)
-            return _maybe_inject_guardrails(_generate_memory_agent(system_prompt, model_id, region, has_gateway=True, creds=creds))
+            return _maybe_inject_guardrails(
+                _generate_memory_agent(system_prompt, model_id, region, has_gateway=True, creds=creds)
+            )
         return _maybe_inject_guardrails(_generate_memory_agent(system_prompt, model_id, region))
 
     # Gateway-connected agent
@@ -2733,7 +2727,11 @@ def generate_agent_code(
 
     # Built-in tools agent (handles browser, code interpreter, knowledge base)
     if has_browser or has_code_interpreter or has_kb:
-        return _maybe_inject_guardrails(_generate_tools_agent(system_prompt, model_id, region, has_browser, has_code_interpreter, has_kb=has_kb, kb_config=kb_config))
+        return _maybe_inject_guardrails(
+            _generate_tools_agent(
+                system_prompt, model_id, region, has_browser, has_code_interpreter, has_kb=has_kb, kb_config=kb_config
+            )
+        )
 
     # Default Strands agent with provider-aware model
     return _maybe_inject_guardrails(_generate_strands_default(system_prompt, model_id, region, provider))
@@ -2741,9 +2739,9 @@ def generate_agent_code(
 
 def generate_requirements(
     config: RuntimeConfig,
-    tools: Optional[list] = None,
-    template_id: Optional[str] = None,
-    gateway_tools: Optional[list] = None,
+    tools: list | None = None,
+    template_id: str | None = None,
+    gateway_tools: list | None = None,
 ) -> str:
     """Generate requirements.txt content for the given configuration.
 

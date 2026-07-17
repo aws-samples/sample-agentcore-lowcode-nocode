@@ -34,9 +34,7 @@ def client(app_with_router: FastAPI) -> TestClient:
 
 
 def test_evaluation_config_404_when_no_slot(client: TestClient):
-    with patch(
-        "app.routers.evaluations.get_slots_store"
-    ) as slots_store_mock:
+    with patch("app.routers.evaluations.get_slots_store") as slots_store_mock:
         slots_store_mock.return_value.get.return_value = None
         resp = client.get("/api/runtimes/myagent/evaluation-config")
     assert resp.status_code == 404
@@ -44,11 +42,10 @@ def test_evaluation_config_404_when_no_slot(client: TestClient):
 
 def test_evaluation_config_cross_tenant_returns_404(client: TestClient):
     """Different owner_sub on the slot row → 404 (existence non-disclosure)."""
-    with patch(
-        "app.routers.evaluations.get_slots_store"
-    ) as slots_store_mock, patch(
-        "app.routers.evaluations.get_versions_store"
-    ) as versions_store_mock:
+    with (
+        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
+        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
+    ):
         slots_store_mock.return_value.get.return_value = RuntimeSlots(
             runtime_name="myagent",
             owner_sub="someone-else",
@@ -72,11 +69,11 @@ def test_evaluation_config_cross_tenant_returns_404(client: TestClient):
 def test_evaluation_config_match_by_runtime_id_substring(client: TestClient):
     """Matched configs are returned with evaluators + sampling rate."""
     runtime_id = "myagent_abcd1234-runtime-abcd1234"
-    with patch(
-        "app.routers.evaluations.get_slots_store"
-    ) as slots_store_mock, patch(
-        "app.routers.evaluations.get_versions_store"
-    ) as versions_store_mock, patch("boto3.client") as boto_mock:
+    with (
+        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
+        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
+        patch("boto3.client") as boto_mock,
+    ):
         slots_store_mock.return_value.get.return_value = RuntimeSlots(
             runtime_name="myagent",
             owner_sub=_LOCAL_DEV_SUB,
@@ -126,11 +123,11 @@ def test_evaluation_config_match_by_runtime_id_substring(client: TestClient):
 
 def test_evaluation_config_404_when_no_match(client: TestClient):
     """No matching config → 404 (not 500)."""
-    with patch(
-        "app.routers.evaluations.get_slots_store"
-    ) as slots_store_mock, patch(
-        "app.routers.evaluations.get_versions_store"
-    ) as versions_store_mock, patch("boto3.client") as boto_mock:
+    with (
+        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
+        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
+        patch("boto3.client") as boto_mock,
+    ):
         slots_store_mock.return_value.get.return_value = RuntimeSlots(
             runtime_name="myagent",
             owner_sub=_LOCAL_DEV_SUB,
@@ -168,11 +165,11 @@ def test_invalid_runtime_name_rejected(client: TestClient):
 def test_evaluation_results_handles_missing_log_group(client: TestClient):
     """If the runtime hasn't received traffic yet, the log group doesn't exist
     yet — treat that as "no results", not a 500."""
-    with patch(
-        "app.routers.evaluations.get_slots_store"
-    ) as slots_store_mock, patch(
-        "app.routers.evaluations.get_versions_store"
-    ) as versions_store_mock, patch("boto3.client") as boto_mock:
+    with (
+        patch("app.routers.evaluations.get_slots_store") as slots_store_mock,
+        patch("app.routers.evaluations.get_versions_store") as versions_store_mock,
+        patch("boto3.client") as boto_mock,
+    ):
         slots_store_mock.return_value.get.return_value = RuntimeSlots(
             runtime_name="myagent",
             owner_sub=_LOCAL_DEV_SUB,

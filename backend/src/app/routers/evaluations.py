@@ -26,7 +26,6 @@ import logging
 import os
 import re
 import time
-from typing import Optional
 
 import boto3
 from fastapi import APIRouter, Depends, HTTPException
@@ -56,9 +55,7 @@ def _region() -> str:
 router = APIRouter(prefix="/api/runtimes", tags=["evaluations"])
 
 
-def _resolve_owned_runtime_id(
-    runtime_name: str, caller_sub: str
-) -> tuple[str, str]:
+def _resolve_owned_runtime_id(runtime_name: str, caller_sub: str) -> tuple[str, str]:
     """Return (runtime_id, version_id) for the production version owned by
     *caller_sub*, or 404 if either the runtime or the slot is missing.
     """
@@ -86,7 +83,7 @@ async def get_evaluation_config(
     # but configs are named after the agent_id during create. Match by name
     # prefix as a heuristic; fall back to scanning the cloudWatchLogs serviceNames.
     configs: list[dict] = []
-    next_token: Optional[str] = None
+    next_token: str | None = None
     for _ in range(20):  # cap pagination
         kwargs: dict = {"maxResults": 50}
         if next_token:
@@ -121,12 +118,8 @@ async def get_evaluation_config(
         "runtime_id": runtime_id,
         "config_id": cfg_id,
         "config_name": detail.get("onlineEvaluationConfigName"),
-        "evaluators": [
-            ev.get("evaluatorId") for ev in detail.get("evaluators", [])
-        ],
-        "sampling_rate": (
-            detail.get("rule", {}).get("samplingConfig", {}).get("samplingPercentage")
-        ),
+        "evaluators": [ev.get("evaluatorId") for ev in detail.get("evaluators", [])],
+        "sampling_rate": (detail.get("rule", {}).get("samplingConfig", {}).get("samplingPercentage")),
         "status": detail.get("status"),
     }
 
@@ -161,7 +154,7 @@ async def list_evaluation_results(
 
     log_group = ""
     try:
-        next_token: Optional[str] = None
+        next_token: str | None = None
         for _ in range(20):
             kw: dict = {"maxResults": 50}
             if next_token:
@@ -173,9 +166,7 @@ async def list_evaluation_results(
                 if normalised_runtime[:32] in cfg_name or runtime_id[:32] in cfg_name:
                     cfg_id = cfg.get("onlineEvaluationConfigId", "")
                     if cfg_id:
-                        log_group = (
-                            f"/aws/bedrock-agentcore/evaluations/results/{cfg_id}"
-                        )
+                        log_group = f"/aws/bedrock-agentcore/evaluations/results/{cfg_id}"
                     break
             if log_group:
                 break
@@ -200,7 +191,7 @@ async def list_evaluation_results(
     query_string = (
         "fields @timestamp, @message"
         "\n| filter @message like /evaluatorId/"
-        "\n| parse @message /\"evaluatorId\":\"(?<eid>[^\"]+)\".*\"score\":(?<score>[0-9.]+)/"
+        '\n| parse @message /"evaluatorId":"(?<eid>[^"]+)".*"score":(?<score>[0-9.]+)/'
         "\n| stats count(*) as runs, avg(score) as avg_score, latest(score) as latest_score by eid"
         "\n| sort by avg_score desc"
         "\n| limit 50"
@@ -230,7 +221,7 @@ async def list_evaluation_results(
         }
     except Exception as exc:
         logger.exception("Failed to start CloudWatch Insights query")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
     # Poll until the query finishes (Logs Insights is async). We block up to
     # ~10s to keep the API call within API GW's 29s ceiling with margin.

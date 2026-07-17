@@ -12,8 +12,6 @@ Requirements: 3.1, 3.7, 9.1, 9.2, 9.3, 9.4
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import json
 import logging
 import os
@@ -21,20 +19,19 @@ import re
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
 
 import boto3
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from mangum import Mangum
 
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import (
+    DeleteResponse,
     DeploymentState,
     DeploymentStatusEnum,
     DeployRequest,
     DeployResponse,
-    DeleteResponse,
     ImportRuntimeRequest,
     TestRequest,
     TestResponse,
@@ -103,7 +100,7 @@ def _create_agentcore_client(region: str):
 # Deployment state store (lazy-initialised)
 # ---------------------------------------------------------------------------
 
-_state_store: Optional[DeploymentStateStore] = None
+_state_store: DeploymentStateStore | None = None
 
 
 def _get_state_store() -> DeploymentStateStore:
@@ -116,7 +113,7 @@ def _get_state_store() -> DeploymentStateStore:
     return _state_store
 
 
-def _scan_for_runtime(table, runtime_id: str) -> Optional[dict]:
+def _scan_for_runtime(table, runtime_id: str) -> dict | None:
     """Look up a deployment record by runtime_id.
 
     Audit issue #7: previously this did a full O(N) Scan with a
@@ -147,7 +144,8 @@ def _scan_for_runtime(table, runtime_id: str) -> Optional[dict]:
         # CDK change; log and fall through to the scan path so we don't
         # break delete/test on those deployments.
         logger.warning(
-            "runtime_id-index Query failed (%s); falling back to Scan", exc,
+            "runtime_id-index Query failed (%s); falling back to Scan",
+            exc,
         )
 
     # Fallback: paginated Scan (covers partial-failed deploys whose
@@ -168,10 +166,10 @@ def _scan_for_runtime(table, runtime_id: str) -> Optional[dict]:
 
 
 def _gateway_implied(
-    gateway_tools: Optional[list],
-    connectors: Optional[list],
-    connected_tools: Optional[list],
-    external_mcp_servers: Optional[list] = None,
+    gateway_tools: list | None,
+    connectors: list | None,
+    connected_tools: list | None,
+    external_mcp_servers: list | None = None,
 ) -> bool:
     """Whether a gateway must be deployed even if no explicit ``gateway_config`` was sent.
 
@@ -187,15 +185,10 @@ def _gateway_implied(
     from ``"gateway" in connected_tools`` and synthesizes ``{"name": ...}``
     itself — this mirrors that so BOTH paths behave identically.
     """
-    return bool(
-        gateway_tools
-        or connectors
-        or external_mcp_servers
-        or "gateway" in (connected_tools or [])
-    )
+    return bool(gateway_tools or connectors or external_mcp_servers or "gateway" in (connected_tools or []))
 
 
-def _maybe_promote_policy(deployment_state: Optional[dict], region: str) -> bool:
+def _maybe_promote_policy(deployment_state: dict | None, region: str) -> bool:
     """Lazy-promote a pending Cedar policy engine from LOG_ONLY to ENFORCE.
 
     Bug 178/181: the gateway's policy-authorization plane converges ~3-5 min after
@@ -214,6 +207,7 @@ def _maybe_promote_policy(deployment_state: Optional[dict], region: str) -> bool
         return False
     try:
         from app.services.policy_promoter import try_promote_to_enforce
+
         outcome = try_promote_to_enforce(deployment_state, region)
         logger.info("policy promote outcome: %s", outcome)
         if outcome and outcome.get("promoted"):
@@ -228,6 +222,7 @@ def _maybe_promote_policy(deployment_state: Optional[dict], region: str) -> bool
             deployment_state["policy_result"] = pr
             try:
                 from app.models.deployment_models import DeploymentStatusEnum
+
                 _get_state_store().update_status(
                     deployment_state.get("deployment_id"),
                     DeploymentStatusEnum.SUCCEEDED,
@@ -247,12 +242,17 @@ def _maybe_promote_policy(deployment_state: Optional[dict], region: str) -> bool
 # ---------------------------------------------------------------------------
 
 
-def _get_user_id(request: Request) -> Optional[str]:
+def _get_user_id(request: Request) -> str | None:
     """Extract user sub from JWT claims (API Gateway HTTP API JWT authorizer)."""
     try:
-        return request.scope.get("aws.event", {}).get(
-            "requestContext", {}
-        ).get("authorizer", {}).get("jwt", {}).get("claims", {}).get("sub")
+        return (
+            request.scope.get("aws.event", {})
+            .get("requestContext", {})
+            .get("authorizer", {})
+            .get("jwt", {})
+            .get("claims", {})
+            .get("sub")
+        )
     except Exception:
         return None
 
@@ -315,28 +315,29 @@ async def _audit_middleware(request, call_next):
         logger.warning("audit middleware skipped: %s", exc)
     return response
 
+
 # Phase 1 Gap 1A — version + slot management endpoints. Mounted on the
 # deployment Lambda because the versions table belongs to the runtime-control
 # plane (same data plane as /api/deploy and /api/test-runtime). API GW routes
 # for /api/runtimes/{name}/versions* are added in infra/stacks/platform_stack.py
 # per the Bug 21 router-enumeration rule.
-from app.routers.versions import router as versions_router  # noqa: E402
-from app.routers.evaluations import router as evaluations_router  # noqa: E402
-from app.routers.registry import router as registry_router  # noqa: E402
-from app.routers.cost import router as cost_router  # noqa: E402
-from app.routers.cost import budgets_router  # noqa: E402  # Phase 4 FinOps budgets
-from app.routers.hitl import router as hitl_router  # noqa: E402
-from app.routers.prompts import router as prompts_router  # noqa: E402  # Phase 3 Gap 3H
-from app.routers.connectors import router as connectors_router  # noqa: E402
-from app.routers.identity import router as identity_router  # noqa: E402
-from app.routers.permissions import router as permissions_router  # noqa: E402
-from app.routers.approvals import router as approvals_router  # noqa: E402
-from app.routers.vpc_profiles import router as vpc_profiles_router  # noqa: E402
-from app.routers.models import router as models_router  # noqa: E402
-from app.routers.mcp_servers import router as mcp_servers_router  # noqa: E402
-from app.routers.triggers import router as triggers_router  # noqa: E402
-from app.routers.tags import router as tags_router  # noqa: E402  # Phase 2 governance tagging
 from app.routers.admin import router as admin_router  # noqa: E402  # Phase 5 audit dashboard
+from app.routers.approvals import router as approvals_router  # noqa: E402
+from app.routers.connectors import router as connectors_router  # noqa: E402
+from app.routers.cost import budgets_router  # noqa: E402  # Phase 4 FinOps budgets
+from app.routers.cost import router as cost_router  # noqa: E402
+from app.routers.evaluations import router as evaluations_router  # noqa: E402
+from app.routers.hitl import router as hitl_router  # noqa: E402
+from app.routers.identity import router as identity_router  # noqa: E402
+from app.routers.mcp_servers import router as mcp_servers_router  # noqa: E402
+from app.routers.models import router as models_router  # noqa: E402
+from app.routers.permissions import router as permissions_router  # noqa: E402
+from app.routers.prompts import router as prompts_router  # noqa: E402  # Phase 3 Gap 3H
+from app.routers.registry import router as registry_router  # noqa: E402
+from app.routers.tags import router as tags_router  # noqa: E402  # Phase 2 governance tagging
+from app.routers.triggers import router as triggers_router  # noqa: E402
+from app.routers.versions import router as versions_router  # noqa: E402
+from app.routers.vpc_profiles import router as vpc_profiles_router  # noqa: E402
 
 deployment_app.include_router(versions_router)
 # Phase 1 Gap 1C — evaluation results endpoint. Mounted on the deployment
@@ -401,7 +402,7 @@ async def health_check() -> dict:
     checks = {"api": "ok"}
     try:
         store = _get_state_store()
-        store._table.table_status  # lightweight DynamoDB connectivity check
+        _ = store._table.table_status  # lightweight DynamoDB connectivity check
         checks["dynamodb"] = "ok"
     except Exception:
         checks["dynamodb"] = "degraded"
@@ -441,8 +442,10 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     if _vpc_profile and not getattr(request.config, "vpc_config", None):
         try:
             from app.services.vpc_profile_store import resolve_vpc_config
+
             _resolved = resolve_vpc_config(
-                "default", _vpc_profile,
+                "default",
+                _vpc_profile,
                 os.environ.get("TAG_POLICY_TABLE_NAME", ""),
                 os.environ.get("APP_AWS_REGION", os.environ.get("AWS_REGION", "us-east-1")),
             )
@@ -467,7 +470,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
                     _idents.append(str(_mcp[k]))
         _a2a = request.a2a_config or {}
         if isinstance(_a2a, dict):
-            for u in (_a2a.get("peer_allowlist") or _a2a.get("peerAllowlist") or []):
+            for u in _a2a.get("peer_allowlist") or _a2a.get("peerAllowlist") or []:
                 _idents.append(str(u))
         _blocked = unapproved_integrations(_idents)
         if _blocked:
@@ -501,9 +504,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     )
     from app.services.runtime_deployer import sanitize_runtime_name
 
-    friendly_runtime_name = sanitize_runtime_name(
-        request.config.name or f"agent-{deployment_id[:8]}"
-    )
+    friendly_runtime_name = sanitize_runtime_name(request.config.name or f"agent-{deployment_id[:8]}")
     version_id = new_version_id()
     # AgentCore runtime name: 48 char limit, must match [a-zA-Z][a-zA-Z0-9_]{0,47}.
     # We reserve 9 chars for "_<8-hex>", giving the friendly portion up to 39 chars.
@@ -519,7 +520,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     # deploy `config.name="alice_bot"` and clobber Alice's slot row,
     # locking her out and leaking her version_id via /slots.
     # See tasks/lessons.md Bug 122.
-    parent_version_id: Optional[str] = None
+    parent_version_id: str | None = None
     try:
         slots = get_slots_store().get(friendly_runtime_name)
         if slots is not None and slots.owner_sub and slots.owner_sub != (user_id or ""):
@@ -540,8 +541,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         raise
     except Exception:
         # Slots table may be missing on first deploy of a fresh stack — not fatal.
-        logger.warning("RuntimeSlotsStore.get failed; treating as first deploy",
-                       exc_info=True)
+        logger.warning("RuntimeSlotsStore.get failed; treating as first deploy", exc_info=True)
 
     # Defense in depth: also check the AgentVersions table for any foreign-owner
     # row under this friendly name. Covers the case where slots may not yet
@@ -557,11 +557,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     try:
         existing_versions = get_versions_store().list_for_runtime(friendly_runtime_name)
         for v in existing_versions:
-            if (
-                v.owner_sub
-                and v.owner_sub != (user_id or "")
-                and (v.status or "pending") in _LIVE_CLAIM
-            ):
+            if v.owner_sub and v.owner_sub != (user_id or "") and (v.status or "pending") in _LIVE_CLAIM:
                 raise HTTPException(
                     status_code=409,
                     detail=(
@@ -573,8 +569,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         raise
     except Exception:
         logger.warning(
-            "AgentVersionsStore.list_for_runtime failed during ownership check; "
-            "treating as first deploy",
+            "AgentVersionsStore.list_for_runtime failed during ownership check; treating as first deploy",
             exc_info=True,
         )
 
@@ -584,6 +579,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     # an inline-string systemPrompt is left untouched (back-compat). Never
     # hard-fails: a missing/foreign ref logs and keeps the original value.
     from app.services.prompt_resolver import resolve_system_prompt
+
     resolve_system_prompt(request.config, user_id)
 
     state = DeploymentState(
@@ -681,7 +677,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         from app.services.tag_policy_store import TagResolutionError
 
         if isinstance(exc, TagResolutionError):
-            raise HTTPException(status_code=400, detail=str(exc))
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         logger.warning("Tag resolution skipped (non-fatal): %s", exc)
 
     # Phase 7 (opt-in) deployment targets — resolve the target account/region
@@ -690,9 +686,9 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     # → home account + region, threaded as None so step_clients uses the default
     # session (unchanged path). A registered target is validated (assumable +
     # landed-account) at registration time; here we only enforce the gate.
-    target_account_id: Optional[str] = None
-    target_region: Optional[str] = None
-    target_role_arn: Optional[str] = None
+    target_account_id: str | None = None
+    target_region: str | None = None
+    target_role_arn: str | None = None
     if request.target_account_id or request.target_region:
         from app.services.deploy_target import (
             TargetError,
@@ -710,7 +706,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
             target_region = resolve_region(request.target_region)
             target_account_id = request.target_account_id
         except TargetError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         # Resolve the target account's role ARN HERE (the deployment Lambda has
         # the Settings table) and thread it on the SFN event, so the step
         # Lambdas assume the role without needing a Settings lookup.
@@ -805,7 +801,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
     if getattr(request, "a2a_config", None):
         sfn_input["a2a_config"] = request.a2a_config
 
-    execution_arn: Optional[str] = None
+    execution_arn: str | None = None
     try:
         sfn_client = _create_sfn_client(config.aws_region)
         sfn_response = _start_sfn_execution(
@@ -831,7 +827,7 @@ async def handle_deploy(request: DeployRequest, raw_request: Request) -> DeployR
         raise HTTPException(
             status_code=500,
             detail="Deployment initiation failed. Check deployment status for details.",
-        )
+        ) from exc
 
     return DeployResponse(
         deployment_id=deployment_id,
@@ -889,8 +885,8 @@ async def handle_deploy_status(deployment_id: str) -> dict:
 @deployment_app.get("/api/deployments")
 async def handle_list_deployments(
     request: Request,
-    workflow_id: Optional[str] = None,
-    status: Optional[str] = None,
+    workflow_id: str | None = None,
+    status: str | None = None,
 ) -> list[dict]:
     """List deployments by workflow_id or user_id (from JWT), optionally filtered by status."""
     store = _get_state_store()
@@ -1004,7 +1000,7 @@ async def handle_test_runtime(request: TestRequest, raw_request: Request) -> Tes
                 raise HTTPException(
                     status_code=400,
                     detail=f"Cannot resolve runtime ARN for runtime_id={runtime_id}. Check logs for details.",
-                )
+                ) from e
 
         # Validate auth token if gateway was deployed
         if deployment_state:
@@ -1121,11 +1117,13 @@ async def handle_test_runtime_stream(request: TestRequest):
         lines = [f"data: {json.dumps({'type': 'token', 'token': w + ' '})}\n\n" for w in words]
         lines.append(f"data: {json.dumps({'type': 'done'})}\n\n")
         from fastapi.responses import PlainTextResponse
+
         return PlainTextResponse("".join(lines), media_type="text/event-stream")
 
     runtime_id = request.runtime_id
     if not runtime_id or not re.match(r"^[a-zA-Z0-9_-]+$", runtime_id) or len(runtime_id) > 128:
         from fastapi.responses import PlainTextResponse
+
         return PlainTextResponse(
             f"data: {json.dumps({'type': 'error', 'error': 'Invalid runtime_id'})}\n\n",
             media_type="text/event-stream",
@@ -1182,7 +1180,9 @@ async def handle_test_runtime_stream(request: TestRequest):
         for i, word in enumerate(words):
             token = word + (" " if i < len(words) - 1 else "")
             lines.append(f"data: {json.dumps({'type': 'token', 'token': token})}\n\n")
-        lines.append(f"data: {json.dumps({'type': 'done', 'session_id': request.session_id or runtime_id, 'full_response': out})}\n\n")
+        lines.append(
+            f"data: {json.dumps({'type': 'done', 'session_id': request.session_id or runtime_id, 'full_response': out})}\n\n"
+        )
         return PlainTextResponse("".join(lines), media_type="text/event-stream")
 
     runtime_arn = (deployment_state or {}).get("runtime_arn", "")
@@ -1191,9 +1191,10 @@ async def handle_test_runtime_stream(request: TestRequest):
             sts = boto3.client("sts", region_name=region)
             account_id = sts.get_caller_identity()["Account"]
             runtime_arn = f"arn:aws:bedrock-agentcore:{region}:{account_id}:runtime/{runtime_id}"
-        except Exception as e:
+        except Exception:
             logger.exception("Cannot resolve runtime ARN")
             from fastapi.responses import PlainTextResponse
+
             return PlainTextResponse(
                 f"data: {json.dumps({'type': 'error', 'error': 'Cannot resolve runtime ARN'})}\n\n",
                 media_type="text/event-stream",
@@ -1228,11 +1229,13 @@ async def handle_test_runtime_stream(request: TestRequest):
         lines.append(f"data: {json.dumps({'type': 'done', 'session_id': session_id, 'full_response': parsed})}\n\n")
 
         from fastapi.responses import PlainTextResponse
+
         return PlainTextResponse("".join(lines), media_type="text/event-stream")
 
-    except Exception as e:
+    except Exception:
         logger.exception("Runtime invocation failed")
         from fastapi.responses import PlainTextResponse
+
         return PlainTextResponse(
             f"data: {json.dumps({'type': 'error', 'error': 'Internal error'})}\n\n",
             media_type="text/event-stream",
@@ -1327,7 +1330,6 @@ def _delete_managed_resource(res: dict, region: str) -> str:
     shim. Same-account resources (no recorded account) use the default session —
     unchanged behavior.
     """
-    import boto3 as _boto3_real
 
     rtype = res.get("type", "")
     rid = res.get("id") or res.get("name") or ""
@@ -1337,14 +1339,13 @@ def _delete_managed_resource(res: dict, region: str) -> str:
 
     class _TargetBoto3:
         """Minimal boto3 shim: routes .client() through the resource's target."""
+
         def __init__(self, account, region_):
-            self._event = (
-                {"target_account_id": account, "target_region": region_}
-                if account else {}
-            )
+            self._event = {"target_account_id": account, "target_region": region_} if account else {}
 
         def client(self, service, **kwargs):
             from app.services import step_clients
+
             return step_clients.client(self._event, service, **kwargs)
 
     boto3 = _TargetBoto3(res_account, res_region)
@@ -1411,10 +1412,14 @@ def _delete_managed_resource(res: dict, region: str) -> str:
                     raise
             return f"[manifest] gateway {rid} deleted"
         if rtype == "oauth2_credential_provider":
-            boto3.client("bedrock-agentcore-control", region_name=res_region).delete_oauth2_credential_provider(name=rname or rid)
+            boto3.client("bedrock-agentcore-control", region_name=res_region).delete_oauth2_credential_provider(
+                name=rname or rid
+            )
             return f"[manifest] oauth2 provider {rname or rid} deleted"
         if rtype == "api_key_credential_provider":
-            boto3.client("bedrock-agentcore-control", region_name=res_region).delete_api_key_credential_provider(name=rname or rid)
+            boto3.client("bedrock-agentcore-control", region_name=res_region).delete_api_key_credential_provider(
+                name=rname or rid
+            )
             return f"[manifest] apikey provider {rname or rid} deleted"
         if rtype == "secret":
             boto3.client("secretsmanager", region_name=res_region).delete_secret(
@@ -1488,13 +1493,9 @@ def _delete_managed_resource(res: dict, region: str) -> str:
             # must still exist at KB-delete time.
             ba = boto3.client("bedrock-agent", region_name=res_region)
             try:
-                for ds in ba.list_data_sources(knowledgeBaseId=rid).get(
-                    "dataSourceSummaries", []
-                ):
+                for ds in ba.list_data_sources(knowledgeBaseId=rid).get("dataSourceSummaries", []):
                     try:
-                        ba.delete_data_source(
-                            knowledgeBaseId=rid, dataSourceId=ds["dataSourceId"]
-                        )
+                        ba.delete_data_source(knowledgeBaseId=rid, dataSourceId=ds["dataSourceId"])
                     except Exception:  # noqa: BLE001
                         pass
             except Exception:  # noqa: BLE001
@@ -1538,9 +1539,15 @@ def _delete_managed_resource(res: dict, region: str) -> str:
                     aoss.delete_collection(id=det[0]["id"])
             except Exception:  # noqa: BLE001
                 pass
-            for suffix, ptype in ((f"{cname}-acc"[:32], "data"), (f"{cname}-net"[:32], "network"), (f"{cname}-enc"[:32], "encryption")):
+            for suffix, ptype in (
+                (f"{cname}-acc"[:32], "data"),
+                (f"{cname}-net"[:32], "network"),
+                (f"{cname}-enc"[:32], "encryption"),
+            ):
                 try:
-                    aoss.delete_access_policy(name=suffix, type=ptype) if ptype == "data" else aoss.delete_security_policy(name=suffix, type=ptype)
+                    aoss.delete_access_policy(
+                        name=suffix, type=ptype
+                    ) if ptype == "data" else aoss.delete_security_policy(name=suffix, type=ptype)
                 except Exception:  # noqa: BLE001
                     pass
             return f"[manifest] oss collection {cname} + policies deleted"
@@ -1608,7 +1615,7 @@ async def handle_import_runtime(request: ImportRuntimeRequest, raw_request: Requ
         ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
         rt = ctrl.get_agent_runtime(agentRuntimeId=runtime_id)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=404, detail=f"Runtime not found or not describable: {exc}")
+        raise HTTPException(status_code=404, detail=f"Runtime not found or not describable: {exc}") from exc
 
     store = _get_state_store()
     # Idempotency + tenant safety: if this runtime is already recorded by another
@@ -1698,6 +1705,7 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
     if _aws_rec_id:
         try:
             from app.services.aws_agent_registry import get_registry
+
             _reg = get_registry()
             if _reg is not None and _reg.delete(_aws_rec_id):
                 cleanup_messages.append(f"AWS registry record {_aws_rec_id} deleted")
@@ -2003,9 +2011,9 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
                 try:
                     import boto3 as _boto3
 
-                    _boto3.client(
-                        "bedrock-agentcore-control", region_name=region
-                    ).delete_oauth2_credential_provider(name=_gw_prov)
+                    _boto3.client("bedrock-agentcore-control", region_name=region).delete_oauth2_credential_provider(
+                        name=_gw_prov
+                    )
                     cleanup_messages.append(f"Harness gateway OAuth provider {_gw_prov} deleted")
                 except Exception as _e:  # noqa: BLE001
                     if "ResourceNotFound" not in str(_e) and "NotFound" not in str(_e):
@@ -2047,10 +2055,7 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
     try:
         friendly = None
         if deployment_record:
-            friendly = (
-                deployment_record.get("friendly_runtime_name")
-                or deployment_record.get("workflow_id")
-            )
+            friendly = deployment_record.get("friendly_runtime_name") or deployment_record.get("workflow_id")
             # Fall back to deriving from the agentcore runtime name (strip _<suffix>).
             if not friendly:
                 acn = deployment_record.get("agentcore_runtime_name") or ""
@@ -2085,9 +2090,7 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
     # listed in the response message so the caller can act on the leak.
     overall_success = not runtime_destroy_failed and not cleanup_failures
     if cleanup_failures:
-        cleanup_messages.append(
-            f"Cleanup failures in: {', '.join(sorted(set(cleanup_failures)))}"
-        )
+        cleanup_messages.append(f"Cleanup failures in: {', '.join(sorted(set(cleanup_failures)))}")
     summary = "; ".join(cleanup_messages) if cleanup_messages else "Cleanup completed"
     return DeleteResponse(success=overall_success, message=summary)
 
@@ -2290,9 +2293,7 @@ async def handle_get_test_result(test_id: str):
 
 
 @deployment_app.post("/api/generate-canvas", response_model=AgentGenerateResponse, response_model_by_alias=True)
-async def handle_generate_canvas(
-    request: AgentGenerateRequest, raw_request: Request
-) -> AgentGenerateResponse:
+async def handle_generate_canvas(request: AgentGenerateRequest, raw_request: Request) -> AgentGenerateResponse:
     """Generate an AgentCore canvas spec from a natural-language description.
 
     Two-turn pattern (mirrors /api/generate-tool):
@@ -2385,9 +2386,9 @@ async def handle_generate_cfn_template(request: DeployRequest):
             "filename": f"{bundle.deployment_name}-cfn.zip",
         }
 
-    except Exception as e:
+    except Exception as exc:
         logger.exception("CFN template generation failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -2430,9 +2431,9 @@ async def handle_export_python(request: DeployRequest, raw_request: Request):
             "filename": f"{deployment_name}-python.zip",
         }
 
-    except Exception:
+    except Exception as exc:
         logger.exception("Python export failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error") from exc
 
 
 # ---------------------------------------------------------------------------
@@ -2451,16 +2452,20 @@ def handler(event, context):
             return _handle_async_generate(event)
         # EventBridge-scheduled Cedar-ENFORCE promotion sweep (Loom-study 0.6):
         # self-drives pending permits to ACTIVE without a user touchpoint.
-        if event.get("policy_sweep") or (event.get("source") == "aws.events"
-                                         and event.get("detail-type") == "policy-sweep"):
+        if event.get("policy_sweep") or (
+            event.get("source") == "aws.events" and event.get("detail-type") == "policy-sweep"
+        ):
             from app.step_handlers.policy_sweep_step import handler as _sweep
+
             return _sweep(event, context)
         # EventBridge-scheduled FinOps cost reconciliation (Loom-study 5.3):
         # self-drives budget-breach detection for idle-but-overspending agents
         # that no human has opened the cost panel for.
-        if event.get("cost_reconcile") or (event.get("source") == "aws.events"
-                                           and event.get("detail-type") == "cost-reconcile"):
+        if event.get("cost_reconcile") or (
+            event.get("source") == "aws.events" and event.get("detail-type") == "cost-reconcile"
+        ):
             from app.step_handlers.cost_reconcile_step import handler as _reconcile
+
             return _reconcile(event, context)
 
     # Normal API Gateway request → Mangum/FastAPI

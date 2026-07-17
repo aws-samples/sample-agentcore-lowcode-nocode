@@ -20,7 +20,8 @@ def _state(mode="LOG_ONLY", pending=True, validation_pending=False):
         pr["enforce_validation_pending"] = True
     if pending:
         pr["enforce_pending"] = {
-            "engine_id": "eng-1", "gateway_id": "gw-1",
+            "engine_id": "eng-1",
+            "gateway_id": "gw-1",
             "gateway_arn": "arn:aws:bedrock-agentcore:us-east-1:1:gateway/gw-1",
             "policies": [{"name": "allow", "statement": "permit(...);", "description": ""}],
         }
@@ -44,8 +45,7 @@ def test_failclosed_enforce_unbricks_when_policies_active():
     ctrl = MagicMock()
     ctrl.list_policies.return_value = {"policies": [{"name": "allow", "status": "ACTIVE", "policyId": "p1"}]}
     with patch.object(pp, "_ctrl", return_value=ctrl):
-        out = pp.try_promote_to_enforce(
-            _state(mode="ENFORCE", validation_pending=True), "us-east-1")
+        out = pp.try_promote_to_enforce(_state(mode="ENFORCE", validation_pending=True), "us-east-1")
     assert out["promoted"] is True and out["mode"] == "ENFORCE"
     ctrl.update_gateway.assert_not_called()
 
@@ -57,8 +57,7 @@ def test_failclosed_enforce_stays_denied_until_policies_active():
     ctrl.create_policy.return_value = {"policyId": "p1"}
     ctrl.get_policy.return_value = {"status": "CREATE_FAILED"}
     with patch.object(pp, "_ctrl", return_value=ctrl):
-        out = pp.try_promote_to_enforce(
-            _state(mode="ENFORCE", validation_pending=True), "us-east-1")
+        out = pp.try_promote_to_enforce(_state(mode="ENFORCE", validation_pending=True), "us-east-1")
     assert out["promoted"] is False and out["mode"] == "ENFORCE"
     ctrl.update_gateway.assert_not_called()
 
@@ -67,8 +66,12 @@ def test_promotes_when_policies_active():
     ctrl = MagicMock()
     # policy already ACTIVE on the engine
     ctrl.list_policies.return_value = {"policies": [{"name": "allow", "status": "ACTIVE", "policyId": "p1"}]}
-    ctrl.get_gateway.return_value = {"name": "gw", "roleArn": "r", "protocolType": "MCP",
-                                     "policyEngineConfiguration": {"arn": "arn:eng"}}
+    ctrl.get_gateway.return_value = {
+        "name": "gw",
+        "roleArn": "r",
+        "protocolType": "MCP",
+        "policyEngineConfiguration": {"arn": "arn:eng"},
+    }
     with patch.object(pp, "_ctrl", return_value=ctrl):
         out = pp.try_promote_to_enforce(_state(), "us-east-1")
     assert out["promoted"] is True and out["mode"] == "ENFORCE"
@@ -99,12 +102,15 @@ def test_recovers_create_failed_in_place_without_delete():
     """
     ctrl = MagicMock()
     # a CREATE_FAILED policy already exists on the engine (from the deploy attach)
-    ctrl.list_policies.return_value = {
-        "policies": [{"name": "allow", "status": "CREATE_FAILED", "policyId": "p1"}]}
+    ctrl.list_policies.return_value = {"policies": [{"name": "allow", "status": "CREATE_FAILED", "policyId": "p1"}]}
     # gateway has since converged: the in-place update validates ACTIVE
     ctrl.get_policy.return_value = {"status": "ACTIVE"}
-    ctrl.get_gateway.return_value = {"name": "gw", "roleArn": "r", "protocolType": "MCP",
-                                     "policyEngineConfiguration": {"arn": "arn:eng"}}
+    ctrl.get_gateway.return_value = {
+        "name": "gw",
+        "roleArn": "r",
+        "protocolType": "MCP",
+        "policyEngineConfiguration": {"arn": "arn:eng"},
+    }
     with patch.object(pp, "_ctrl", return_value=ctrl):
         out = pp.try_promote_to_enforce(_state(), "us-east-1")
     assert out["promoted"] is True and out["mode"] == "ENFORCE"
@@ -123,8 +129,7 @@ def test_recovers_create_failed_in_place_without_delete():
 def test_skips_in_flight_policy_owned_by_concurrent_run():
     """A CREATING policy belongs to another concurrent promoter run — leave it."""
     ctrl = MagicMock()
-    ctrl.list_policies.return_value = {
-        "policies": [{"name": "allow", "status": "CREATING", "policyId": "p1"}]}
+    ctrl.list_policies.return_value = {"policies": [{"name": "allow", "status": "CREATING", "policyId": "p1"}]}
     with patch.object(pp, "_ctrl", return_value=ctrl):
         out = pp.try_promote_to_enforce(_state(), "us-east-1")
     assert out["promoted"] is False

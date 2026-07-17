@@ -33,7 +33,6 @@ import urllib.parse
 import urllib.request
 import uuid
 
-
 # ---------------------------------------------------------------------------
 # Agent invocation
 # ---------------------------------------------------------------------------
@@ -41,12 +40,14 @@ import uuid
 
 def invoke_agent(api_base: str, runtime_id: str, prompt: str, session_id: str) -> dict:
     """Hit the platform's /api/test-runtime endpoint."""
-    body = json.dumps({
-        "endpoint": "",
-        "input": prompt,
-        "runtimeId": runtime_id,
-        "sessionId": session_id,
-    }).encode()
+    body = json.dumps(
+        {
+            "endpoint": "",
+            "input": prompt,
+            "runtimeId": runtime_id,
+            "sessionId": session_id,
+        }
+    ).encode()
     req = urllib.request.Request(
         f"{api_base}/api/test-runtime",
         data=body,
@@ -207,7 +208,7 @@ def main() -> None:
     for i in range(args.invocations):
         prompt = prompts[i % len(prompts)]
         try:
-            resp = invoke_agent(args.api_base, args.runtime_id, prompt, session_id)
+            invoke_agent(args.api_base, args.runtime_id, prompt, session_id)
             print(f"[verify]  invocation {i + 1}/{args.invocations} ok")
         except Exception as e:
             print(f"[verify] invocation failed: {e}", file=sys.stderr)
@@ -217,8 +218,7 @@ def main() -> None:
     time.sleep(10)
 
     if args.provider == "langfuse":
-        assert_langfuse(args.langfuse_host, args.langfuse_pk, args.langfuse_sk,
-                        args.service_name, session_id)
+        assert_langfuse(args.langfuse_host, args.langfuse_pk, args.langfuse_sk, args.service_name, session_id)
     else:
         assert_phoenix(args.phoenix_host, args.service_name, session_id)
 

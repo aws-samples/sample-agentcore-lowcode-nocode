@@ -1,7 +1,7 @@
 """Root conftest — fix sys.path so vendored pydantic stubs don't shadow the real package."""
 
-import sys
 import os
+import sys
 
 # The backend/ directory contains vendored pydantic/pydantic_core stubs for Lambda
 # packaging. These are pure-Python stubs without the compiled _pydantic_core extension.

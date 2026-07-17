@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Optional
 
 import boto3
 
@@ -234,7 +233,7 @@ _BUILTIN_TOOL_IDS = {
 }
 
 
-def _validate_spec(spec: dict) -> Optional[str]:
+def _validate_spec(spec: dict) -> str | None:
     """Return None if the spec is valid, else an error message string.
 
     Validates the structural invariants documented in GENERATION_PROMPT.
@@ -305,10 +304,7 @@ def _validate_spec(spec: dict) -> Optional[str]:
         if s == runtime_suffix:
             continue
         if s in tool_suffixes:
-            if not any(
-                e.get("sourceIdSuffix") == s and e.get("targetIdSuffix") in gateway_suffixes
-                for e in edges
-            ):
+            if not any(e.get("sourceIdSuffix") == s and e.get("targetIdSuffix") in gateway_suffixes for e in edges):
                 return f"tool node '{s}' has no edge to a gateway ('tool -> gateway')"
             continue
         # The gateway is a non-tool support node, so this also enforces the
@@ -351,7 +347,7 @@ def _validate_spec(spec: dict) -> Optional[str]:
 
 def generate_canvas(
     prompt: str,
-    conversation_history: Optional[list[dict]] = None,
+    conversation_history: list[dict] | None = None,
     region: str = "us-east-1",
     max_validation_retries: int = 2,
 ) -> dict:
@@ -403,7 +399,7 @@ def generate_canvas(
             history = [{"role": "user", "content": prompt}]
 
         # Subsequent turns: tool-use generation with retry-on-validation.
-        validation_error: Optional[str] = None
+        validation_error: str | None = None
         for attempt in range(max_validation_retries + 1):
             attempt_messages = list(messages)
             if validation_error:
@@ -434,9 +430,7 @@ def generate_canvas(
             content = resp.get("output", {}).get("message", {}).get("content", [])
             tool_use = next((b.get("toolUse") for b in content if "toolUse" in b), None)
             if not tool_use:
-                logger.warning(
-                    "agent_generator: no tool_use in response (attempt %d)", attempt + 1
-                )
+                logger.warning("agent_generator: no tool_use in response (attempt %d)", attempt + 1)
                 validation_error = "model did not call submit_canvas"
                 continue
 

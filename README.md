@@ -226,8 +226,9 @@ Use this when you don't have an OTLP backend yet, or you don't need centralized 
 # Minimal deploy (dev environment, us-east-1)
 COGNITO_USERS="user@example.com" ./scripts/deploy.sh
 
-# Specific environment and region
-COGNITO_USERS="user@example.com" ENVIRONMENT_NAME=prod AWS_REGION=us-west-2 ./scripts/deploy.sh
+# Specific environment (the stack requires us-east-1 — its WAF WebACL is
+# CLOUDFRONT-scoped, which AWS only accepts in us-east-1; deploy.sh fails fast otherwise)
+COGNITO_USERS="user@example.com" ENVIRONMENT_NAME=prod ./scripts/deploy.sh
 ```
 
 ### Mode 2: With platform-level OTEL
@@ -619,7 +620,7 @@ DELETE /api/runtime/{runtime_id}
 ./scripts/cleanup.sh
 
 # Tear down a specific environment
-ENVIRONMENT_NAME=prod AWS_REGION=us-west-2 ./scripts/cleanup.sh
+ENVIRONMENT_NAME=prod ./scripts/cleanup.sh
 ```
 
 The cleanup script (`scripts/cleanup.sh`) will:

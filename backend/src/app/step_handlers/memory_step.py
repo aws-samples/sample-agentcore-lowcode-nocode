@@ -9,16 +9,13 @@ References:
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import json
 import logging
 import os
 import time
 import uuid
 
-import boto3
-
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
@@ -385,11 +382,13 @@ def handler(event: dict, context) -> dict:
                 Key={"deployment_id": {"S": deployment_id}},
                 UpdateExpression="SET memory_result = :mr",
                 ExpressionAttributeValues={
-                    ":mr": {"M": {
-                        "success": {"BOOL": True},
-                        "memory_id": {"S": memory_id},
-                        "memory_name": {"S": memory_name},
-                    }},
+                    ":mr": {
+                        "M": {
+                            "success": {"BOOL": True},
+                            "memory_id": {"S": memory_id},
+                            "memory_name": {"S": memory_name},
+                        }
+                    },
                 },
             )
             logger.info("Persisted memory_result mid-flight for %s", deployment_id)

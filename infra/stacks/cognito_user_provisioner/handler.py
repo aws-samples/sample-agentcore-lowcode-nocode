@@ -121,7 +121,9 @@ def handler(event: dict, context) -> None:
         elif event["RequestType"] == "Delete":
             _delete_user(user_pool_id, email)
         else:
-            _send_cfn_response(event, context, "FAILED", physical_id, reason=f"Unknown RequestType: {event['RequestType']}")
+            _send_cfn_response(
+                event, context, "FAILED", physical_id, reason=f"Unknown RequestType: {event['RequestType']}"
+            )
             return
 
         _send_cfn_response(event, context, "SUCCESS", physical_id)

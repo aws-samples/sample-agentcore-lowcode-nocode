@@ -11,8 +11,6 @@ from unittest.mock import patch
 
 import boto3
 import pytest
-from moto import mock_aws
-
 from app.services.config import (
     AppConfig,
     _build_ssm_parameter_path,
@@ -22,7 +20,7 @@ from app.services.config import (
     _parse_cors_origins,
     load_config,
 )
-
+from moto import mock_aws
 
 # ============================================================================
 # Unit tests for helper functions

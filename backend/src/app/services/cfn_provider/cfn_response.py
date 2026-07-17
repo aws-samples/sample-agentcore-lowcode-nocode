@@ -43,7 +43,9 @@ def send(
     req.add_header("Content-Length", str(len(body)))
 
     try:
-        with urlopen(req) as resp:  # nosemgrep: dynamic-urllib-use-detected -- URL from CloudFormation ResponseURL (AWS-controlled, not user input)
+        with (
+            urlopen(req) as resp
+        ):  # nosemgrep: dynamic-urllib-use-detected -- URL from CloudFormation ResponseURL (AWS-controlled, not user input)
             logger.info("CFN response status: %s", resp.status)
     except Exception:
         logger.exception("Failed to send CFN response")

@@ -9,7 +9,6 @@ Requirements: Phase 3 (AI Tool Generator)
 import json
 import logging
 import os
-from typing import Optional
 
 import boto3
 
@@ -55,8 +54,8 @@ RULES:
 
 def generate_tool(
     prompt: str,
-    conversation_history: Optional[list[dict]] = None,
-    existing_tool: Optional[dict] = None,
+    conversation_history: list[dict] | None = None,
+    existing_tool: dict | None = None,
     region: str = "us-east-1",
 ) -> dict:
     """Generate a Lambda tool using Claude Sonnet on Bedrock.
@@ -314,7 +313,7 @@ def generate_tool(
         }
 
 
-def _parse_tool_response(text: str) -> Optional[dict]:
+def _parse_tool_response(text: str) -> dict | None:
     """Parse the model's JSON response, handling markdown fences if present."""
     text = text.strip()
 

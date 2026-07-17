@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
 
 import boto3
 
@@ -112,15 +111,19 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
                 # silently left the policy CREATE_FAILED forever. Proven live: with
                 # the correct shape the stuck policy flips ACTIVE on the first poll.
                 ctrl.update_policy(
-                    policyEngineId=engine_id, policyId=pid,
-                    description={"optionalValue": _desc}, definition=_defn,
+                    policyEngineId=engine_id,
+                    policyId=pid,
+                    description={"optionalValue": _desc},
+                    definition=_defn,
                     validationMode="IGNORE_ALL_FINDINGS",
                 )
             else:
                 cp = ctrl.create_policy(
-                    policyEngineId=engine_id, name=name,
+                    policyEngineId=engine_id,
+                    name=name,
                     # create_policy requires a NON-EMPTY description (min length 1).
-                    description=_desc, definition=_defn,
+                    description=_desc,
+                    definition=_defn,
                     # IGNORE_ALL_FINDINGS: skip the gateway-calling validation that
                     # fails "Insufficient permissions to call gateway" on fresh
                     # gateways (proven live). Enforcement preserved via default-deny.
@@ -151,15 +154,14 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
             # owns the transition — do NOT delete or retry destructively here; the
             # next poll sees it CREATING/UPDATING/ACTIVE and converges.
             if "ConflictException" in type(e).__name__ or "already exists" in str(e):
-                logger.info("promote: %s owned by a concurrent run (%s) — leaving it",
-                            name, str(e)[:80])
+                logger.info("promote: %s owned by a concurrent run (%s) — leaving it", name, str(e)[:80])
             else:
                 logger.info("promote: recreate of %s not yet valid: %s", name, str(e)[:120])
 
     return active
 
 
-def try_promote_to_enforce(deployment_state: dict, region: str) -> Optional[dict]:
+def try_promote_to_enforce(deployment_state: dict, region: str) -> dict | None:
     """Promote a pending LOG_ONLY engine to ENFORCE if the gateway has converged.
 
     Returns a dict describing the outcome, or None when there is nothing to do
@@ -189,16 +191,22 @@ def try_promote_to_enforce(deployment_state: dict, region: str) -> Optional[dict
         #    only now converged). If none are ACTIVE, stay LOG_ONLY (never deny-all).
         active = _ensure_policies_active(ctrl, engine_id, pending.get("policies") or [])
         if active == 0:
-            return {"promoted": False, "mode": pr.get("mode") or "LOG_ONLY",
-                    "reason": "policies not ACTIVE yet (gateway still converging)"}
+            return {
+                "promoted": False,
+                "mode": pr.get("mode") or "LOG_ONLY",
+                "reason": "policies not ACTIVE yet (gateway still converging)",
+            }
 
         # Fail-closed path (P-PLAT-027): the gateway is ALREADY in ENFORCE; the
         # pending policies just became ACTIVE, which un-bricks the permitted
         # tools. No gateway update needed.
         if already_enforcing:
             logger.info("promote: engine %s policies now ACTIVE under ENFORCE", engine_id)
-            return {"promoted": True, "mode": "ENFORCE",
-                    "reason": f"{active} ACTIVE policy(ies); fail-closed ENFORCE now serving permitted tools"}
+            return {
+                "promoted": True,
+                "mode": "ENFORCE",
+                "reason": f"{active} ACTIVE policy(ies); fail-closed ENFORCE now serving permitted tools",
+            }
 
         # 2. Flip the gateway's engine config to ENFORCE, preserving other fields.
         gw = ctrl.get_gateway(gatewayIdentifier=gateway_id)
@@ -209,8 +217,7 @@ def try_promote_to_enforce(deployment_state: dict, region: str) -> Optional[dict
         rec_arn = pr.get("engine_arn")
         engine_arn = gw_arn or (rec_arn if str(rec_arn).startswith("arn:") else None)
         if not engine_arn:
-            return {"promoted": False, "mode": pr.get("mode"),
-                    "reason": "no valid engine arn to attach"}
+            return {"promoted": False, "mode": pr.get("mode"), "reason": "no valid engine arn to attach"}
         update = {
             "gatewayIdentifier": gateway_id,
             "name": gw.get("name", ""),
@@ -218,15 +225,12 @@ def try_promote_to_enforce(deployment_state: dict, region: str) -> Optional[dict
             "protocolType": gw.get("protocolType", "MCP"),
             "policyEngineConfiguration": {"arn": engine_arn, "mode": "ENFORCE"},
         }
-        for opt in ("description", "authorizerType", "authorizerConfiguration",
-                    "protocolConfiguration", "kmsKeyArn"):
+        for opt in ("description", "authorizerType", "authorizerConfiguration", "protocolConfiguration", "kmsKeyArn"):
             if gw.get(opt):
                 update[opt] = gw[opt]
         ctrl.update_gateway(**update)
         logger.info("promote: flipped gateway %s engine %s to ENFORCE", gateway_id, engine_id)
-        return {"promoted": True, "mode": "ENFORCE",
-                "reason": f"{active} ACTIVE policy(ies); gateway converged"}
+        return {"promoted": True, "mode": "ENFORCE", "reason": f"{active} ACTIVE policy(ies); gateway converged"}
     except Exception as e:  # noqa: BLE001
         logger.warning("promote: could not flip to ENFORCE (will retry next call): %s", str(e)[:200])
-        return {"promoted": False, "mode": pr.get("mode"),
-                "reason": f"transient: {str(e)[:120]}"}
+        return {"promoted": False, "mode": pr.get("mode"), "reason": f"transient: {str(e)[:120]}"}

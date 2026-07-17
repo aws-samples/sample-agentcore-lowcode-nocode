@@ -123,7 +123,7 @@ def test_agentcore_step_grants_fanout_action(step, action):
     assert action in block, (
         f'IAM completeness gap: step "{step}" is missing the required action '
         f'"{action}". CreateHarness/CreateGateway/CreateMemory fan out to this '
-        f'verb under the hood; omitting it causes a live AccessDenied deploy '
+        f"verb under the hood; omitting it causes a live AccessDenied deploy "
         f'failure (Bug 151/152/153 class). Add it to agentcore_steps["{step}"] '
         f"in infra/stacks/platform_stack.py."
     )
@@ -139,20 +139,16 @@ def test_harness_block_holds_full_runtime_and_memory_lifecycle():
     block = _block_source(_agentcore_steps_source(), "harness")
     runtime_verbs = ["CreateAgentRuntime", "GetAgentRuntime", "DeleteAgentRuntime"]
     memory_verbs = ["CreateMemory", "GetMemory", "DeleteMemory"]
-    missing = [
-        v
-        for v in runtime_verbs + memory_verbs + ["CreateTokenVault"]
-        if f"bedrock-agentcore:{v}" not in block
-    ]
+    missing = [v for v in runtime_verbs + memory_verbs + ["CreateTokenVault"] if f"bedrock-agentcore:{v}" not in block]
     assert not missing, (
-        "harness step IAM block is missing transparently-required verbs: "
-        f"{missing}. See Bug 151/152/153."
+        f"harness step IAM block is missing transparently-required verbs: {missing}. See Bug 151/152/153."
     )
 
 
 # --------------------------------------------------------------------------- #
 # gateway_deployer embedded tool lambda: structured failure shape             #
 # --------------------------------------------------------------------------- #
+
 
 def _dynamic_tools_code() -> str:
     from app.services.gateway_deployer import DYNAMIC_TOOLS_LAMBDA_CODE
@@ -169,8 +165,7 @@ def test_dynamic_tools_lambda_has_retry_logic():
     """
     code = _dynamic_tools_code()
     assert "retries" in code and "time.sleep" in code, (
-        "DYNAMIC_TOOLS_LAMBDA_CODE lost its HTTP retry logic "
-        "(_http_get retries + backoff)."
+        "DYNAMIC_TOOLS_LAMBDA_CODE lost its HTTP retry logic (_http_get retries + backoff)."
     )
 
 
@@ -203,19 +198,19 @@ def test_dynamic_tools_lambda_returns_structured_unavailable_error():
 
 # Each manifest dispatcher type -> the IAM delete action the delete handler calls.
 _MANIFEST_DELETE_ACTIONS = [
-    "bedrock-agentcore:DeleteAgentRuntime",      # agent_runtime
-    "bedrock-agentcore:DeleteHarness",           # harness
-    "bedrock-agentcore:DeleteMemory",            # memory
-    "bedrock-agentcore:DeleteGateway",           # gateway
+    "bedrock-agentcore:DeleteAgentRuntime",  # agent_runtime
+    "bedrock-agentcore:DeleteHarness",  # harness
+    "bedrock-agentcore:DeleteMemory",  # memory
+    "bedrock-agentcore:DeleteGateway",  # gateway
     "bedrock-agentcore:DeleteOauth2CredentialProvider",  # oauth2_credential_provider
     "bedrock-agentcore:DeleteApiKeyCredentialProvider",  # api_key_credential_provider
-    "bedrock-agentcore:DeletePolicyEngine",      # policy_engine
-    "bedrock:DeleteGuardrail",                   # guardrail (Bug 165)
-    "secretsmanager:DeleteSecret",               # secret
-    "s3vectors:DeleteVectorBucket",              # s3_vectors_bucket (Bug 167)
-    "s3vectors:DeleteIndex",                     # s3_vectors_bucket indexes (Bug 167)
-    "bedrock:DeleteKnowledgeBase",               # knowledge_base manifest type (Bug 167)
-    "bedrock:DeleteDataSource",                  # knowledge_base data sources (Bug 167)
+    "bedrock-agentcore:DeletePolicyEngine",  # policy_engine
+    "bedrock:DeleteGuardrail",  # guardrail (Bug 165)
+    "secretsmanager:DeleteSecret",  # secret
+    "s3vectors:DeleteVectorBucket",  # s3_vectors_bucket (Bug 167)
+    "s3vectors:DeleteIndex",  # s3_vectors_bucket indexes (Bug 167)
+    "bedrock:DeleteKnowledgeBase",  # knowledge_base manifest type (Bug 167)
+    "bedrock:DeleteDataSource",  # knowledge_base data sources (Bug 167)
 ]
 
 

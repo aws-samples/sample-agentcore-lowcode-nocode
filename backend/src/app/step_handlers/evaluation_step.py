@@ -7,18 +7,15 @@ References:
 - https://github.com/awslabs/amazon-bedrock-agentcore-samples/tree/main/01-tutorials/09-AgentCore-E2E/lab-05-agentcore-evals.ipynb
 - https://github.com/aws/bedrock-agentcore-starter-toolkit (operations/evaluation/)
 """
+
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
-import re
-
 import json
 import logging
 import os
+import re
 import time
 
-import boto3
-
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
@@ -49,7 +46,6 @@ def handler(event: dict, context) -> dict:
         )
 
         evaluation_config = event.get("evaluation_config") or {}
-        region = _get_env("APP_AWS_REGION", _get_env("AWS_REGION", "us-east-1"))
         runtime_arn = event.get("runtime_arn", "")
         runtime_id = event.get("runtime_id", "")
 

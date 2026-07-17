@@ -7,23 +7,19 @@ Requirements: 3.6
 """
 
 # Platform OTEL bootstrap — MUST be first import. See lambda_handler.py.
-import app.services._otel_platform  # noqa: F401
-
 import logging
 import os
 import time
 from datetime import datetime, timezone
-from typing import Optional
 
-import boto3
-
+import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
+from app.services import step_clients
 from app.services.agent_versions_store import (
     RuntimeSlots,
     get_slots_store,
     get_versions_store,
 )
-from app.services import step_clients
 from app.services.deployment_state_store import DeploymentStateStore
 
 logger = logging.getLogger(__name__)
@@ -57,11 +53,21 @@ def _auto_cleanup_on_failure(store: DeploymentStateStore, deployment_id: str, ev
 
         # Priority order: delete primary resources first, then backing stores
         priority = {
-            "knowledge_base": 0, "agent_runtime": 1, "harness": 1, "gateway": 2,
-            "policy_engine": 2, "lambda": 5, "memory": 6, "guardrail": 6,
-            "oauth2_credential_provider": 7, "api_key_credential_provider": 7,
-            "s3_vectors_bucket": 8, "iam_role": 9, "cognito_user_pool": 9,
-            "secret": 9, "s3_object": 9,
+            "knowledge_base": 0,
+            "agent_runtime": 1,
+            "harness": 1,
+            "gateway": 2,
+            "policy_engine": 2,
+            "lambda": 5,
+            "memory": 6,
+            "guardrail": 6,
+            "oauth2_credential_provider": 7,
+            "api_key_credential_provider": 7,
+            "s3_vectors_bucket": 8,
+            "iam_role": 9,
+            "cognito_user_pool": 9,
+            "secret": 9,
+            "s3_object": 9,
         }
         ordered = sorted(resources, key=lambda r: priority.get(str(r.get("type")), 4))
         cleaned = 0
@@ -234,8 +240,8 @@ def _auto_register_in_aws_registry(
     *,
     store: DeploymentStateStore,
     deployment_id: str,
-    runtime_arn: Optional[str],
-    runtime_endpoint: Optional[str],
+    runtime_arn: str | None,
+    runtime_endpoint: str | None,
     friendly_runtime_name: str,
     is_a2a: bool,
 ) -> None:
@@ -288,7 +294,9 @@ def _auto_register_in_aws_registry(
         store.set_registry_record(deployment_id, record_id, result.get("status") or "DRAFT")
         logger.info(
             "AWS Agent Registry: registered %s as %s (%s)",
-            friendly_runtime_name, record_id, result.get("status"),
+            friendly_runtime_name,
+            record_id,
+            result.get("status"),
         )
 
 
@@ -451,11 +459,7 @@ def handler(event: dict, context) -> dict:
                 # rejects mismatched-owner deploys at the API boundary, but in
                 # case a bug or race lets one through, refuse to overwrite a
                 # slot row owned by a different sub. See lessons.md Bug 122.
-                if (
-                    existing is not None
-                    and existing.owner_sub
-                    and existing.owner_sub != owner_sub
-                ):
+                if existing is not None and existing.owner_sub and existing.owner_sub != owner_sub:
                     logger.warning(
                         "Refusing to update RuntimeSlots for %s/%s: existing "
                         "slot owned by %s, deploy caller is %s. This should "
@@ -473,20 +477,14 @@ def handler(event: dict, context) -> dict:
                         new_slots = RuntimeSlots(
                             runtime_name=friendly_runtime_name,
                             owner_sub=owner_sub,
-                            production_version_id=(
-                                version_id if deployment_slot == "production" else None
-                            ),
-                            staging_version_id=(
-                                version_id if deployment_slot == "staging" else None
-                            ),
+                            production_version_id=(version_id if deployment_slot == "production" else None),
+                            staging_version_id=(version_id if deployment_slot == "staging" else None),
                             last_promoted_at=now.isoformat(),
                         )
                     else:
                         new_slots = existing
                         if deployment_slot == "production":
-                            new_slots.previous_production_version_id = (
-                                existing.production_version_id
-                            )
+                            new_slots.previous_production_version_id = existing.production_version_id
                             new_slots.production_version_id = version_id
                             new_slots.last_promoted_at = now.isoformat()
                         elif deployment_slot == "staging":

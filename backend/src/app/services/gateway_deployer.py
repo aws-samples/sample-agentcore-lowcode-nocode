@@ -18,7 +18,6 @@ import socket
 import time
 import urllib.parse
 import zipfile
-from typing import Optional
 
 import boto3
 
@@ -62,34 +61,34 @@ _DISALLOWED_NETWORKS: tuple[ipaddress._BaseNetwork, ...] = tuple(
     ipaddress.ip_network(cidr)
     for cidr in (
         # IPv4
-        "0.0.0.0/8",         # "this network"
-        "10.0.0.0/8",        # RFC1918
-        "100.64.0.0/10",     # CGNAT
-        "127.0.0.0/8",       # loopback
-        "169.254.0.0/16",    # link-local (IMDS, Lambda creds)
-        "172.16.0.0/12",     # RFC1918
-        "192.0.0.0/24",      # IETF
-        "192.0.2.0/24",      # TEST-NET-1
-        "192.168.0.0/16",    # RFC1918
-        "198.18.0.0/15",     # benchmark
-        "198.51.100.0/24",   # TEST-NET-2
-        "203.0.113.0/24",    # TEST-NET-3
-        "224.0.0.0/4",       # multicast
-        "240.0.0.0/4",       # reserved (incl. 255.255.255.255)
+        "0.0.0.0/8",  # "this network"
+        "10.0.0.0/8",  # RFC1918
+        "100.64.0.0/10",  # CGNAT
+        "127.0.0.0/8",  # loopback
+        "169.254.0.0/16",  # link-local (IMDS, Lambda creds)
+        "172.16.0.0/12",  # RFC1918
+        "192.0.0.0/24",  # IETF
+        "192.0.2.0/24",  # TEST-NET-1
+        "192.168.0.0/16",  # RFC1918
+        "198.18.0.0/15",  # benchmark
+        "198.51.100.0/24",  # TEST-NET-2
+        "203.0.113.0/24",  # TEST-NET-3
+        "224.0.0.0/4",  # multicast
+        "240.0.0.0/4",  # reserved (incl. 255.255.255.255)
         # IPv6
-        "::1/128",           # loopback
-        "::/128",            # unspecified
-        "::ffff:0:0/96",     # IPv4-mapped (so an IPv4 RFC1918 mapped into v6 is also blocked
-                             # via the v4 check, but we keep this for belt-and-braces)
-        "fc00::/7",          # ULA (private)
-        "fe80::/10",         # link-local
-        "ff00::/8",          # multicast
-        "2001:db8::/32",     # documentation
+        "::1/128",  # loopback
+        "::/128",  # unspecified
+        "::ffff:0:0/96",  # IPv4-mapped (so an IPv4 RFC1918 mapped into v6 is also blocked
+        # via the v4 check, but we keep this for belt-and-braces)
+        "fc00::/7",  # ULA (private)
+        "fe80::/10",  # link-local
+        "ff00::/8",  # multicast
+        "2001:db8::/32",  # documentation
     )
 )
 
 
-def _load_oidc_host_allowlist() -> Optional[tuple[str, ...]]:
+def _load_oidc_host_allowlist() -> tuple[str, ...] | None:
     """Return tuple of allowed host glob patterns from env, or None if no allowlist set.
 
     Env var: OIDC_DISCOVERY_HOST_ALLOWLIST=*.okta.com,*.auth0.com,*.amazoncognito.com
@@ -125,18 +124,14 @@ def _validate_discovery_url(url: str) -> str:
 
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https":
-        raise _DiscoveryUrlInvalid(
-            f"OIDC discovery URL must use https scheme (got '{parsed.scheme}')"
-        )
+        raise _DiscoveryUrlInvalid(f"OIDC discovery URL must use https scheme (got '{parsed.scheme}')")
     host = parsed.hostname
     if not host:
         raise _DiscoveryUrlInvalid("OIDC discovery URL has no host component")
 
     allowlist = _load_oidc_host_allowlist()
     if allowlist is not None and not _host_matches_allowlist(host, allowlist):
-        raise _DiscoveryUrlBlocked(
-            f"OIDC discovery host '{host}' is not on OIDC_DISCOVERY_HOST_ALLOWLIST"
-        )
+        raise _DiscoveryUrlBlocked(f"OIDC discovery host '{host}' is not on OIDC_DISCOVERY_HOST_ALLOWLIST")
 
     # Resolve every A/AAAA record under a strict timeout so an attacker cannot stall
     # us on DNS to keep a half-validated socket alive.
@@ -144,20 +139,14 @@ def _validate_discovery_url(url: str) -> str:
     socket.setdefaulttimeout(5)
     try:
         try:
-            infos = socket.getaddrinfo(
-                host, 443, socket.AF_UNSPEC, socket.SOCK_STREAM
-            )
-        except (socket.gaierror, socket.timeout, OSError) as e:
-            raise _DiscoveryUrlBlocked(
-                f"OIDC discovery URL host '{host}' could not be resolved: {e}"
-            ) from e
+            infos = socket.getaddrinfo(host, 443, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        except (TimeoutError, socket.gaierror, OSError) as e:
+            raise _DiscoveryUrlBlocked(f"OIDC discovery URL host '{host}' could not be resolved: {e}") from e
     finally:
         socket.setdefaulttimeout(prev_timeout)
 
     if not infos:
-        raise _DiscoveryUrlBlocked(
-            f"OIDC discovery URL host '{host}' returned no DNS records"
-        )
+        raise _DiscoveryUrlBlocked(f"OIDC discovery URL host '{host}' returned no DNS records")
 
     for info in infos:
         sockaddr = info[4]
@@ -168,25 +157,18 @@ def _validate_discovery_url(url: str) -> str:
         try:
             ip_obj = ipaddress.ip_address(ip_str)
         except ValueError as e:
-            raise _DiscoveryUrlBlocked(
-                f"OIDC discovery URL resolved to unparseable IP '{ip_str}': {e}"
-            ) from e
+            raise _DiscoveryUrlBlocked(f"OIDC discovery URL resolved to unparseable IP '{ip_str}': {e}") from e
         for net in _DISALLOWED_NETWORKS:
             # ip_address(v4) in ip_network(v6) raises TypeError, so guard on family.
             if ip_obj.version != net.version:
                 continue
             if ip_obj in net:
-                raise _DiscoveryUrlBlocked(
-                    "OIDC discovery URL resolves to disallowed IP "
-                    f"({ip_str} in {net})"
-                )
+                raise _DiscoveryUrlBlocked(f"OIDC discovery URL resolves to disallowed IP ({ip_str} in {net})")
 
     return url
 
 
-def _validate_outbound_url(
-    url: str, allowlist_hosts: Optional[tuple[str, ...]] = None
-) -> str:
+def _validate_outbound_url(url: str, allowlist_hosts: tuple[str, ...] | None = None) -> str:
     """Validate any user-supplied outbound URL (e.g. a connector OpenAPI spec URL).
 
     Generalizes :func:`_validate_discovery_url` (same https-only + DNS-resolved
@@ -209,9 +191,7 @@ def _validate_outbound_url(
 # ---------------------------------------------------------------------------
 
 
-def _resolve_gateway_tool_actions(
-    agentcore_ctrl, gateway_id: str, timeout: int = 180
-) -> tuple[list, int]:
+def _resolve_gateway_tool_actions(agentcore_ctrl, gateway_id: str, timeout: int = 180) -> tuple[list, int]:
     """Return (qualified Cedar action names, expected_tool_count) for a gateway,
     waiting up to *timeout*s for EACH target to be truly SYNCED into the gateway's
     servable MCP tool plane.
@@ -230,9 +210,7 @@ def _resolve_gateway_tool_actions(
 
     def _list_target_ids() -> list:
         try:
-            resp = agentcore_ctrl.list_gateway_targets(
-                gatewayIdentifier=gateway_id, maxResults=50
-            )
+            resp = agentcore_ctrl.list_gateway_targets(gatewayIdentifier=gateway_id, maxResults=50)
             items = resp.get("items", resp.get("gatewayTargetSummaries", []))
             return [
                 (t.get("name", ""), t.get("targetId") or t.get("gatewayTargetId"))
@@ -254,9 +232,7 @@ def _resolve_gateway_tool_actions(
     pre_sync = {}
     for _tname, tid in _list_target_ids():
         try:
-            d = agentcore_ctrl.get_gateway_target(
-                gatewayIdentifier=gateway_id, targetId=tid
-            )
+            d = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway_id, targetId=tid)
             pre_sync[tid] = d.get("lastSynchronizedAt")
         except Exception:  # noqa: BLE001
             pre_sync[tid] = None
@@ -278,9 +254,7 @@ def _resolve_gateway_tool_actions(
             all_synced = False
         for tname, tid in ids:
             try:
-                detail = agentcore_ctrl.get_gateway_target(
-                    gatewayIdentifier=gateway_id, targetId=tid
-                )
+                detail = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway_id, targetId=tid)
             except Exception:  # noqa: BLE001
                 all_synced = False
                 continue
@@ -303,9 +277,7 @@ def _resolve_gateway_tool_actions(
                 target_synced = tstatus == "READY"
             else:
                 target_synced = (
-                    tstatus in ("READY", "ACTIVE")
-                    and synced_at is not None
-                    and synced_at != pre_sync.get(tid)
+                    tstatus in ("READY", "ACTIVE") and synced_at is not None and synced_at != pre_sync.get(tid)
                 )
             if not target_synced:
                 all_synced = False
@@ -317,15 +289,16 @@ def _resolve_gateway_tool_actions(
         # Done when every configured target is synced AND every configured tool
         # is present in the action list.
         if ids and all_synced and len(actions) == expected and expected > 0:
-            logger.warning(
-                "Gateway %s tool plane synced: %d/%d tools", gateway_id, len(actions), expected
-            )
+            logger.warning("Gateway %s tool plane synced: %d/%d tools", gateway_id, len(actions), expected)
             return actions, expected
         _t.sleep(5)
 
     logger.warning(
         "Gateway %s tool plane not fully synced within %ds; %d/%d tools synced",
-        gateway_id, timeout, len(actions), expected,
+        gateway_id,
+        timeout,
+        len(actions),
+        expected,
     )
     return actions, expected
 
@@ -381,6 +354,7 @@ def _create_secrets_client(region: str):
 # in our own Secrets Manager secret (owner-scoped name) and the provider is
 # created with apiKeySecretSource/clientSecretSource="EXTERNAL" referencing that
 # secret — so the raw value never lands in DynamoDB, canvas JSON, or logs.
+
 
 # Provider names are derived from the connector + deployment so teardown can find
 # them. AgentCore provider names must match ^[a-zA-Z0-9_-]+$ and are <=64 chars.
@@ -466,9 +440,9 @@ def _ensure_oauth2_credential_provider(
     client_id: str,
     client_secret_arn: str,
     json_key: str = "clientSecret",
-    discovery_url: Optional[str] = None,
+    discovery_url: str | None = None,
     delegation_mode: str = "m2m",
-    obo_grant_type: Optional[str] = None,
+    obo_grant_type: str | None = None,
 ) -> str:
     """Create (or reuse) an OAuth2 credential provider for a connector.
 
@@ -954,7 +928,7 @@ GATEWAY_TOOL_SCHEMAS: dict[str, dict] = {
 # Knowledge Base Tool Lambda
 # ---------------------------------------------------------------------------
 
-KNOWLEDGE_BASE_LAMBDA_TEMPLATE = '''
+KNOWLEDGE_BASE_LAMBDA_TEMPLATE = """
 import json
 import os
 import boto3
@@ -1006,7 +980,7 @@ def lambda_handler(event, context):
         msg = str(e)
         retryable = any(s in msg for s in ("still", "ingest", "no data", "empty", "ResourceNotReady"))
         return {"statusCode": 200, "body": json.dumps({"error": msg, "retryable": retryable})}
-'''
+"""
 
 
 def create_knowledge_base_lambda(
@@ -1030,18 +1004,22 @@ def create_knowledge_base_lambda(
     iam_client.put_role_policy(
         RoleName=role_name,
         PolicyName="BedrockKBAccess",
-        PolicyDocument=json.dumps({
-            "Version": "2012-10-17",
-            "Statement": [{
-                "Effect": "Allow",
-                "Action": [
-                    "bedrock:Retrieve",
-                    "bedrock:RetrieveAndGenerate",
-                    "bedrock:InvokeModel",
+        PolicyDocument=json.dumps(
+            {
+                "Version": "2012-10-17",
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Action": [
+                            "bedrock:Retrieve",
+                            "bedrock:RetrieveAndGenerate",
+                            "bedrock:InvokeModel",
+                        ],
+                        "Resource": "*",
+                    }
                 ],
-                "Resource": "*",
-            }],
-        }),
+            }
+        ),
     )
 
     zip_bytes = _create_lambda_zip(KNOWLEDGE_BASE_LAMBDA_TEMPLATE)
@@ -1245,7 +1223,7 @@ def _prune_orphaned_lambda_permissions(lambda_client, function_name: str) -> int
         # Only touch the per-gateway-role invoke grants we manage.
         if not sid.startswith("AllowAgentCoreInvoke-"):
             continue
-        role_name = sid[len("AllowAgentCoreInvoke-"):]
+        role_name = sid[len("AllowAgentCoreInvoke-") :]
         if not role_name:
             continue
         try:
@@ -1261,7 +1239,8 @@ def _prune_orphaned_lambda_permissions(lambda_client, function_name: str) -> int
             pruned += 1
             logger.info(
                 "Pruned orphaned invoke permission %s from %s (role deleted)",
-                sid, function_name,
+                sid,
+                function_name,
             )
         except Exception:  # noqa: BLE001
             pass
@@ -1274,7 +1253,7 @@ def _create_or_update_lambda(
     role_arn: str,
     zip_bytes: bytes,
     description: str,
-    gateway_role_arn: Optional[str] = None,
+    gateway_role_arn: str | None = None,
 ) -> str:
     """Create or update a Lambda function. Returns the function ARN.
 
@@ -1370,7 +1349,8 @@ def _create_or_update_lambda(
                 last_exc = e
                 logger.warning(
                     "add_permission principal not yet propagated (attempt %d/8): %s",
-                    attempt + 1, str(e)[:160],
+                    attempt + 1,
+                    str(e)[:160],
                 )
                 time.sleep(8)
         if last_exc is not None:
@@ -1553,15 +1533,15 @@ def _create_external_oauth_config(identity_config: dict, region: str) -> dict:
             # Strict 10s timeout so an attacker can't burn CPU by stalling us on
             # the actual fetch. The host has been validated above; the residual
             # DNS-rebinding race window is bounded by this timeout.
-            with urllib.request.urlopen(req, timeout=10) as resp:  # nosemgrep: dynamic-urllib-use-detected -- URL validated by _validate_discovery_url (scheme=https + IP denylist + optional allowlist)
+            with (
+                urllib.request.urlopen(req, timeout=10) as resp
+            ):  # nosemgrep: dynamic-urllib-use-detected -- URL validated by _validate_discovery_url (scheme=https + IP denylist + optional allowlist)
                 discovery_doc = json.loads(resp.read().decode())
                 token_endpoint = discovery_doc.get("token_endpoint", "")
         except Exception as e:
             # Re-raise: a transient discovery-doc fetch failure must fail the
             # deploy, not silently produce a gateway with empty token_endpoint.
-            raise RuntimeError(
-                f"Failed to fetch OIDC discovery document from {validated_url}: {e}"
-            ) from e
+            raise RuntimeError(f"Failed to fetch OIDC discovery document from {validated_url}: {e}") from e
 
     authorizer_config = {
         "customJWTAuthorizer": {
@@ -1590,6 +1570,7 @@ def _create_external_oauth_config(identity_config: dict, region: str) -> dict:
 def get_cognito_token(client_info: dict) -> str:
     """Get OAuth access token using client_credentials grant. Supports Cognito and external IDPs."""
     import urllib.parse
+
     import urllib3
 
     client_id = client_info.get("client_id", "")
@@ -1642,8 +1623,10 @@ def _count_served_tools(gateway_url: str, client_info: dict) -> int:
     transport/auth error (caller treats as not-yet-ready, keeps polling).
     """
     import urllib3
+
     try:
         import certifi
+
         http = urllib3.PoolManager(ca_certs=certifi.where())
     except ImportError:
         http = urllib3.PoolManager()
@@ -1651,7 +1634,9 @@ def _count_served_tools(gateway_url: str, client_info: dict) -> int:
         token = get_cognito_token(client_info)
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
         resp = http.request(
-            "POST", gateway_url, body=body,
+            "POST",
+            gateway_url,
+            body=body,
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
@@ -1695,6 +1680,7 @@ def _qualified_tools_from_served(gateway_url: str, client_info: dict) -> list:
 
     try:
         import certifi
+
         http = urllib3.PoolManager(ca_certs=certifi.where())
     except ImportError:
         http = urllib3.PoolManager()
@@ -1702,7 +1688,9 @@ def _qualified_tools_from_served(gateway_url: str, client_info: dict) -> list:
         token = get_cognito_token(client_info)
         body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
         resp = http.request(
-            "POST", gateway_url, body=body,
+            "POST",
+            gateway_url,
+            body=body,
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
@@ -1735,15 +1723,14 @@ def _qualified_tools_from_served(gateway_url: str, client_info: dict) -> list:
         return []
 
 
-def _wait_for_gateway_to_serve_tools(
-    gateway_url: str, client_info: dict, expected: int, timeout: int = 90
-) -> int:
+def _wait_for_gateway_to_serve_tools(gateway_url: str, client_info: dict, expected: int, timeout: int = 90) -> int:
     """Poll the gateway's MCP tools/list until it serves >= 1 tool (ideally
     `expected`), or *timeout*. Returns the served count (0 if it never serves).
     This is the authoritative deploy-time readiness signal — it matches exactly
     what the deployed agent will discover.
     """
     import time as _t
+
     deadline = _t.time() + timeout
     served = 0
     while _t.time() < deadline:
@@ -1881,7 +1868,7 @@ def _create_gateway_target_with_retry(
     target_name: str,
     create_params: dict,
     max_retries: int = 5,
-) -> Optional[dict]:
+) -> dict | None:
     """Create a gateway target with retry logic. Reuses existing target on conflict."""
     for attempt in range(max_retries):
         try:
@@ -1962,7 +1949,7 @@ def _build_gateway_role_policy() -> dict:
     }
 
 
-def _fetch_openapi_spec(spec_url: str, allowlist_hosts: Optional[list] = None) -> str:
+def _fetch_openapi_spec(spec_url: str, allowlist_hosts: list | None = None) -> str:
     """Fetch a connector's OpenAPI spec from *spec_url* and return it as a string.
 
     The URL is validated (https-only, private/IMDS denylist, connector allowlist)
@@ -1971,11 +1958,11 @@ def _fetch_openapi_spec(spec_url: str, allowlist_hosts: Optional[list] = None) -
     """
     import urllib.request
 
-    validated = _validate_outbound_url(
-        spec_url, tuple(allowlist_hosts) if allowlist_hosts else None
-    )
+    validated = _validate_outbound_url(spec_url, tuple(allowlist_hosts) if allowlist_hosts else None)
     req = urllib.request.Request(validated, headers={"Accept": "application/json, application/yaml, text/yaml"})
-    with urllib.request.urlopen(req, timeout=30) as resp:  # nosemgrep: dynamic-urllib-use-detected -- URL validated by _validate_outbound_url (https + IP denylist + host allowlist)
+    with (
+        urllib.request.urlopen(req, timeout=30) as resp
+    ):  # nosemgrep: dynamic-urllib-use-detected -- URL validated by _validate_outbound_url (https + IP denylist + host allowlist)
         return resp.read().decode("utf-8", errors="replace")
 
 
@@ -2073,11 +2060,7 @@ def _sanitize_openapi_for_gateway(spec_str: str) -> str:
             out = {}
             for k, v in node.items():
                 if k == "content" and isinstance(v, dict):
-                    kept = {
-                        mt: walk(mv)
-                        for mt, mv in v.items()
-                        if mt in _GATEWAY_SUPPORTED_MEDIA_TYPES
-                    }
+                    kept = {mt: walk(mv) for mt, mv in v.items() if mt in _GATEWAY_SUPPORTED_MEDIA_TYPES}
                     if len(kept) != len(v):
                         changed = True
                     # Drop an empty content map so the parent (response/requestBody)
@@ -2090,8 +2073,7 @@ def _sanitize_openapi_for_gateway(spec_str: str) -> str:
             # media types the requestBody is now invalid ("requestBody.content is
             # missing"). Signal removal so the operation drops the whole
             # requestBody (the operation stays valid — body just becomes optional).
-            if "requestBody" in out and isinstance(out["requestBody"], dict) \
-                    and "content" not in out["requestBody"]:
+            if "requestBody" in out and isinstance(out["requestBody"], dict) and "content" not in out["requestBody"]:
                 del out["requestBody"]
                 changed = True
             return out
@@ -2160,7 +2142,7 @@ def _sanitize_openapi_for_gateway(spec_str: str) -> str:
             return cand
 
         renamed = 0
-        for path, item in paths.items():
+        for item in paths.values():
             if not isinstance(item, dict):
                 continue
             for method, op in item.items():
@@ -2206,8 +2188,7 @@ def _cap_openapi_operations(spec_str: str, *, max_ops: int) -> str:
     if not isinstance(paths, dict):
         return spec_str
     _METHODS = ("get", "post", "put", "delete", "patch", "head", "options", "trace")
-    total = sum(1 for _p, item in paths.items() if isinstance(item, dict)
-                for m in item if m.lower() in _METHODS)
+    total = sum(1 for _p, item in paths.items() if isinstance(item, dict) for m in item if m.lower() in _METHODS)
     if total <= max_ops:
         return spec_str
     kept = 0
@@ -2258,7 +2239,9 @@ def _build_openapi_schema(spec_str: str, *, connector_id: str, region: str) -> d
         if after < before:
             logger.info(
                 "Slimmed connector '%s' spec %d -> %d bytes to fit the 10 MB cap",
-                connector_id, before, after,
+                connector_id,
+                before,
+                after,
             )
             spec_str = slim
 
@@ -2269,7 +2252,8 @@ def _build_openapi_schema(spec_str: str, *, connector_id: str, region: str) -> d
         logger.warning(
             "Spec for connector '%s' is %d bytes (>inline cap) but ARTIFACTS_BUCKET_NAME "
             "is unset; falling back to inlinePayload (may fail).",
-            connector_id, len(spec_str),
+            connector_id,
+            len(spec_str),
         )
         return {"inlinePayload": spec_str}
 
@@ -2278,16 +2262,16 @@ def _build_openapi_schema(spec_str: str, *, connector_id: str, region: str) -> d
     safe = re.sub(r"[^a-zA-Z0-9_-]", "-", connector_id or "generic")[:32]
     key = f"connector-specs/{safe}/{_uuid.uuid4().hex[:12]}.json"
     boto3.client("s3", region_name=region).put_object(
-        Bucket=bucket, Key=key, Body=spec_str.encode("utf-8"),
+        Bucket=bucket,
+        Key=key,
+        Body=spec_str.encode("utf-8"),
         ContentType="application/json",
     )
     account_id = os.environ.get("AWS_ACCOUNT_ID", "")
     s3_block: dict = {"uri": f"s3://{bucket}/{key}"}
     if account_id:
         s3_block["bucketOwnerAccountId"] = account_id
-    logger.info(
-        "Staged connector '%s' spec (%d bytes) to s3://%s/%s", connector_id, len(spec_str), bucket, key
-    )
+    logger.info("Staged connector '%s' spec (%d bytes) to s3://%s/%s", connector_id, len(spec_str), bucket, key)
     return {"s3": s3_block}
 
 
@@ -2389,8 +2373,14 @@ def _deploy_connector_targets(
 
     try:
         _deploy_connector_targets_inner(
-            agentcore_ctrl, gateway_id, region, connectors, owner_sub,
-            created_providers, created_secrets, created_spec_s3_uris,
+            agentcore_ctrl,
+            gateway_id,
+            region,
+            connectors,
+            owner_sub,
+            created_providers,
+            created_secrets,
+            created_spec_s3_uris,
         )
     except Exception:
         logger.error("Connector deploy failed mid-loop; rolling back partial resources")
@@ -2409,7 +2399,7 @@ def _delete_spec_s3_object(uri: str, region: str) -> None:
     if not uri.startswith("s3://"):
         return
     try:
-        rest = uri[len("s3://"):]
+        rest = uri[len("s3://") :]
         bucket, _, key = rest.partition("/")
         if bucket and key:
             boto3.client("s3", region_name=region).delete_object(Bucket=bucket, Key=key)
@@ -2453,15 +2443,14 @@ def _deploy_connector_targets_inner(
         # spec_host_allowlist is still SSRF-guarded (https + private-IP denylist via
         # _validate_outbound_url) even with no host allowlist.
         from urllib.parse import urlparse as _urlparse
+
         spec_allowlist = conn.get("spec_host_allowlist") or catalog.get("spec_host_allowlist")
         if not spec_allowlist and spec_url and spec_url == catalog.get("spec_url"):
             _h = _urlparse(spec_url).hostname
             spec_allowlist = [_h] if _h else None
         if not spec_inline:
             if not spec_url:
-                raise RuntimeError(
-                    f"Connector '{connector_id}' has no OpenAPI spec (provide spec_url or spec_inline)"
-                )
+                raise RuntimeError(f"Connector '{connector_id}' has no OpenAPI spec (provide spec_url or spec_inline)")
             spec_inline = _fetch_openapi_spec(spec_url, spec_allowlist)
 
         # Mint the secret here if the caller passed a raw value (direct-deploy path);
@@ -2488,16 +2477,13 @@ def _deploy_connector_targets_inner(
 
         if auth_method == AUTH_OAUTH2_CC:
             vendor = (
-                conn.get("oauth_vendor")
-                or conn.get("oauthVendor")
-                or oauth_vendor_for(connector_id)
-                or "CustomOauth2"
+                conn.get("oauth_vendor") or conn.get("oauthVendor") or oauth_vendor_for(connector_id) or "CustomOauth2"
             )
             discovery_url = conn.get("discovery_url") or conn.get("discoveryUrl")
             # Phase 3 (Loom) OBO — carry delegation mode + grant type from the
             # connector payload so the credential provider is minted for
             # on-behalf-of token exchange when requested.
-            delegation_mode = (conn.get("delegation_mode") or conn.get("delegationMode") or "m2m")
+            delegation_mode = conn.get("delegation_mode") or conn.get("delegationMode") or "m2m"
             obo_grant_type = conn.get("obo_grant_type") or conn.get("oboGrantType")
             provider_arn = _ensure_oauth2_credential_provider(
                 agentcore_ctrl,
@@ -2530,12 +2516,8 @@ def _deploy_connector_targets_inner(
             }
         else:  # API_KEY
             if not secret_arn:
-                raise RuntimeError(
-                    f"Connector '{connector_id}' api_key auth requires a secret_arn or secret_value"
-                )
-            provider_arn = _ensure_api_key_credential_provider(
-                agentcore_ctrl, provider_name, secret_arn=secret_arn
-            )
+                raise RuntimeError(f"Connector '{connector_id}' api_key auth requires a secret_arn or secret_value")
+            provider_arn = _ensure_api_key_credential_provider(agentcore_ctrl, provider_name, secret_arn=secret_arn)
             cred_cfg = {
                 "credentialProviderType": "API_KEY",
                 "credentialProvider": {
@@ -2555,18 +2537,18 @@ def _deploy_connector_targets_inner(
             prefix = (
                 conn.get("credential_prefix")
                 if conn.get("credential_prefix") is not None
-                else (conn.get("credentialPrefix")
-                      if conn.get("credentialPrefix") is not None
-                      else catalog.get("credential_prefix"))
+                else (
+                    conn.get("credentialPrefix")
+                    if conn.get("credentialPrefix") is not None
+                    else catalog.get("credential_prefix")
+                )
             )
             if prefix:
                 cred_cfg["credentialProvider"]["apiKeyCredentialProvider"]["credentialPrefix"] = prefix
 
         created_providers.append(f"{provider_type}:{provider_name}")
 
-        openapi_schema = _build_openapi_schema(
-            spec_inline, connector_id=connector_id or "generic", region=region
-        )
+        openapi_schema = _build_openapi_schema(spec_inline, connector_id=connector_id or "generic", region=region)
         # If the spec was staged to S3, remember the key so teardown deletes it.
         _s3_uri = openapi_schema.get("s3", {}).get("uri", "")
         if _s3_uri:
@@ -2578,23 +2560,27 @@ def _deploy_connector_targets_inner(
             "credentialProviderConfigurations": [cred_cfg],
         }
         _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, target_name, create_params)
-        logger.info("Connector '%s' deployed as OpenAPI gateway target %s", _safe_log_token(connector_id), _safe_log_token(target_name))
+        logger.info(
+            "Connector '%s' deployed as OpenAPI gateway target %s",
+            _safe_log_token(connector_id),
+            _safe_log_token(target_name),
+        )
 
 
 def deploy_gateway(
     gateway_config: dict,
     region: str,
-    template_id: Optional[str] = None,
-    gateway_tools: Optional[list] = None,
-    identity_config: Optional[dict] = None,
-    custom_tools: Optional[list[dict]] = None,
-    mcp_server_runtime_arn: Optional[str] = None,
-    mcp_oauth: Optional[dict] = None,
-    knowledge_base_result: Optional[dict] = None,
-    deployment_id: Optional[str] = None,
+    template_id: str | None = None,
+    gateway_tools: list | None = None,
+    identity_config: dict | None = None,
+    custom_tools: list[dict] | None = None,
+    mcp_server_runtime_arn: str | None = None,
+    mcp_oauth: dict | None = None,
+    knowledge_base_result: dict | None = None,
+    deployment_id: str | None = None,
     gateway_retry: int = 0,
-    connectors: Optional[list[dict]] = None,
-    external_mcp_servers: Optional[list[dict]] = None,
+    connectors: list[dict] | None = None,
+    external_mcp_servers: list[dict] | None = None,
     owner_sub: str = "",
 ) -> dict:
     """Deploy a Gateway using pure boto3 APIs.
@@ -2738,7 +2724,7 @@ def deploy_gateway(
                         logger.info("Reusing gateway %s, url=%s", gw_id, gateway["gatewayUrl"])
                         break
                 if gateway is None:
-                    raise RuntimeError(f"Gateway '{gateway_name}' exists but not found via list")
+                    raise RuntimeError(f"Gateway '{gateway_name}' exists but not found via list") from create_err
             else:
                 raise
 
@@ -2854,7 +2840,9 @@ def deploy_gateway(
                 },
             )
             mcp_cred_provider_arn = cred_provider_resp["credentialProviderArn"]
-            logger.info("Created OAuth2 credential provider: %s", mcp_cred_provider_arn)  # nosemgrep: python-logger-credential-disclosure -- logs resource ARN, not secret
+            logger.info(
+                "Created OAuth2 credential provider: %s", mcp_cred_provider_arn
+            )  # nosemgrep: python-logger-credential-disclosure -- logs resource ARN, not secret
 
             mcp_target_params = {
                 "gatewayIdentifier": gateway["gatewayId"],
@@ -3042,7 +3030,11 @@ def deploy_gateway(
                 kb_model_arn = knowledge_base_result.get("foundation_model_arn", "")
                 dep_id = deployment_id or "unknown"
                 kb_lambda_arn = create_knowledge_base_lambda(
-                    region, gateway.get("roleArn", ""), kb_id, kb_model_arn, dep_id,
+                    region,
+                    gateway.get("roleArn", ""),
+                    kb_id,
+                    kb_model_arn,
+                    dep_id,
                 )
                 kb_lambda_name = f"AgentCore-KBTool-{dep_id[:8]}"
                 kb_schema = GATEWAY_TOOL_SCHEMAS["knowledge_base"]
@@ -3060,7 +3052,9 @@ def deploy_gateway(
                     },
                     "credentialProviderConfigurations": [{"credentialProviderType": "GATEWAY_IAM_ROLE"}],
                 }
-                _create_gateway_target_with_retry(agentcore_ctrl, gateway["gatewayId"], kb_target_name, kb_target_params)
+                _create_gateway_target_with_retry(
+                    agentcore_ctrl, gateway["gatewayId"], kb_target_name, kb_target_params
+                )
                 logger.info("Knowledge Base tool deployed as gateway target: %s", kb_target_name)
             except Exception as kb_err:
                 logger.error("Failed to deploy KB tool: %s", kb_err)
@@ -3123,7 +3117,9 @@ def deploy_gateway(
                     if _tid and "lambda" not in _tc:
                         _sync_ids.append(_tid)
                 if _sync_ids:
-                    logger.warning("Synchronizing %d non-lambda target(s) on gateway %s", len(_sync_ids), gateway["gatewayId"])
+                    logger.warning(
+                        "Synchronizing %d non-lambda target(s) on gateway %s", len(_sync_ids), gateway["gatewayId"]
+                    )
                     agentcore_ctrl.synchronize_gateway_targets(
                         gatewayIdentifier=gateway["gatewayId"], targetIdList=_sync_ids
                     )
@@ -3173,9 +3169,7 @@ def deploy_gateway(
                 gateway_arn = _gw.get("gatewayArn", "")
             except Exception:  # noqa: BLE001
                 pass
-        qualified_tools, expected_tool_count = _resolve_gateway_tool_actions(
-            agentcore_ctrl, gateway["gatewayId"]
-        )
+        qualified_tools, expected_tool_count = _resolve_gateway_tool_actions(agentcore_ctrl, gateway["gatewayId"])
 
         gateway_url = gateway.get("gatewayUrl", "")
         client_info = cognito_response["client_info"]
@@ -3188,9 +3182,7 @@ def deploy_gateway(
         # live MCP tools/list probe. Require the connector gateway to serve >=1 tool;
         # fail closed otherwise (never ship a connector gateway that serves nothing).
         if connectors and expected_tool_count == 0:
-            served = _wait_for_gateway_to_serve_tools(
-                gateway_url, client_info, expected=1, timeout=120
-            )
+            served = _wait_for_gateway_to_serve_tools(gateway_url, client_info, expected=1, timeout=120)
             if served < 1:
                 # Surface the REAL reason: a FAILED OpenAPI target carries an
                 # actionable statusReason (e.g. "Invalid OpenAPI schema: ...items
@@ -3205,16 +3197,15 @@ def deploy_gateway(
                         _tid = _t.get("targetId") or _t.get("gatewayTargetId")
                         if not _tid:
                             continue
-                        _d = agentcore_ctrl.get_gateway_target(
-                            gatewayIdentifier=gateway["gatewayId"], targetId=_tid
-                        )
+                        _d = agentcore_ctrl.get_gateway_target(gatewayIdentifier=gateway["gatewayId"], targetId=_tid)
                         if (_d.get("status") or "").upper() == "FAILED":
                             _r = _d.get("statusReasons") or _d.get("statusReason") or "unknown"
                             target_reasons.append(f"{_tid}: {_r}")
                 except Exception:  # noqa: BLE001
                     pass
                 detail = (
-                    f" Target failure(s): {target_reasons}" if target_reasons
+                    f" Target failure(s): {target_reasons}"
+                    if target_reasons
                     else " No target reported FAILED — likely the AgentCore empty-tool-plane "
                     "provisioning flake (retry the deploy)."
                 )
@@ -3247,9 +3238,7 @@ def deploy_gateway(
             # Backfill qualified_tools from the live plane so the policy step (if any)
             # has the connector's tool actions.
             qualified_tools = _qualified_tools_from_served(gateway_url, client_info)
-            logger.warning(
-                "Connector gateway %s serves %d tool(s) over MCP", gateway["gatewayId"], served
-            )
+            logger.warning("Connector gateway %s serves %d tool(s) over MCP", gateway["gatewayId"], served)
 
         # Bug 134 (THE stability fix): a Lambda gateway target can be status=READY
         # with a full inline schema yet the gateway's MCP plane serves an EMPTY
@@ -3262,16 +3251,17 @@ def deploy_gateway(
         # working tool plane. Bounded retries; if none serve, fail the deploy
         # (never ship a runtime against a 0-tool gateway).
         if expected_tool_count > 0:
-            served = _wait_for_gateway_to_serve_tools(
-                gateway_url, client_info, expected_tool_count, timeout=90
-            )
+            served = _wait_for_gateway_to_serve_tools(gateway_url, client_info, expected_tool_count, timeout=90)
             if served < expected_tool_count:
                 if gateway_retry < 2:
                     logger.warning(
                         "Gateway %s serves %d/%d tools over MCP — likely the "
                         "AgentCore empty-tool-plane flake. Tearing it down and "
                         "recreating (attempt %d/3).",
-                        gateway["gatewayId"], served, expected_tool_count, gateway_retry + 2,
+                        gateway["gatewayId"],
+                        served,
+                        expected_tool_count,
+                        gateway_retry + 2,
                     )
                     try:
                         for _t in _get_targets_from_response(
@@ -3288,11 +3278,17 @@ def deploy_gateway(
                         logger.warning("Cleanup before gateway retry (non-fatal): %s", del_err)
                     time.sleep(8)
                     return deploy_gateway(
-                        gateway_config, region, template_id=template_id,
-                        gateway_tools=gateway_tools, identity_config=identity_config,
-                        custom_tools=custom_tools, mcp_server_runtime_arn=mcp_server_runtime_arn,
-                        mcp_oauth=mcp_oauth, knowledge_base_result=knowledge_base_result,
-                        deployment_id=deployment_id, gateway_retry=gateway_retry + 1,
+                        gateway_config,
+                        region,
+                        template_id=template_id,
+                        gateway_tools=gateway_tools,
+                        identity_config=identity_config,
+                        custom_tools=custom_tools,
+                        mcp_server_runtime_arn=mcp_server_runtime_arn,
+                        mcp_oauth=mcp_oauth,
+                        knowledge_base_result=knowledge_base_result,
+                        deployment_id=deployment_id,
+                        gateway_retry=gateway_retry + 1,
                     )
                 # Exhausted retries — fail closed rather than ship a broken gateway.
                 return {
@@ -3347,7 +3343,7 @@ def deploy_gateway(
 # ---------------------------------------------------------------------------
 
 
-def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: Optional[dict] = None) -> list[str]:
+def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: dict | None = None) -> list[str]:
     """Clean up all gateway resources: targets, Lambda, gateway, and Cognito."""
     cleanup_log: list[str] = []
 
@@ -3549,9 +3545,9 @@ def build_external_mcp_target_params(
     target_name: str,
     catalog_entry: dict,
     endpoint: str,
-    secret_arn: Optional[str] = None,
-    oauth_provider_arn: Optional[str] = None,
-    oauth_scopes: Optional[list] = None,
+    secret_arn: str | None = None,
+    oauth_provider_arn: str | None = None,
+    oauth_scopes: list | None = None,
 ) -> dict:
     """Assemble CreateGatewayTarget params for an external MCP catalog entry.
 
@@ -3584,19 +3580,13 @@ def build_external_mcp_target_params(
         pass  # Tier 1 — no credential provider (valid per API model).
     elif auth_type == "api_key":
         if not secret_arn:
-            raise RuntimeError(
-                f"MCP '{catalog_entry.get('id')}' needs an API key — provide a secret_arn."
-            )
+            raise RuntimeError(f"MCP '{catalog_entry.get('id')}' needs an API key — provide a secret_arn.")
         descriptor = catalog_entry.get("api_key_descriptor") or {}
-        provider_arn = _ensure_api_key_credential_provider(
-            agentcore_ctrl, f"mcp-{target_name}", secret_arn=secret_arn
-        )
+        provider_arn = _ensure_api_key_credential_provider(agentcore_ctrl, f"mcp-{target_name}", secret_arn=secret_arn)
         cred_configs.append(_mcp_api_key_cred_config(provider_arn, descriptor))
     elif auth_type == "oauth2_client_credentials":
         if not oauth_provider_arn:
-            raise RuntimeError(
-                f"MCP '{catalog_entry.get('id')}' needs an OAuth provider ARN (client-credentials)."
-            )
+            raise RuntimeError(f"MCP '{catalog_entry.get('id')}' needs an OAuth provider ARN (client-credentials).")
         cred_configs.append(
             {
                 "credentialProviderType": "OAUTH",
@@ -3624,12 +3614,12 @@ def deploy_external_mcp_target(
     *,
     gateway_id: str,
     catalog_entry: dict,
-    endpoint: Optional[str] = None,
-    secret_arn: Optional[str] = None,
-    oauth_provider_arn: Optional[str] = None,
-    oauth_scopes: Optional[list] = None,
-    target_name: Optional[str] = None,
-) -> Optional[dict]:
+    endpoint: str | None = None,
+    secret_arn: str | None = None,
+    oauth_provider_arn: str | None = None,
+    oauth_scopes: list | None = None,
+    target_name: str | None = None,
+) -> dict | None:
     """Create a Gateway `mcpServer` target for an external MCP catalog entry.
 
     ``endpoint`` overrides the catalog endpoint (needed when the catalog URL has
@@ -3652,7 +3642,9 @@ def deploy_external_mcp_target(
     )
     logger.info(
         "Creating external MCP target '%s' (tier=%s, auth=%s)",
-        name, catalog_entry.get("tier"), catalog_entry.get("auth_type"),
+        name,
+        catalog_entry.get("tier"),
+        catalog_entry.get("auth_type"),
     )
     return _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, name, params)
 
@@ -3749,19 +3741,22 @@ def _deploy_external_mcp_targets(
                 # A CustomOauth2 client-credentials provider resolves its token
                 # endpoint from the IdP's OIDC discovery document.
                 discovery_url = (
-                    oauth.get("discovery_url") or oauth.get("discoveryUrl")
-                    or oauth.get("token_url") or oauth.get("tokenUrl")
+                    oauth.get("discovery_url")
+                    or oauth.get("discoveryUrl")
+                    or oauth.get("token_url")
+                    or oauth.get("tokenUrl")
                 )
                 if not (client_id and client_secret and discovery_url):
-                    raise RuntimeError(
-                        f"MCP '{server_id}' needs oauth {{client_id, client_secret, discovery_url}}."
-                    )
+                    raise RuntimeError(f"MCP '{server_id}' needs oauth {{client_id, client_secret, discovery_url}}.")
                 cs_arn = _put_connector_secret(region, owner_sub, {"clientSecret": client_secret})
                 created_secrets.append(cs_arn)
                 oauth_provider_arn = _ensure_oauth2_credential_provider(
-                    agentcore_ctrl, f"mcp-{server_id}",
-                    vendor="CustomOauth2", client_id=client_id,
-                    client_secret_arn=cs_arn, discovery_url=discovery_url,
+                    agentcore_ctrl,
+                    f"mcp-{server_id}",
+                    vendor="CustomOauth2",
+                    client_id=client_id,
+                    client_secret_arn=cs_arn,
+                    discovery_url=discovery_url,
                 )
                 created_providers.append(_sanitize_provider_name(f"mcp-{server_id}"))
                 oauth_scopes = oauth.get("scopes") or (entry.get("oauth_descriptor") or {}).get("scopes")

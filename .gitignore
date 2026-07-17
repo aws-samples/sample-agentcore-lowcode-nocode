@@ -118,7 +118,6 @@ backend/lib/
 .dsr/
 .envrc
 *tmp*
-package-lock.json
 
 # Local-only development-process folder — planning notes, lessons, e2e test
 # harness, live tokens, scratch evidence. Never committed to the public sample.

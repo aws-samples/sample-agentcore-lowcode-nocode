@@ -316,12 +316,27 @@ def _start_and_wait_ingestion(bedrock_agent, kb_id: str, ds_id: str, max_wait: i
     status so the deploy result can tell the caller the KB is still ingesting
     instead of silently implying it's ready.
     """
-    resp = bedrock_agent.start_ingestion_job(
-        knowledgeBaseId=kb_id,
-        dataSourceId=ds_id,
-    )
-    job_id = resp["ingestionJob"]["ingestionJobId"]
-    logger.warning("Ingestion job started: %s for KB %s", job_id, kb_id)
+    try:
+        resp = bedrock_agent.start_ingestion_job(
+            knowledgeBaseId=kb_id,
+            dataSourceId=ds_id,
+        )
+        job_id = resp["ingestionJob"]["ingestionJobId"]
+        logger.warning("Ingestion job started: %s for KB %s", job_id, kb_id)
+    except ClientError as start_err:
+        # A Step Functions retry (or the idempotent data-source recovery) can
+        # find a job already ongoing — adopt it instead of failing the deploy
+        # (matrix-run finding, P-KB-008 secondary bug).
+        if error_code(start_err) != "ConflictException":
+            raise
+        jobs = bedrock_agent.list_ingestion_jobs(knowledgeBaseId=kb_id, dataSourceId=ds_id, maxResults=5).get(
+            "ingestionJobSummaries", []
+        )
+        ongoing = next((j for j in jobs if j.get("status") in ("STARTING", "IN_PROGRESS")), None)
+        if not ongoing:
+            raise
+        job_id = ongoing["ingestionJobId"]
+        logger.warning("Ingestion job %s already ongoing for KB %s, adopting", job_id, kb_id)
 
     for _ in range(max_wait // 5):
         job_resp = bedrock_agent.get_ingestion_job(

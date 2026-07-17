@@ -344,6 +344,7 @@ def _create_step_role(
                     "bedrock:DeleteDataSource",
                     "bedrock:StartIngestionJob",
                     "bedrock:GetIngestionJob",
+                    "bedrock:ListIngestionJobs",
                     "bedrock:Retrieve",
                     "bedrock:RetrieveAndGenerate",
                 ],

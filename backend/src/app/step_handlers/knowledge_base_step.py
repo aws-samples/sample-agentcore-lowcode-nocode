@@ -887,8 +887,11 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
             # If BDA parsing is configured, attach supplementalDataStorage.
             # See tasks/lessons.md Bug 95.
             if kb_config.get("parsingStrategy") == "bedrock_data_automation":
+                # CreateKnowledgeBase rejects supplemental URIs with a key
+                # prefix ("S3 URI should only contain the bucket name") —
+                # bucket root only. Live-verified by the matrix run.
                 bda_supp_uri = kb_config.get("bdaSupplementalS3Uri") or (
-                    f"s3://{_get_env('ARTIFACTS_BUCKET_NAME', '')}/kb-supplemental/{kb_name}/"
+                    f"s3://{_get_env('ARTIFACTS_BUCKET_NAME', '')}"
                 )
                 # API shape (botocore bedrock-agent model): storageLocations,
                 # each {type, s3Location} — live-verified by the matrix run.

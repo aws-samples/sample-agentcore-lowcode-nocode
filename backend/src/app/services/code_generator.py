@@ -608,6 +608,60 @@ def _generate_gateway_agent(system_prompt: str, model_id: str, creds: dict) -> s
     return _generate_strands_gateway(system_prompt, model_id, creds)
 
 
+# Single-shot KB retrieval tool source, shared by the tools-agent and the
+# memory-agent generators (a memory+KB canvas must not silently drop KB
+# retrieval - matrix-run finding P-E2E-029).
+_RETRIEVE_FROM_KB_TOOL_SRC = '''
+_kb_client = None
+def _get_kb_client():
+    global _kb_client
+    if _kb_client is None:
+        _kb_client = boto3.client("bedrock-agent-runtime", region_name=REGION)
+    return _kb_client
+
+@tool
+def retrieve_from_kb(query: str, num_results: int = 5) -> str:
+    """Retrieve relevant passages from the connected knowledge base. Use this
+    when the user asks about ingested documentation, internal facts, or
+    anything that requires looking up information stored in the KB.
+    """
+    kb_id = os.environ.get("KB_ID", "")
+    if not kb_id:
+        return json.dumps({"error": "No KB_ID configured for this runtime."})
+    try:
+        # Bug 130: MANAGED KBs (S3 Vectors / managed mode) reject
+        # vectorSearchConfiguration with "ValidationException: ... is not
+        # supported for managed knowledge bases. Use managedSearchConfiguration
+        # instead." Only OpenSearch/Aurora-backed KBs accept it. Try the
+        # explicit config first (carries numberOfResults), then fall back to a
+        # bare retrievalQuery (managed-store defaults) so a managed KB still
+        # retrieves instead of swallowing the error into an apology.
+        try:
+            resp = _get_kb_client().retrieve(
+                knowledgeBaseId=kb_id,
+                retrievalQuery={"text": query},
+                retrievalConfiguration={"vectorSearchConfiguration": {"numberOfResults": max(1, min(num_results, 20))}},
+            )
+        except Exception as _vsc_err:
+            _msg = str(_vsc_err)
+            if "managed" in _msg or "vectorSearchConfiguration is not supported" in _msg:
+                resp = _get_kb_client().retrieve(
+                    knowledgeBaseId=kb_id,
+                    retrievalQuery={"text": query},
+                )
+            else:
+                raise
+        results = []
+        for r in resp.get("retrievalResults", []):
+            content = r.get("content", {}).get("text", "")
+            score = r.get("score", 0.0)
+            results.append({"text": content, "score": score})
+        return json.dumps({"query": query, "results": results, "count": len(results)})
+    except Exception as e:
+        return json.dumps({"error": "KB retrieve failed: %s" % str(e), "query": query})
+'''
+
+
 def _generate_tools_agent(
     system_prompt: str,
     model_id: str,
@@ -671,55 +725,7 @@ def _generate_tools_agent(
             tool_defs += agentic_rag_tool_source(_strategy)
         else:
             tools_list.append("retrieve_from_kb")
-            tool_defs += '''
-_kb_client = None
-def _get_kb_client():
-    global _kb_client
-    if _kb_client is None:
-        _kb_client = boto3.client("bedrock-agent-runtime", region_name=REGION)
-    return _kb_client
-
-@tool
-def retrieve_from_kb(query: str, num_results: int = 5) -> str:
-    """Retrieve relevant passages from the connected knowledge base. Use this
-    when the user asks about ingested documentation, internal facts, or
-    anything that requires looking up information stored in the KB.
-    """
-    kb_id = os.environ.get("KB_ID", "")
-    if not kb_id:
-        return json.dumps({"error": "No KB_ID configured for this runtime."})
-    try:
-        # Bug 130: MANAGED KBs (S3 Vectors / managed mode) reject
-        # vectorSearchConfiguration with "ValidationException: ... is not
-        # supported for managed knowledge bases. Use managedSearchConfiguration
-        # instead." Only OpenSearch/Aurora-backed KBs accept it. Try the
-        # explicit config first (carries numberOfResults), then fall back to a
-        # bare retrievalQuery (managed-store defaults) so a managed KB still
-        # retrieves instead of swallowing the error into an apology.
-        try:
-            resp = _get_kb_client().retrieve(
-                knowledgeBaseId=kb_id,
-                retrievalQuery={"text": query},
-                retrievalConfiguration={"vectorSearchConfiguration": {"numberOfResults": max(1, min(num_results, 20))}},
-            )
-        except Exception as _vsc_err:
-            _msg = str(_vsc_err)
-            if "managed" in _msg or "vectorSearchConfiguration is not supported" in _msg:
-                resp = _get_kb_client().retrieve(
-                    knowledgeBaseId=kb_id,
-                    retrievalQuery={"text": query},
-                )
-            else:
-                raise
-        results = []
-        for r in resp.get("retrievalResults", []):
-            content = r.get("content", {}).get("text", "")
-            score = r.get("score", 0.0)
-            results.append({"text": content, "score": score})
-        return json.dumps({"query": query, "results": results, "count": len(results)})
-    except Exception as e:
-        return json.dumps({"error": "KB retrieve failed: %s" % str(e), "query": query})
-'''
+            tool_defs += _RETRIEVE_FROM_KB_TOOL_SRC
     if has_code_interpreter:
         tools_list.append("execute_python")
         tool_defs += '''
@@ -1111,6 +1117,8 @@ def _generate_memory_agent(
     region: str,
     has_gateway: bool = False,
     creds: dict = None,
+    has_kb: bool = False,
+    kb_config: dict | None = None,
 ) -> str:
     """Generate agent with AgentCore Memory integration + optional Gateway tools.
 
@@ -1251,6 +1259,28 @@ def _get_gateway_tools():
         gateway_init = ""
         agent_tools = ""
 
+    # KB + Memory combined canvas: this generator wins the dispatch, so it must
+    # carry the KB retrieval tool itself or the KB edge is silently dropped
+    # (matrix-run finding P-E2E-029). Reuses the same tool sources as the
+    # tools-agent generator; the agentic variants are self-contained.
+    kb_tool_defs = ""
+    kb_imports = ""
+    if has_kb:
+        kb_imports = "import boto3\nfrom strands import tool"
+        _kb_cfg = kb_config or {}
+        _strategy = _kb_cfg.get("retrievalStrategy") or _kb_cfg.get("retrieval_strategy") or "simple"
+        _agentic_name = agentic_rag_tool_name(_strategy)
+        if _agentic_name:
+            kb_tool_defs = agentic_rag_tool_source(_strategy)
+            kb_tool_name = _agentic_name
+        else:
+            kb_tool_defs = _RETRIEVE_FROM_KB_TOOL_SRC
+            kb_tool_name = "retrieve_from_kb"
+        if agent_tools:
+            agent_tools = f"tools=_get_gateway_tools() + [{kb_tool_name}], "
+        else:
+            agent_tools = f"tools=[{kb_tool_name}], "
+
     return f'''"""AgentCore Runtime - Agent with Memory Integration
 
 Uses Strands Agent + BedrockAgentCoreApp SDK + MemoryClient for conversation persistence.
@@ -1264,6 +1294,7 @@ import os
 import urllib.request
 import urllib.parse
 {gateway_imports}
+{kb_imports}
 
 app = BedrockAgentCoreApp()
 
@@ -1274,6 +1305,7 @@ MEMORY_ID = os.environ.get("MEMORY_ID", "")
 {gateway_env}
 {gateway_functions}
 {gateway_init}
+{kb_tool_defs}
 
 # Lazy init: boto3 clients may not have valid creds at module load time
 _model = None
@@ -2612,14 +2644,24 @@ def generate_agent_code(
                 _generate_workflow_agent(system_prompt, model_id, region, provider, multi_agent_config_data)
             )
 
-    # Memory-connected agent (with optional gateway)
+    # Memory-connected agent (with optional gateway and/or knowledge base)
     if has_memory:
         if has_gateway:
             creds = _extract_gateway_credentials(gateway_config)
             return _maybe_inject_guardrails(
-                _generate_memory_agent(system_prompt, model_id, region, has_gateway=True, creds=creds)
+                _generate_memory_agent(
+                    system_prompt,
+                    model_id,
+                    region,
+                    has_gateway=True,
+                    creds=creds,
+                    has_kb=has_kb,
+                    kb_config=kb_config,
+                )
             )
-        return _maybe_inject_guardrails(_generate_memory_agent(system_prompt, model_id, region))
+        return _maybe_inject_guardrails(
+            _generate_memory_agent(system_prompt, model_id, region, has_kb=has_kb, kb_config=kb_config)
+        )
 
     # Gateway-connected agent
     if has_gateway:

@@ -17,6 +17,7 @@ import time
 import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services import step_clients
+from app.services.aws_errors import is_error
 from app.services.deployment_state_store import DeploymentStateStore
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,9 @@ def _create_policy_when_engine_ready(client, engine_id, name, description, state
             )
         except Exception as e:  # noqa: BLE001
             msg = str(e)
-            if ("ConflictException" in msg and "CREATING" in msg) or "is CREATING" in msg:
+            # "is CREATING" message check kept: the engine-not-ready signal is only
+            # carried in the message text, whatever the outer exception code is.
+            if (is_error(e, "ConflictException") and "CREATING" in msg) or "is CREATING" in msg:
                 last = e
                 logger.warning(
                     "policy engine still CREATING on create (attempt %d/%d) — waiting",
@@ -466,7 +469,9 @@ def handler(event: dict, context) -> dict:
                 if pid:
                     created_policy_ids.append((pol_name, pid))
             except Exception as e:
-                if "ConflictException" in str(e) or "already exists" in str(e):
+                # "already exists" fallback kept: conflicts can surface as a
+                # ValidationException whose message says "already exists".
+                if is_error(e, "ConflictException") or "already exists" in str(e):
                     # With the engine-name prefix, a conflict means an idempotent
                     # retry reusing the SAME engine. Recover the existing policy's id
                     # FROM THIS ENGINE and validate it like a fresh one. If it is NOT
@@ -531,8 +536,8 @@ def handler(event: dict, context) -> dict:
                         s = d.get("status", "")
                         if s in ("ACTIVE", "CREATE_FAILED", "FAILED"):
                             return s, str(d.get("statusReasons") or d.get("statusReason") or "")[:200]
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception:  # noqa: BLE001 — transient get_policy error; keep polling to timeout
+                        logger.debug("get_policy %s poll failed", pid, exc_info=True)
                     _t.sleep(3)
                 return "CREATING", "timeout"
 
@@ -578,8 +583,8 @@ def handler(event: dict, context) -> dict:
                     )
                     try:
                         agentcore_ctrl.delete_policy(policyEngineId=engine_id, policyId=pid)
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception:  # noqa: BLE001 — recreate below conflicts loudly if the delete failed
+                        logger.debug("delete_policy %s before recreate failed", pid, exc_info=True)
                     _t.sleep(20)  # short waits; promoter finishes convergence post-deploy
                     pol = name_to_stmt.get(pol_name, {})
                     try:
@@ -626,8 +631,8 @@ def handler(event: dict, context) -> dict:
                         d = agentcore_ctrl.get_policy(policyEngineId=engine_id, policyId=pid)
                         if d.get("status") != "ACTIVE":
                             agentcore_ctrl.delete_policy(policyEngineId=engine_id, policyId=pid)
-                    except Exception:  # noqa: BLE001
-                        pass
+                    except Exception:  # noqa: BLE001 — best-effort drop; promoter recreates from the pending payload
+                        logger.debug("Drop of non-ACTIVE policy %s failed", pid, exc_info=True)
 
         if is_enforce and created_count == 0 and not enforce_validation_pending:
             # Nothing valid to enforce. Same fail-closed rule as above.

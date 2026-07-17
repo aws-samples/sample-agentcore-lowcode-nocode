@@ -101,17 +101,19 @@ def apply_nag_suppressions(
         _suppress(stream_lambda.role, iam_reasons)
     for fn in step_lambdas.values():
         _suppress(fn.role, iam_reasons)
-    # Shared AgentCore runtime exec role: needs bedrock:* and
-    # bedrock-agentcore:*Browser*/Memory etc on Resource: "*" — see
-    # build_shared_runtime_role docstring.
+    # Shared AgentCore runtime exec role: exact bedrock-agentcore action
+    # lists (browser/code-interpreter/memory sessions) on Resource "*" —
+    # those resources are created dynamically per-deploy so their ARNs are
+    # unknowable at synth time. See build_shared_runtime_role docstring.
     _suppress(
         shared_runtime_role,
         [
             (
                 "AwsSolutions-IAM5",
-                "Wildcard resources required for dynamically-created "
-                "Cognito pools, AgentCore runtimes, and Bedrock model "
-                "invocations",
+                "Wildcard RESOURCES only (actions are exact lists): browser/"
+                "code-interpreter/memory sessions, gateways and Bedrock "
+                "models are created or selected dynamically per deploy, so "
+                "ARNs are unknowable at synth time",
             ),
         ],
     )

@@ -317,33 +317,48 @@ def _create_step_role(
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+                # Resource "*" required: cross-region inference profiles route
+                # to foundation-model ARNs in OTHER regions at runtime, and the
+                # model is user-selectable per flow.
                 resources=["*"],
             )
         )
 
     # knowledge_base creates KBs / data sources / ingestion jobs.
     if step_name == "knowledge_base":
+        # KB / data-source lifecycle verbs support resource-level scoping on
+        # the knowledge-base ARN. KB ids are SERVICE-GENERATED (the ARN carries
+        # the id, not the user-supplied name), so the tightest pre-creation
+        # pattern is knowledge-base/* in this account+region.
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
                     "bedrock:CreateKnowledgeBase",
                     "bedrock:GetKnowledgeBase",
-                    "bedrock:ListKnowledgeBases",
                     "bedrock:DeleteKnowledgeBase",
                     "bedrock:CreateDataSource",
                     "bedrock:DeleteDataSource",
                     "bedrock:StartIngestionJob",
                     "bedrock:GetIngestionJob",
-                    "bedrock:ListFoundationModels",
                     "bedrock:Retrieve",
                     "bedrock:RetrieveAndGenerate",
                 ],
+                resources=[f"arn:aws:bedrock:{stack.region}:{stack.account}:knowledge-base/*"],
+            )
+        )
+        # Account-level list verbs — no resource-level scoping supported.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:ListKnowledgeBases", "bedrock:ListFoundationModels"],
                 resources=["*"],
             )
         )
         # KB step auto-creates the S3 Vectors index on user-supplied
         # buckets when missing (Bug 88). Needs list/create permissions
-        # on the s3vectors service.
+        # on the s3vectors service. Scoped to vector-bucket ARNs (and their
+        # index/* sub-resources) in this account+region; bucket names are
+        # user-suppliable so a name-prefix pattern would break real flows —
+        # the auto-provisioned buckets use the agentcore-kbvec- prefix.
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
@@ -354,47 +369,73 @@ def _create_step_role(
                     "s3vectors:CreateVectorBucket",
                     "s3vectors:DescribeVectorBucket",
                     "s3vectors:GetVectorBucket",
-                    "s3vectors:ListVectorBuckets",
                 ],
+                resources=[f"arn:aws:s3vectors:{stack.region}:{stack.account}:bucket/*"],
+            )
+        )
+        # ListVectorBuckets is account-level (no resource ARN form).
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["s3vectors:ListVectorBuckets"],
                 resources=["*"],
             )
         )
         # OpenSearch Serverless: KB step auto-provisions a collection +
         # security/access policies + vector index when the caller supplies no
         # opensearchCollectionArn (Bedrock requires a pre-existing collection).
+        # Collection verbs scope to collection ARNs (ids are service-generated,
+        # so collection/* is the tightest pre-creation pattern).
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
                     "aoss:CreateCollection",
                     "aoss:BatchGetCollection",
                     "aoss:DeleteCollection",
+                    "aoss:CreateIndex",
+                    "aoss:DescribeIndex",
+                    "aoss:DeleteIndex",
+                    "aoss:APIAccessAll",
+                ],
+                resources=[f"arn:aws:aoss:{stack.region}:{stack.account}:collection/*"],
+            )
+        )
+        # aoss security/data-access policies do NOT support resource-level
+        # permissions (account-level APIs) — Resource must stay "*"; least
+        # privilege is enforced by the exact action list.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=[
                     "aoss:CreateSecurityPolicy",
                     "aoss:GetSecurityPolicy",
                     "aoss:DeleteSecurityPolicy",
                     "aoss:CreateAccessPolicy",
                     "aoss:GetAccessPolicy",
                     "aoss:DeleteAccessPolicy",
-                    "aoss:CreateIndex",
-                    "aoss:DescribeIndex",
-                    "aoss:DeleteIndex",
-                    "aoss:APIAccessAll",
                 ],
                 resources=["*"],
             )
         )
 
-    # guardrails creates Bedrock Guardrails.
+    # guardrails creates Bedrock Guardrails. Guardrail ids are service-
+    # generated (ARN carries the id, not the name), so guardrail/* in this
+    # account+region is the tightest pre-creation pattern.
     if step_name == "guardrails":
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
                     "bedrock:CreateGuardrail",
                     "bedrock:GetGuardrail",
-                    "bedrock:ListGuardrails",
                     "bedrock:UpdateGuardrail",
                     "bedrock:DeleteGuardrail",
                     "bedrock:CreateGuardrailVersion",
                 ],
+                resources=[f"arn:aws:bedrock:{stack.region}:{stack.account}:guardrail/*"],
+            )
+        )
+        # ListGuardrails (account-level listing) — no resource-level scoping.
+        role.add_to_policy(
+            iam.PolicyStatement(
+                actions=["bedrock:ListGuardrails"],
                 resources=["*"],
             )
         )
@@ -659,6 +700,14 @@ def _create_step_role(
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=agentcore_steps[step_name],
+                # Least privilege: AgentCore control-plane resources (runtimes,
+                # gateways, memories, harnesses, token vaults, workload
+                # identities, ...) are created dynamically per user deploy —
+                # their ARNs are unknowable when this stack is synthesized, and
+                # several verbs (Create*, List*) have no resource-ARN form.
+                # Scoped by the exact per-step action lists above instead of a
+                # service wildcard (AgentCore also ignores `bedrock-agentcore:*`
+                # wildcards at authorization time — Bug 47).
                 resources=["*"],
             )
         )
@@ -683,6 +732,8 @@ def _create_step_role(
     # prevent orphans (KB, Cognito pools, gateways, IAM roles, Lambdas,
     # vector buckets). Needs DELETE verbs across every resource type.
     if step_name == "status_update":
+        # KB ids are service-generated — knowledge-base/* in this
+        # account+region is the tightest pattern for cleanup-by-manifest.
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
@@ -691,7 +742,7 @@ def _create_step_role(
                     "bedrock:DeleteDataSource",
                     "bedrock:GetKnowledgeBase",
                 ],
-                resources=["*"],
+                resources=[f"arn:aws:bedrock:{stack.region}:{stack.account}:knowledge-base/*"],
             )
         )
         role.add_to_policy(
@@ -702,7 +753,7 @@ def _create_step_role(
                     "s3vectors:ListIndexes",
                     "s3vectors:DeleteIndex",
                 ],
-                resources=["*"],
+                resources=[f"arn:aws:s3vectors:{stack.region}:{stack.account}:bucket/*"],
             )
         )
         role.add_to_policy(
@@ -736,6 +787,8 @@ def _create_step_role(
                     "bedrock-agentcore:DeleteAgentRuntime",
                     "bedrock-agentcore:GetAgentRuntime",
                 ],
+                # AgentCore gateway/runtime ids are minted per-deploy — ARNs
+                # unknowable at synth time; scoped by exact delete/get verbs.
                 resources=["*"],
             )
         )

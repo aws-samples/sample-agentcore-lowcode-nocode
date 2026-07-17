@@ -123,7 +123,7 @@ async def set_git_token(
         logger.exception("Failed to store git token in Secrets Manager")
         raise HTTPException(
             status_code=502,
-            detail=f"Could not store git token: {e.response.get('Error', {}).get('Message', str(e))}",
+            detail="Could not store git token",
         ) from e
 
     normalized["token_ref"] = token_ref
@@ -168,7 +168,7 @@ async def git_sync_workflow(
         logger.exception("Failed to resolve git token from Secrets Manager")
         raise HTTPException(
             status_code=502,
-            detail=f"Could not resolve git token: {e.response.get('Error', {}).get('Message', str(e))}",
+            detail="Could not resolve git token",
         ) from e
 
     # Build the updated workflow by starting from the stored row's serialized

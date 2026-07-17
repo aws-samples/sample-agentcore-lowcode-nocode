@@ -32,6 +32,8 @@ import time
 
 import boto3
 
+from app.services.aws_errors import is_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -153,7 +155,9 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
             # is in UPDATING status" (concurrent update). In BOTH cases another run
             # owns the transition — do NOT delete or retry destructively here; the
             # next poll sees it CREATING/UPDATING/ACTIVE and converges.
-            if "ConflictException" in type(e).__name__ or "already exists" in str(e):
+            # "already exists" fallback kept: the concurrent-create form was seen
+            # live as a message, not always a ConflictException code.
+            if is_error(e, "ConflictException") or "already exists" in str(e):
                 logger.info("promote: %s owned by a concurrent run (%s) — leaving it", name, str(e)[:80])
             else:
                 logger.info("promote: recreate of %s not yet valid: %s", name, str(e)[:120])

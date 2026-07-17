@@ -195,7 +195,7 @@ def _store_webhook_secret(owner_sub: str) -> str:
         logger.exception("Failed to store webhook secret in Secrets Manager")
         raise HTTPException(
             status_code=500,
-            detail=(f"Could not store webhook secret: {e.response.get('Error', {}).get('Message', str(e))}"),
+            detail="Could not store webhook secret",
         ) from e
     return resp["ARN"]
 

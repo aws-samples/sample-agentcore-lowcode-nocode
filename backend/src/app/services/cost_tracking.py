@@ -467,8 +467,8 @@ def summarize_from_logs(
     if status == "Running":
         try:
             logs_client.stop_query(queryId=query_id)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — best-effort cancel; partial results are still returned
+            logger.debug("stop_query %s failed", query_id, exc_info=True)
 
     total_cost = 0.0
     total_in = 0

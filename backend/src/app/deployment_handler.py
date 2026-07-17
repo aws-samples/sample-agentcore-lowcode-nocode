@@ -43,6 +43,7 @@ from app.models.tool_generation_models import (
     ToolGenerateResponse,
     ToolTestRequest,
 )
+from app.services.aws_errors import is_error
 from app.services.config import load_config
 from app.services.deployment_state_store import DeploymentStateStore
 from app.services.gateway_deployer import cleanup_gateway_resources, get_cognito_token
@@ -1145,8 +1146,8 @@ async def handle_test_runtime_stream(request: TestRequest):
     try:
         table = store._table
         deployment_state = _scan_for_runtime(table, runtime_id)
-    except Exception:
-        pass
+    except Exception:  # noqa: BLE001 — best-effort mode lookup; fall through to runtime invoke
+        logger.warning("Could not resolve deployment state for %s", runtime_id, exc_info=True)
 
     # Bug 190 — HARNESS mode must route to the data-plane invoke_harness, NOT
     # invoke_agent_runtime. The frontend uses THIS streaming route for harness
@@ -1463,10 +1464,10 @@ def _delete_managed_resource(res: dict, region: str) -> str:
                         if pid:
                             try:
                                 ctrl.delete_policy(policyEngineId=rid, policyId=pid)
-                            except Exception:  # noqa: BLE001
-                                pass
-                except Exception:  # noqa: BLE001
-                    pass
+                            except Exception:  # noqa: BLE001 — re-listed next round; engine delete surfaces real failures
+                                logger.debug("delete_policy %s on engine %s failed", pid, rid, exc_info=True)
+                except Exception:  # noqa: BLE001 — list is eventually-consistent; retried next round
+                    logger.debug("list_policies on engine %s failed", rid, exc_info=True)
                 if remaining == 0:
                     break
                 time.sleep(5)
@@ -1496,10 +1497,10 @@ def _delete_managed_resource(res: dict, region: str) -> str:
                 for ds in ba.list_data_sources(knowledgeBaseId=rid).get("dataSourceSummaries", []):
                     try:
                         ba.delete_data_source(knowledgeBaseId=rid, dataSourceId=ds["dataSourceId"])
-                    except Exception:  # noqa: BLE001
-                        pass
-            except Exception:  # noqa: BLE001
-                pass
+                    except Exception:  # noqa: BLE001 — cascade delete below removes remaining data sources
+                        logger.debug("delete_data_source on KB %s failed", rid, exc_info=True)
+            except Exception:  # noqa: BLE001 — best-effort pre-clean; delete_knowledge_base surfaces real failures
+                logger.debug("list_data_sources on KB %s failed", rid, exc_info=True)
             ba.delete_knowledge_base(knowledgeBaseId=rid)
             # Poll to a terminal deleted state (ResourceNotFound) so the
             # downstream bucket/role deletes don't race the cascade.
@@ -1520,10 +1521,10 @@ def _delete_managed_resource(res: dict, region: str) -> str:
                 for ix in s3v.list_indexes(vectorBucketName=bname).get("indexes", []):
                     try:
                         s3v.delete_index(vectorBucketName=bname, indexName=ix["indexName"])
-                    except Exception:  # noqa: BLE001
-                        pass
-            except Exception:  # noqa: BLE001
-                pass
+                    except Exception:  # noqa: BLE001 — bucket delete below surfaces a still-populated bucket
+                        logger.debug("delete_index on vector bucket %s failed", bname, exc_info=True)
+            except Exception:  # noqa: BLE001 — best-effort pre-clean; bucket delete surfaces real failures
+                logger.debug("list_indexes on vector bucket %s failed", bname, exc_info=True)
             s3v.delete_vector_bucket(vectorBucketName=bname)
             return f"[manifest] s3 vectors bucket {bname} deleted"
         if rtype == "oss_collection":
@@ -1537,8 +1538,8 @@ def _delete_managed_resource(res: dict, region: str) -> str:
                 det = aoss.batch_get_collection(names=[cname]).get("collectionDetails", [])
                 if det:
                     aoss.delete_collection(id=det[0]["id"])
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 — standing $ resource: make the failure visible, keep going
+                logger.warning("Could not delete OSS collection %s (billable orphan risk)", cname, exc_info=True)
             for suffix, ptype in (
                 (f"{cname}-acc"[:32], "data"),
                 (f"{cname}-net"[:32], "network"),
@@ -1548,8 +1549,8 @@ def _delete_managed_resource(res: dict, region: str) -> str:
                     aoss.delete_access_policy(
                         name=suffix, type=ptype
                     ) if ptype == "data" else aoss.delete_security_policy(name=suffix, type=ptype)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception:  # noqa: BLE001 — policies are free; already-gone is the common case
+                    logger.debug("Could not delete OSS %s policy %s", ptype, suffix, exc_info=True)
             return f"[manifest] oss collection {cname} + policies deleted"
         if rtype == "cognito_user_pool":
             cog = boto3.client("cognito-idp", region_name=res_region)
@@ -1566,13 +1567,13 @@ def _delete_managed_resource(res: dict, region: str) -> str:
                     for _ in range(12):  # ~1 min
                         try:
                             still = cog.describe_user_pool(UserPoolId=rid).get("UserPool", {}).get("Domain")
-                        except Exception:  # noqa: BLE001
+                        except Exception:  # noqa: BLE001 — describe failure = treat domain as gone
                             still = None
                         if not still:
                             break
                         time.sleep(5)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 — pool delete below retries + surfaces real failures
+                logger.debug("Cognito domain pre-delete for pool %s failed", rid, exc_info=True)
             # Delete the pool, retrying briefly if the domain teardown is still
             # settling (the same InvalidParameter "has a domain" can lag).
             for _attempt in range(6):
@@ -1615,7 +1616,8 @@ async def handle_import_runtime(request: ImportRuntimeRequest, raw_request: Requ
         ctrl = boto3.client("bedrock-agentcore-control", region_name=region)
         rt = ctrl.get_agent_runtime(agentRuntimeId=runtime_id)
     except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=404, detail=f"Runtime not found or not describable: {exc}") from exc
+        logger.warning("Import: could not describe runtime %s in %s: %s", runtime_id, region, exc)
+        raise HTTPException(status_code=404, detail="Runtime not found or not describable") from exc
 
     store = _get_state_store()
     # Idempotency + tenant safety: if this runtime is already recorded by another
@@ -1883,7 +1885,7 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
                     iam_c.delete_role(RoleName=mem_role_name)
                     cleanup_messages.append(f"Memory IAM role deleted: {mem_role_name}")
                 except Exception as exc:
-                    if "NoSuchEntity" not in str(exc):
+                    if not is_error(exc, "NoSuchEntity", "NoSuchEntityException"):
                         cleanup_messages.append(f"Memory role cleanup error: {exc}")
 
     # Step 0.7: Clean up guardrail if we created it
@@ -1968,7 +1970,12 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
                 try:
                     bedrock_agent.delete_data_source(knowledgeBaseId=kb_id, dataSourceId=ds_id)
                 except Exception as ds_exc:  # noqa: BLE001
-                    if "NotFound" not in str(ds_exc) and "does not exist" not in str(ds_exc).lower():
+                    # "does not exist" fallback kept: the KB-delete cascade race can
+                    # also surface as a ValidationException with that message.
+                    if (
+                        not is_error(ds_exc, "ResourceNotFoundException")
+                        and "does not exist" not in str(ds_exc).lower()
+                    ):
                         raise
             if kb_id:
                 bedrock_agent.delete_knowledge_base(knowledgeBaseId=kb_id)
@@ -2016,7 +2023,7 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
                     )
                     cleanup_messages.append(f"Harness gateway OAuth provider {_gw_prov} deleted")
                 except Exception as _e:  # noqa: BLE001
-                    if "ResourceNotFound" not in str(_e) and "NotFound" not in str(_e):
+                    if not is_error(_e, "ResourceNotFoundException", "NotFoundException"):
                         cleanup_messages.append(f"Harness gateway OAuth provider delete error: {_e}")
         except Exception:
             logger.exception("Harness destroy error for %s", runtime_id)

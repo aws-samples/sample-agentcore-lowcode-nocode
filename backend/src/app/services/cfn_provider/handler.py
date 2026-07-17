@@ -35,9 +35,22 @@ from urllib.parse import quote
 
 import boto3
 import cfn_response  # absolute import — this file is packaged as a flat Lambda zip, not a package
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+def _error_code(exc: BaseException) -> str:
+    """AWS error code from a ClientError ('' for non-ClientError).
+
+    Local copy of app.services.aws_errors.error_code — this module is packaged
+    as a flat Lambda zip (handler.py + cfn_response.py only, see
+    cfn_template_generator._package_cfn_provider) and cannot import app.*.
+    """
+    if isinstance(exc, ClientError):
+        return exc.response.get("Error", {}).get("Code", "")
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +319,11 @@ def _handle_policy_create_update(event: dict) -> tuple[dict, str]:
                 break
             except Exception as e:
                 err = str(e)
-                if "ResourceNotFoundException" in err or "PolicyEngine" in err and "not found" in err.lower():
+                # Message fallback kept: the propagation race can also surface as a
+                # ValidationException saying "PolicyEngine ... not found".
+                if _error_code(e) == "ResourceNotFoundException" or (
+                    "PolicyEngine" in err and "not found" in err.lower()
+                ):
                     logger.info("PolicyEngine still propagating (attempt %d): %s", attempt + 1, err[:200])
                     time.sleep(10)
                     continue

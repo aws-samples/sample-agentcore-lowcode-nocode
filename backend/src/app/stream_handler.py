@@ -521,8 +521,8 @@ def lambda_handler(event, response_stream=None, context=None):  # noqa: D401
         except Exception:  # noqa: BLE001
             try:
                 stream.close()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 — last-ditch stream teardown; nothing left to do
+                logger.debug("stream: end() and close() both failed", exc_info=True)
 
 
 # Buffered fallback (non-streaming). Some local/test harnesses invoke a Lambda

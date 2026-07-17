@@ -22,6 +22,7 @@ import zipfile
 import boto3
 
 from app.services import codegen_templates
+from app.services.aws_errors import is_error
 
 logger = logging.getLogger(__name__)
 
@@ -413,12 +414,17 @@ def _ensure_api_key_credential_provider(
         logger.info("Created API-key credential provider")
         return arn
     except Exception as e:  # noqa: BLE001
-        if "ConflictException" in str(e) or "already exists" in str(e):
+        # "already exists" fallback kept deliberately: the service reports an
+        # existing provider as a ValidationException whose message says
+        # "already exists" (verified live in cfn_provider), not only as a
+        # ConflictException — the code check alone would miss it.
+        if is_error(e, "ConflictException") or "already exists" in str(e):
             try:
                 got = agentcore_ctrl.get_api_key_credential_provider(name=provider_name)
                 return got.get("credentialProviderArn") or got.get("apiKeyCredentialProviderArn", "")
             except Exception:  # noqa: BLE001
-                pass
+                # SECURITY: constant only — provider_name is taint-flagged (see above).
+                logger.debug("API-key provider conflict lookup failed; re-raising original error")
         raise
 
 
@@ -508,12 +514,16 @@ def _ensure_oauth2_credential_provider(
         logger.info("Created OAuth2 credential provider")
         return resp["credentialProviderArn"]
     except Exception as e:  # noqa: BLE001
-        if "ConflictException" in str(e) or "already exists" in str(e):
+        # "already exists" fallback kept: existing providers can surface as a
+        # ValidationException with an "already exists" message, not only a
+        # ConflictException (see _ensure_api_key_credential_provider).
+        if is_error(e, "ConflictException") or "already exists" in str(e):
             try:
                 got = agentcore_ctrl.get_oauth2_credential_provider(name=provider_name)
                 return got.get("credentialProviderArn", "")
             except Exception:  # noqa: BLE001
-                pass
+                # SECURITY: constant only — provider_name is taint-flagged.
+                logger.debug("OAuth2 provider conflict lookup failed; re-raising original error")
         raise
 
 
@@ -945,8 +955,9 @@ def _prune_orphaned_lambda_permissions(lambda_client, function_name: str) -> int
             iam.get_role(RoleName=role_name)
             continue  # role still exists — keep the statement
         except Exception as e:  # noqa: BLE001
-            if "NoSuchEntity" not in str(e) and "NotFound" not in str(e):
+            if not is_error(e, "NoSuchEntity", "NoSuchEntityException"):
                 # Unknown IAM error — don't risk removing a valid grant.
+                logger.debug("get_role(%s) failed with a non-NoSuchEntity error; keeping statement", role_name)
                 continue
         # Role is gone: remove the dangling statement.
         try:
@@ -957,8 +968,8 @@ def _prune_orphaned_lambda_permissions(lambda_client, function_name: str) -> int
                 sid,
                 function_name,
             )
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception:  # noqa: BLE001 — best-effort by contract (caller retries its add)
+            logger.debug("Could not prune permission %s from %s", sid, function_name, exc_info=True)
     return pruned
 
 
@@ -1597,8 +1608,10 @@ def _create_gateway_target_with_retry(
             return target
         except Exception as e:
             err_str = str(e)
-            # If the target already exists, look it up and reuse it
-            if "ConflictException" in err_str or "already exists" in err_str:
+            # If the target already exists, look it up and reuse it.
+            # "already exists" message fallback kept: conflicts can surface as a
+            # ValidationException whose message says "already exists".
+            if is_error(e, "ConflictException") or "already exists" in err_str:
                 logger.info("Gateway target '%s' already exists, reusing", target_name)
                 try:
                     targets_resp = agentcore_ctrl.list_gateway_targets(gatewayIdentifier=gateway_id)
@@ -2010,14 +2023,14 @@ def _delete_connector_credential_provider(agentcore_ctrl, entry: str) -> tuple[b
             get_fn(name=name)
             return False
         except Exception as e:  # noqa: BLE001
-            return "ResourceNotFound" in str(e) or "NotFound" in str(e)
+            return is_error(e, "ResourceNotFoundException", "NotFoundException")
 
     if ptype == "API_KEY":
         try:
             agentcore_ctrl.delete_api_key_credential_provider(name=name)
             return True, f"API_KEY credential provider {name} deleted"
         except Exception as e:  # noqa: BLE001
-            if "ResourceNotFound" in str(e) or "NotFound" in str(e):
+            if is_error(e, "ResourceNotFoundException", "NotFoundException"):
                 return True, f"Credential provider {name} already gone"
             return False, f"API_KEY provider {name} delete error: {e}"
     if ptype == "OAUTH":
@@ -2025,7 +2038,7 @@ def _delete_connector_credential_provider(agentcore_ctrl, entry: str) -> tuple[b
             agentcore_ctrl.delete_oauth2_credential_provider(name=name)
             return True, f"OAUTH credential provider {name} deleted"
         except Exception as e:  # noqa: BLE001
-            if "ResourceNotFound" in str(e) or "NotFound" in str(e):
+            if is_error(e, "ResourceNotFoundException", "NotFoundException"):
                 return True, f"Credential provider {name} already gone"
             return False, f"OAUTH provider {name} delete error: {e}"
 
@@ -2037,7 +2050,7 @@ def _delete_connector_credential_provider(agentcore_ctrl, entry: str) -> tuple[b
         try:
             getattr(agentcore_ctrl, deleter)(name=name)
         except Exception as e:  # noqa: BLE001
-            if "ResourceNotFound" in str(e) or "NotFound" in str(e):
+            if is_error(e, "ResourceNotFoundException", "NotFoundException"):
                 continue
         # Verify the provider of THIS type is actually gone.
         if _is_gone(getattr(agentcore_ctrl, getter)):
@@ -2081,8 +2094,8 @@ def _deploy_connector_targets(
             for sarn in created_secrets:
                 try:
                     sm.delete_secret(SecretId=sarn, ForceDeleteWithoutRecovery=True)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception:  # noqa: BLE001 — best-effort rollback
+                    logger.warning("Rollback: could not delete connector secret %s", _safe_log_token(sarn))
         for uri in created_spec_s3_uris:
             _delete_spec_s3_object(uri, region)
 
@@ -2118,8 +2131,8 @@ def _delete_spec_s3_object(uri: str, region: str) -> None:
         bucket, _, key = rest.partition("/")
         if bucket and key:
             boto3.client("s3", region_name=region).delete_object(Bucket=bucket, Key=key)
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001 — best-effort by contract (docstring)
+        logger.debug("Could not delete connector spec object %s", _safe_log_token(uri), exc_info=True)
 
 
 def _deploy_connector_targets_inner(
@@ -2407,7 +2420,8 @@ def deploy_gateway(
             gateway["roleArn"] = gw_ready.get("roleArn", gateway["roleArn"])
         except Exception as create_err:
             err_str = str(create_err)
-            if "ConflictException" in err_str or "already exists" in err_str:
+            # "already exists" message fallback kept (ValidationException shape).
+            if is_error(create_err, "ConflictException") or "already exists" in err_str:
                 logger.info("Gateway '%s' already exists, looking up", gateway_name)
                 existing = agentcore_ctrl.list_gateways()
                 for gw in _get_gateways_from_response(existing):
@@ -2882,8 +2896,8 @@ def deploy_gateway(
             try:
                 _gw = agentcore_ctrl.get_gateway(gatewayIdentifier=gateway["gatewayId"])
                 gateway_arn = _gw.get("gatewayArn", "")
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:  # noqa: BLE001 — optional enrichment; policy_step tolerates a missing ARN
+                logger.debug("Could not resolve gateway ARN for %s", gateway["gatewayId"], exc_info=True)
         qualified_tools, expected_tool_count = _resolve_gateway_tool_actions(agentcore_ctrl, gateway["gatewayId"])
 
         gateway_url = gateway.get("gatewayUrl", "")
@@ -2916,8 +2930,8 @@ def deploy_gateway(
                         if (_d.get("status") or "").upper() == "FAILED":
                             _r = _d.get("statusReasons") or _d.get("statusReason") or "unknown"
                             target_reasons.append(f"{_tid}: {_r}")
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception:  # noqa: BLE001 — diagnostics enrichment only; the deploy still fails below
+                    logger.debug("Could not collect FAILED-target reasons", exc_info=True)
                 detail = (
                     f" Target failure(s): {target_reasons}"
                     if target_reasons
@@ -3107,13 +3121,13 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: dict
                         domain = pool_detail.get("UserPool", {}).get("Domain")
                         if domain:
                             cognito_client.delete_user_pool_domain(UserPoolId=user_pool_id, Domain=domain)
-                    except Exception:
-                        pass
+                    except Exception:  # noqa: BLE001 — pool delete below still surfaces real failures
+                        logger.debug("Cognito domain delete failed for pool %s", user_pool_id, exc_info=True)
                     if client_id_val:
                         try:
                             cognito_client.delete_user_pool_client(UserPoolId=user_pool_id, ClientId=client_id_val)
-                        except Exception:
-                            pass
+                        except Exception:  # noqa: BLE001 — client is cascade-deleted with the pool anyway
+                            logger.debug("Cognito client delete failed for pool %s", user_pool_id, exc_info=True)
                     cognito_client.delete_user_pool(UserPoolId=user_pool_id)
                     cleanup_log.append(f"Cognito pool {user_pool_id} deleted")
             except Exception as e:
@@ -3127,7 +3141,7 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: dict
         lambda_client.delete_function(FunctionName=lambda_name)
         cleanup_log.append(f"Lambda {lambda_name} deleted")
     except Exception as e:
-        if "ResourceNotFound" not in str(e):
+        if not is_error(e, "ResourceNotFoundException"):
             cleanup_log.append(f"Lambda delete error: {e}")
 
     # Delete custom tool Lambdas
@@ -3139,7 +3153,7 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: dict
             lambda_client.delete_function(FunctionName=fn_name)
             cleanup_log.append(f"Custom tool Lambda {fn_name} deleted")
         except Exception as e:
-            if "ResourceNotFound" not in str(e):
+            if not is_error(e, "ResourceNotFoundException"):
                 cleanup_log.append(f"Custom tool Lambda delete error: {e}")
 
     # Delete custom tool IAM roles
@@ -3154,7 +3168,7 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: dict
             iam_client.delete_role(RoleName=role_name)
             cleanup_log.append(f"IAM role {role_name} deleted")
         except Exception as e:
-            if "NoSuchEntity" not in str(e):
+            if not is_error(e, "NoSuchEntity", "NoSuchEntityException"):
                 cleanup_log.append(f"IAM role cleanup error for {role_name}: {e}")
 
     # Delete the gateway's own execution role (AgentCoreGateway-<gateway_name>).
@@ -3175,7 +3189,7 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: dict
             iam_client.delete_role(RoleName=gw_role_name)
             cleanup_log.append(f"Gateway IAM role {gw_role_name} deleted")
         except Exception as e:  # noqa: BLE001
-            if "NoSuchEntity" not in str(e):
+            if not is_error(e, "NoSuchEntity", "NoSuchEntityException"):
                 cleanup_log.append(f"Gateway IAM role cleanup error: {e}")
 
     # Delete SaaS connector credential providers (API-key OR OAuth2 — try both,
@@ -3199,7 +3213,7 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: dict
                 sm_client.delete_secret(SecretId=secret_arn, ForceDeleteWithoutRecovery=True)
                 cleanup_log.append(f"Connector secret {secret_arn} deleted")
             except Exception as e:  # noqa: BLE001
-                if "ResourceNotFound" not in str(e):
+                if not is_error(e, "ResourceNotFoundException"):
                     cleanup_log.append(f"Connector secret delete error: {e}")
 
     # Delete staged OpenAPI spec objects (large connector specs routed to S3).
@@ -3419,8 +3433,8 @@ def _deploy_external_mcp_targets(
             for sarn in created_secrets:
                 try:
                     sm.delete_secret(SecretId=sarn, ForceDeleteWithoutRecovery=True)
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception:  # noqa: BLE001 — best-effort rollback
+                    logger.warning("Rollback: could not delete MCP-server secret %s", _safe_log_token(sarn))
 
     try:
         for sel in external_mcp_servers:

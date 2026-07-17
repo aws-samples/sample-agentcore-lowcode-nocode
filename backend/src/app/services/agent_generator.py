@@ -392,8 +392,10 @@ def generate_canvas(
                         "responseType": "clarification",
                         "message": parsed.get("message", ""),
                     }
-            except Exception:
-                pass
+            except Exception:  # noqa: BLE001
+                # Model didn't return the clarification envelope (non-JSON text) —
+                # expected for most prompts; fall through to generation.
+                logger.debug("Clarification-envelope parse failed; proceeding to generation")
             # Model didn't return the clarification envelope — fall through
             # to generation. Better to attempt a spec than re-prompt.
             history = [{"role": "user", "content": prompt}]

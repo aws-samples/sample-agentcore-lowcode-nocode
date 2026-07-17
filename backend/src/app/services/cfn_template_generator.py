@@ -490,7 +490,10 @@ class CfnTemplateGenerator:
             },
         ]
 
-        # MCP server targets need OAuth2 credential provider management
+        # MCP server targets need OAuth2 credential provider management.
+        # Exact action list (the Custom::OAuth2CredentialProvider handler only
+        # creates/gets/deletes the provider, which transparently provisions the
+        # default token vault + workload identity) — never bedrock-agentcore:*.
         if has_mcp_server:
             policies.append(
                 {
@@ -499,16 +502,58 @@ class CfnTemplateGenerator:
                         "Version": "2012-10-17",
                         "Statement": [
                             {
+                                # AgentCore control-plane resources (credential
+                                # providers, token vault) are created dynamically
+                                # by the custom resource, so ARNs are unknowable
+                                # in the template. Scope by tag/condition for
+                                # production.
+                                "Sid": "OAuth2CredentialProviderLifecycle",
                                 "Effect": "Allow",
                                 "Action": [
-                                    "bedrock-agentcore:*",  # OAuth2 credential provider needs multiple actions incl. CreateTokenVault
+                                    "bedrock-agentcore:CreateOauth2CredentialProvider",
+                                    "bedrock-agentcore:GetOauth2CredentialProvider",
+                                    "bedrock-agentcore:DeleteOauth2CredentialProvider",
+                                    "bedrock-agentcore:ListOauth2CredentialProviders",
+                                    # First provider in a region implicitly
+                                    # provisions the default token vault.
+                                    "bedrock-agentcore:CreateTokenVault",
+                                    "bedrock-agentcore:GetTokenVault",
+                                    # Provider creation mints a workload-identity
+                                    # record under the identity directory.
+                                    "bedrock-agentcore:CreateWorkloadIdentity",
+                                    "bedrock-agentcore:GetWorkloadIdentity",
+                                    "bedrock-agentcore:DeleteWorkloadIdentity",
+                                ],
+                                "Resource": "*",
+                            },
+                            {
+                                # CreateOauth2CredentialProvider stores its
+                                # client_secret under the AgentCore identity
+                                # Secrets Manager namespace (bedrock-agentcore-*,
+                                # e.g. bedrock-agentcore-identity!default/oauth2/
+                                # <name>) — scope the secret verbs to that prefix.
+                                "Sid": "CredentialProviderSecrets",
+                                "Effect": "Allow",
+                                "Action": [
                                     "secretsmanager:CreateSecret",
                                     "secretsmanager:DeleteSecret",
                                     "secretsmanager:GetSecretValue",
                                     "secretsmanager:PutSecretValue",
                                 ],
-                                "Resource": "*",
-                            }
+                                "Resource": [
+                                    {
+                                        "Fn::Sub": (
+                                            "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}"
+                                            ":secret:bedrock-agentcore-*"
+                                        )
+                                    },
+                                    {
+                                        "Fn::Sub": (
+                                            "arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:agentcore-*"
+                                        )
+                                    },
+                                ],
+                            },
                         ],
                     },
                 }
@@ -516,6 +561,15 @@ class CfnTemplateGenerator:
 
         template["Resources"]["CfnProviderRole"] = {
             "Type": "AWS::IAM::Role",
+            # Surfaced in the exported template (comments don't survive
+            # yaml.dump).
+            "Metadata": {
+                "LeastPrivilegeNote": (
+                    "AgentCore policy/credential-provider ids are minted by the service at stack-create "
+                    "time, so those statements keep Resource '*' with exact action lists (no service "
+                    "wildcards). Scope by tag/condition for production."
+                )
+            },
             "Properties": {
                 "AssumeRolePolicyDocument": {
                     "Version": "2012-10-17",
@@ -614,16 +668,26 @@ class CfnTemplateGenerator:
         if has_memory or "memory" in connected_tools:
             statements.append(
                 {
+                    # Exact memory data-plane verbs (no *Memory* action
+                    # wildcard). Memory ids are minted at deploy time so the
+                    # Resource stays "*" — scope by tag/condition for production.
                     "Sid": "MemoryAccess",
                     "Effect": "Allow",
                     "Action": [
-                        "bedrock-agentcore:*Memory*",
+                        "bedrock-agentcore:GetMemory",
+                        "bedrock-agentcore:ListMemories",
                         "bedrock-agentcore:CreateEvent",
-                        "bedrock-agentcore:GetLastKTurns",
-                        "bedrock-agentcore:RetrieveMemories",
+                        "bedrock-agentcore:GetEvent",
+                        "bedrock-agentcore:ListEvents",
+                        "bedrock-agentcore:DeleteEvent",
                         "bedrock-agentcore:ListSessions",
                         "bedrock-agentcore:ListActors",
-                        "bedrock-agentcore:ListEvents",
+                        "bedrock-agentcore:RetrieveMemoryRecords",
+                        "bedrock-agentcore:GetMemoryRecord",
+                        "bedrock-agentcore:ListMemoryRecords",
+                        # Legacy verbs kept for older SDK paths.
+                        "bedrock-agentcore:GetLastKTurns",
+                        "bedrock-agentcore:RetrieveMemories",
                         "bedrock-agentcore-control:GetMemory",
                         "bedrock-agentcore-control:ListMemories",
                     ],
@@ -634,9 +698,23 @@ class CfnTemplateGenerator:
         if "browser" in connected_tools:
             statements.append(
                 {
+                    # Exact browser session verbs (no *Browser* action
+                    # wildcard). Sessions are created dynamically at runtime so
+                    # the Resource stays "*" — scope by tag/condition for
+                    # production.
                     "Sid": "BrowserAccess",
                     "Effect": "Allow",
-                    "Action": ["bedrock-agentcore:*Browser*"],
+                    "Action": [
+                        "bedrock-agentcore:StartBrowserSession",
+                        "bedrock-agentcore:StopBrowserSession",
+                        "bedrock-agentcore:GetBrowserSession",
+                        "bedrock-agentcore:ListBrowserSessions",
+                        "bedrock-agentcore:UpdateBrowserStream",
+                        "bedrock-agentcore:InvokeBrowser",
+                        "bedrock-agentcore:ConnectBrowserAutomationStream",
+                        "bedrock-agentcore:GetBrowser",
+                        "bedrock-agentcore:ListBrowsers",
+                    ],
                     "Resource": "*",
                 }
             )
@@ -644,9 +722,21 @@ class CfnTemplateGenerator:
         if "code_interpreter" in connected_tools:
             statements.append(
                 {
+                    # Exact code-interpreter session verbs (no *CodeInterpreter*
+                    # action wildcard). Sessions are created dynamically at
+                    # runtime so the Resource stays "*" — scope by tag/condition
+                    # for production.
                     "Sid": "CodeInterpreterAccess",
                     "Effect": "Allow",
-                    "Action": ["bedrock-agentcore:*CodeInterpreter*"],
+                    "Action": [
+                        "bedrock-agentcore:StartCodeInterpreterSession",
+                        "bedrock-agentcore:StopCodeInterpreterSession",
+                        "bedrock-agentcore:InvokeCodeInterpreter",
+                        "bedrock-agentcore:GetCodeInterpreterSession",
+                        "bedrock-agentcore:ListCodeInterpreterSessions",
+                        "bedrock-agentcore:GetCodeInterpreter",
+                        "bedrock-agentcore:ListCodeInterpreters",
+                    ],
                     "Resource": "*",
                 }
             )
@@ -2063,6 +2153,17 @@ def handler(event, context):
     def _add_evaluation_role(self, template: dict) -> None:
         template["Resources"]["EvaluationRole"] = {
             "Type": "AWS::IAM::Role",
+            # Surfaced in the exported template (comments don't survive
+            # yaml.dump): the remaining Resource:"*" statements cover
+            # service-minted AgentCore resources + cross-region model
+            # invocation only.
+            "Metadata": {
+                "LeastPrivilegeNote": (
+                    "AgentCore evaluation-config/evaluator ids and inference-profile model routing are "
+                    "service-generated, so those statements keep Resource '*' with exact action lists. "
+                    "Scope by tag/condition for production."
+                )
+            },
             "Properties": {
                 "RoleName": {"Fn::Sub": "AgentCoreEval-${AWS::StackName}"},
                 "AssumeRolePolicyDocument": {
@@ -2082,24 +2183,89 @@ def handler(event, context):
                             "Version": "2012-10-17",
                             "Statement": [
                                 {
+                                    # LLM-judge evaluator model calls. Resource
+                                    # "*" required: cross-region inference
+                                    # profiles resolve to foundation-model ARNs
+                                    # in other regions.
+                                    "Sid": "EvaluatorModelAccess",
                                     "Effect": "Allow",
                                     "Action": [
                                         "bedrock:InvokeModel",
                                         "bedrock:InvokeModelWithResponseStream",
-                                        "bedrock-agentcore:*",
-                                        "bedrock-agentcore-control:*",
+                                    ],
+                                    "Resource": "*",
+                                },
+                                {
+                                    # Exact AgentCore evaluation verbs (never
+                                    # bedrock-agentcore:* / -control:*). The
+                                    # config/evaluator ids are minted by the
+                                    # service, so ARNs are unknowable in the
+                                    # template. Scope by tag/condition for
+                                    # production.
+                                    "Sid": "AgentCoreEvaluation",
+                                    "Effect": "Allow",
+                                    "Action": [
+                                        "bedrock-agentcore:Evaluate",
+                                        "bedrock-agentcore:GetOnlineEvaluationConfig",
+                                        "bedrock-agentcore:ListOnlineEvaluationConfigs",
+                                        "bedrock-agentcore:ListEvaluators",
+                                        "bedrock-agentcore:GetEvaluator",
+                                    ],
+                                    "Resource": "*",
+                                },
+                                {
+                                    # Read the runtime's spans/logs + write eval
+                                    # results — scoped to the AgentCore runtime
+                                    # log-group namespace and the aws/spans
+                                    # trace-index group.
+                                    "Sid": "EvaluationLogsScoped",
+                                    "Effect": "Allow",
+                                    "Action": [
                                         "logs:CreateLogGroup",
                                         "logs:CreateLogStream",
                                         "logs:PutLogEvents",
-                                        "logs:DescribeLogGroups",
                                         "logs:DescribeLogStreams",
                                         "logs:FilterLogEvents",
+                                        "logs:GetLogEvents",
                                         "logs:StartQuery",
                                         "logs:GetQueryResults",
-                                        "logs:GetLogEvents",
                                     ],
+                                    "Resource": [
+                                        {
+                                            "Fn::Sub": (
+                                                "arn:aws:logs:${AWS::Region}:${AWS::AccountId}"
+                                                ":log-group:/aws/bedrock-agentcore/*"
+                                            )
+                                        },
+                                        {
+                                            "Fn::Sub": (
+                                                "arn:aws:logs:${AWS::Region}:${AWS::AccountId}"
+                                                ":log-group:/aws/bedrock-agentcore/*:log-stream:*"
+                                            )
+                                        },
+                                        {
+                                            "Fn::Sub": (
+                                                "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:aws/spans"
+                                            )
+                                        },
+                                        {
+                                            "Fn::Sub": (
+                                                "arn:aws:logs:${AWS::Region}:${AWS::AccountId}"
+                                                ":log-group:aws/spans:log-stream:*"
+                                            )
+                                        },
+                                    ],
+                                },
+                                {
+                                    # DescribeLogGroups + StartQuery-by-name are
+                                    # account-level (no resource ARN form for
+                                    # discovery). Kept separate so the "*" is
+                                    # visible and minimal.
+                                    "Sid": "EvaluationLogsDiscovery",
+                                    "Effect": "Allow",
+                                    "Action": ["logs:DescribeLogGroups"],
                                     "Resource": "*",
-                                }
+                                },
                             ],
                         },
                     }

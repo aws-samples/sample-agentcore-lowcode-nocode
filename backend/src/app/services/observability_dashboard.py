@@ -88,7 +88,7 @@ def build_dashboard_body(
         "\n| stats pct(@duration, 50) as p50, pct(@duration, 95) as p95, "
         "pct(@duration, 99) as p99 by bin(5m)"
     )
-    token_query = (
+    token_query = (  # noqa: S105  # CloudWatch Logs Insights query text, not a credential
         "fields @timestamp, @message"
         "\n| filter @message like /gen_ai.usage/"
         '\n| parse @message /"gen_ai.usage.input_tokens":\\s*(?<in_tok>\\d+)/'

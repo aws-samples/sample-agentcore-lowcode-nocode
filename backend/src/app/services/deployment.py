@@ -1506,7 +1506,16 @@ class WorkflowExecutor:
                         logger.warning("Could not resolve memory ARN for harness")
 
                 iam_client = boto3.client("iam")
-                harness_role_arn = harness_deployer.get_shared_or_new_harness_role(iam_client, harness_name)
+                # Thread the connected model/memory/gateway ARNs so the harness
+                # exec role is scoped to those resources (least privilege) —
+                # parity with harness_step.py on the SFN path.
+                harness_role_arn = harness_deployer.get_shared_or_new_harness_role(
+                    iam_client,
+                    harness_name,
+                    model_id=runtime_config.model.model_id or None,
+                    memory_arn=memory_arn,
+                    gateway_arn=gateway_arn,
+                )
 
                 agentcore_ctrl = boto3.client("bedrock-agentcore-control", region_name=self.region)
                 create_result = harness_deployer.create_harness(

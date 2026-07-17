@@ -108,24 +108,55 @@ def build_shared_runtime_role(
         )
     )
     # All AgentCore runtime tool integrations (browser, code interpreter,
-    # gateway, memory, guardrails, evaluation, policy). Wildcards because
-    # tools are dynamically connected per-runtime; restricting per-tool
-    # would require separate roles, which defeats the IAM-race fix.
+    # gateway, memory, guardrails, evaluation, policy). Exact action lists
+    # (verified against the bedrock-agentcore / bedrock-agentcore-control
+    # botocore service models in backend/lib) instead of *Browser* /
+    # *CodeInterpreter* / *Memory* action wildcards. Resource stays "*"
+    # because the browser/code-interpreter sessions, memories, gateways and
+    # KBs a runtime uses are created dynamically at deploy time (per-agent),
+    # so their ARNs are unknowable when this stack-level shared role is
+    # built — least privilege is enforced by the exact action list instead.
     role.add_to_policy(
         iam.PolicyStatement(
             actions=[
-                "bedrock-agentcore:*Browser*",
-                "bedrock-agentcore:*CodeInterpreter*",
+                # Browser tool (data plane sessions on the aws.browser.v1
+                # built-in + any custom browser resource).
+                "bedrock-agentcore:StartBrowserSession",
+                "bedrock-agentcore:StopBrowserSession",
+                "bedrock-agentcore:GetBrowserSession",
+                "bedrock-agentcore:ListBrowserSessions",
+                "bedrock-agentcore:UpdateBrowserStream",
+                "bedrock-agentcore:InvokeBrowser",
+                "bedrock-agentcore:ConnectBrowserAutomationStream",
+                "bedrock-agentcore:GetBrowser",
+                "bedrock-agentcore:ListBrowsers",
+                # Code Interpreter tool (data plane sessions).
+                "bedrock-agentcore:StartCodeInterpreterSession",
+                "bedrock-agentcore:StopCodeInterpreterSession",
+                "bedrock-agentcore:InvokeCodeInterpreter",
+                "bedrock-agentcore:GetCodeInterpreterSession",
+                "bedrock-agentcore:ListCodeInterpreterSessions",
+                "bedrock-agentcore:GetCodeInterpreter",
+                "bedrock-agentcore:ListCodeInterpreters",
+                # Gateway tool plane.
                 "bedrock-agentcore:InvokeGateway",
                 "bedrock-agentcore:ListGateways",
                 "bedrock-agentcore:GetGateway",
-                "bedrock-agentcore:*Memory*",
+                # Memory (data plane events + records; GetMemory is the
+                # control-plane read used to resolve the memory resource).
+                "bedrock-agentcore:GetMemory",
                 "bedrock-agentcore:CreateEvent",
-                "bedrock-agentcore:GetLastKTurns",
-                "bedrock-agentcore:RetrieveMemories",
+                "bedrock-agentcore:GetEvent",
+                "bedrock-agentcore:ListEvents",
+                "bedrock-agentcore:DeleteEvent",
                 "bedrock-agentcore:ListSessions",
                 "bedrock-agentcore:ListActors",
-                "bedrock-agentcore:ListEvents",
+                "bedrock-agentcore:RetrieveMemoryRecords",
+                "bedrock-agentcore:GetMemoryRecord",
+                "bedrock-agentcore:ListMemoryRecords",
+                # Legacy memory data-plane verbs kept for older SDK paths.
+                "bedrock-agentcore:GetLastKTurns",
+                "bedrock-agentcore:RetrieveMemories",
                 "bedrock:ApplyGuardrail",
                 "bedrock:GetGuardrail",
                 # Knowledge Base retrieve (called by retrieve_from_kb tool
@@ -133,6 +164,9 @@ def build_shared_runtime_role(
                 "bedrock:Retrieve",
                 "bedrock:RetrieveAndGenerate",
             ],
+            # Resource-level scoping intentionally not applied: these
+            # resources are created dynamically per-deploy — scoped by the
+            # exact action list above instead.
             resources=["*"],
         )
     )
@@ -347,6 +381,9 @@ def build_deployment_lambda(
     # `bedrock-agentcore:*` wildcard authorization — explicit per-action
     # grants are required even though `iam:simulate-principal-policy`
     # claims `*` allows everything. See tasks/lessons.md Bug 47.
+    # Bedrock model invocation + catalog. Resource "*" required: models are
+    # user-selectable per flow and cross-region inference profiles resolve to
+    # foundation-model ARNs in other regions; List* verbs are account-level.
     role.add_to_policy(
         iam.PolicyStatement(
             actions=[
@@ -356,20 +393,82 @@ def build_deployment_lambda(
                 # available Bedrock models + inference profiles at request time.
                 "bedrock:ListFoundationModels",
                 "bedrock:ListInferenceProfiles",
-                # KB cleanup on runtime delete (Bug 90).
-                "bedrock:GetKnowledgeBase",
+                # ListKnowledgeBases (account-level, no resource ARN form) is
+                # used by the KB cleanup path to resolve ids.
                 "bedrock:ListKnowledgeBases",
+            ],
+            resources=["*"],
+        )
+    )
+    # KB cleanup on runtime delete (Bug 90). KB ids are service-generated, so
+    # knowledge-base/* in this account+region is the tightest pattern.
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=[
+                "bedrock:GetKnowledgeBase",
                 "bedrock:DeleteKnowledgeBase",
                 "bedrock:DeleteDataSource",
                 "bedrock:GetDataSource",
                 "bedrock:ListDataSources",
-                # Guardrail cleanup on runtime delete. The manifest delete path
-                # (and the legacy guardrails_result fallback) run in THIS
-                # Lambda and call DeleteGuardrail — without it the guardrail
-                # orphans with AccessDenied (Bug 165, caught live: the guardrail
-                # step role had Delete but the deployment/delete role did not).
+            ],
+            resources=[f"arn:aws:bedrock:{stack.region}:{stack.account}:knowledge-base/*"],
+        )
+    )
+    # Guardrail cleanup on runtime delete. The manifest delete path (and the
+    # legacy guardrails_result fallback) run in THIS Lambda and call
+    # DeleteGuardrail — without it the guardrail orphans with AccessDenied
+    # (Bug 165). Guardrail ids are service-generated → guardrail/* pattern.
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=[
                 "bedrock:GetGuardrail",
                 "bedrock:DeleteGuardrail",
+            ],
+            resources=[f"arn:aws:bedrock:{stack.region}:{stack.account}:guardrail/*"],
+        )
+    )
+    # S3 Vectors teardown (Bug 167): the KB step self-provisions a vector
+    # bucket+index; the manifest delete path in THIS Lambda tears it down.
+    # Scoped to vector-bucket ARNs in this account+region.
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=[
+                "s3vectors:GetVectorBucket",
+                "s3vectors:DescribeVectorBucket",
+                "s3vectors:DeleteVectorBucket",
+                "s3vectors:ListIndexes",
+                "s3vectors:GetIndex",
+                "s3vectors:DescribeIndex",
+                "s3vectors:DeleteIndex",
+            ],
+            resources=[f"arn:aws:s3vectors:{stack.region}:{stack.account}:bucket/*"],
+        )
+    )
+    # ListVectorBuckets is account-level (no resource ARN form).
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["s3vectors:ListVectorBuckets"],
+            resources=["*"],
+        )
+    )
+    # OpenSearch Serverless teardown: collection verbs scope to collection
+    # ARNs; security/access-policy deletes are account-level APIs with no
+    # resource-level permission support (Resource must stay "*").
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["aoss:BatchGetCollection", "aoss:DeleteCollection"],
+            resources=[f"arn:aws:aoss:{stack.region}:{stack.account}:collection/*"],
+        )
+    )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=["aoss:DeleteSecurityPolicy", "aoss:DeleteAccessPolicy"],
+            resources=["*"],
+        )
+    )
+    role.add_to_policy(
+        iam.PolicyStatement(
+            actions=[
                 # Explicit AgentCore actions used by the deployment Lambda:
                 # /api/test-runtime invokes; /api/runtime/{id} DELETE
                 # cascades through Get/Delete on runtime + endpoint +
@@ -479,31 +578,15 @@ def build_deployment_lambda(
                 "bedrock-agentcore:UpdateHarness",
                 "bedrock-agentcore:DeleteHarness",
                 "bedrock-agentcore:InvokeHarness",
-                # Bug 167 (caught live 2026-06-25): the KB step now
-                # self-provisions an S3 Vectors bucket+index (Bug 145), so
-                # the manifest delete path in THIS Lambda must be able to
-                # tear it down. Without these the s3_vectors_bucket cleanup
-                # fails AccessDenied -> orphaned vector bucket + delete
-                # returns success=False. Mirrors the KB step role's create
-                # verbs with the matching delete/list verbs.
-                "s3vectors:ListVectorBuckets",
-                "s3vectors:GetVectorBucket",
-                "s3vectors:DescribeVectorBucket",
-                "s3vectors:DeleteVectorBucket",
-                "s3vectors:ListIndexes",
-                "s3vectors:GetIndex",
-                "s3vectors:DescribeIndex",
-                "s3vectors:DeleteIndex",
-                # OpenSearch Serverless: the KB step auto-provisions an OSS
-                # collection; this (deployment/teardown) role only needs the
-                # DELETE verbs to reclaim it via the manifest (standing billable
-                # resource — orphan = ~$350/mo). Create verbs live on the KB step
-                # role, keeping this policy small enough to avoid an overflow policy.
-                "aoss:BatchGetCollection",
-                "aoss:DeleteCollection",
-                "aoss:DeleteSecurityPolicy",
-                "aoss:DeleteAccessPolicy",
             ],
+            # Least privilege: AgentCore control-plane resources (runtimes,
+            # gateways, memories, harnesses, policies, registries, credential
+            # providers, workload identities) are created dynamically per user
+            # deploy — ARNs are unknowable at synth time, and AgentCore does
+            # not honor `bedrock-agentcore:*` wildcards (Bug 47), so this is
+            # scoped by the exact action list above instead of the resource.
+            # (S3 Vectors / aoss / bedrock KB+guardrail verbs live in their own
+            # ARN-scoped statements above.)
             resources=["*"],
         )
     )

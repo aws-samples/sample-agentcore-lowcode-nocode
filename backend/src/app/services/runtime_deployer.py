@@ -17,6 +17,8 @@ import zipfile
 
 import boto3
 
+from app.services.aws_errors import is_error
+
 logger = logging.getLogger(__name__)
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\].*?\x07")
@@ -440,7 +442,7 @@ def create_agent_runtime(
                 return agentcore_ctrl.create_agent_runtime(**create_params)
             except Exception as e:
                 err_str = str(e)
-                if "ValidationException" in err_str and any(m in err_str for m in retryable_markers):
+                if is_error(e, "ValidationException") and any(m in err_str for m in retryable_markers):
                     last_err = e
                     logger.info(
                         "create_agent_runtime transient (attempt %d/%d): %s",
@@ -456,7 +458,9 @@ def create_agent_runtime(
     try:
         resp = _create_with_transient_retry()
     except Exception as e:
-        if "ConflictException" in str(e) or "already exists" in str(e):
+        # "already exists" fallback kept: conflicts can surface as a
+        # ValidationException whose message says "already exists".
+        if is_error(e, "ConflictException") or "already exists" in str(e):
             # Find existing runtime by paginating through all runtimes
             logger.info("Runtime '%s' already exists, searching to update...", runtime_name)
             found_id = None
@@ -732,8 +736,7 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
     # runtime ID doesn't exist. Treat both as "runtime is gone" so DELETE on a
     # never-created runtime still proceeds to IAM-role cleanup. See lessons Bug 55.
     def _is_runtime_gone(err: Exception) -> bool:
-        s = str(err)
-        return "ResourceNotFound" in s or "AccessDeniedException" in s
+        return is_error(err, "ResourceNotFoundException", "AccessDeniedException")
 
     # Capture roleArn first so we can also delete the IAM role.
     role_arn = ""
@@ -820,7 +823,7 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
             # (untagged / belongs to someone else / never existed) — that's the
             # guard working as intended, not a failure. Log it quietly so it
             # doesn't read as an orphan-leak alarm; only surface other errors loud.
-            if "AccessDenied" in str(e):
+            if is_error(e, "AccessDenied", "AccessDeniedException"):
                 logger.debug(
                     "Skipping role %s during cleanup: not an agentcore-managed role "
                     "(tag-scoped grant denied). Candidate name, not an orphan.",
@@ -876,10 +879,7 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
                     logs_client.delete_log_group(logGroupName=f"/aws/bedrock-agentcore/evaluations/results/{cfg_id}")
                     logger.info("Deleted eval-results log group for config %s", cfg_id)
                 except Exception as e:
-                    msg = str(e)
-                    if "ResourceNotFound" in msg:
-                        pass
-                    else:
+                    if not is_error(e, "ResourceNotFoundException"):
                         logger.warning("Failed to delete eval log group for %s: %s", cfg_id, e)
             next_token = resp.get("nextToken")
             if not next_token:
@@ -893,8 +893,8 @@ def destroy_runtime(runtime_id: str, region: str) -> dict:
             for pn in iam.list_role_policies(RoleName=eval_role_name).get("PolicyNames", []):
                 try:
                     iam.delete_role_policy(RoleName=eval_role_name, PolicyName=pn)
-                except Exception:
-                    pass
+                except Exception:  # noqa: BLE001 — best-effort; delete_role below reports the real failure
+                    logger.debug("Could not delete inline policy %s on %s", pn, eval_role_name, exc_info=True)
             iam.delete_role(RoleName=eval_role_name)
             logger.info("Deleted eval execution role %s", eval_role_name)
         except iam.exceptions.NoSuchEntityException:

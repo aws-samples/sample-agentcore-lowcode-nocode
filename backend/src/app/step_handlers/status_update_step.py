@@ -124,10 +124,10 @@ def _cleanup_resource(res: dict, region: str, event: dict) -> None:
             for p in pols:
                 try:
                     ctrl.delete_policy(policyEngineId=rid, policyId=p.get("policyId"))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception:  # noqa: BLE001 — engine delete below surfaces real failures
+                    logger.debug("delete_policy on engine %s failed", rid, exc_info=True)
+        except Exception:  # noqa: BLE001 — best-effort pre-clean; engine delete surfaces real failures
+            logger.debug("list_policies on engine %s failed", rid, exc_info=True)
         time.sleep(2)
         ctrl.delete_policy_engine(policyEngineId=rid)
     elif rtype == "guardrail":
@@ -139,10 +139,10 @@ def _cleanup_resource(res: dict, region: str, event: dict) -> None:
             for ds in ba.list_data_sources(knowledgeBaseId=rid).get("dataSourceSummaries", []):
                 try:
                     ba.delete_data_source(knowledgeBaseId=rid, dataSourceId=ds["dataSourceId"])
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception:  # noqa: BLE001 — KB cascade delete removes remaining data sources
+                    logger.debug("delete_data_source on KB %s failed", rid, exc_info=True)
+        except Exception:  # noqa: BLE001 — best-effort pre-clean; KB delete surfaces real failures
+            logger.debug("list_data_sources on KB %s failed", rid, exc_info=True)
         ba.delete_knowledge_base(knowledgeBaseId=rid)
         # Poll until deleted
         for _ in range(24):
@@ -159,10 +159,10 @@ def _cleanup_resource(res: dict, region: str, event: dict) -> None:
             for ix in s3v.list_indexes(vectorBucketName=bname).get("indexes", []):
                 try:
                     s3v.delete_index(vectorBucketName=bname, indexName=ix["indexName"])
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception:  # noqa: BLE001 — bucket delete below surfaces a still-populated bucket
+                    logger.debug("delete_index on vector bucket %s failed", bname, exc_info=True)
+        except Exception:  # noqa: BLE001 — best-effort pre-clean; bucket delete surfaces real failures
+            logger.debug("list_indexes on vector bucket %s failed", bname, exc_info=True)
         s3v.delete_vector_bucket(vectorBucketName=bname)
     elif rtype == "cognito_user_pool":
         cog = step_clients.client(event, "cognito-idp", region_name=res_region)
@@ -179,8 +179,8 @@ def _cleanup_resource(res: dict, region: str, event: dict) -> None:
                     if not still:
                         break
                     time.sleep(5)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — pool delete below retries + surfaces real failures
+            logger.debug("Cognito domain pre-delete for pool %s failed", rid, exc_info=True)
         # Retry pool delete in case domain teardown is still settling
         for _attempt in range(6):
             try:
@@ -203,13 +203,13 @@ def _cleanup_resource(res: dict, region: str, event: dict) -> None:
         try:
             for pol in iam.list_attached_role_policies(RoleName=role_name).get("AttachedPolicies", []):
                 iam.detach_role_policy(RoleName=role_name, PolicyArn=pol["PolicyArn"])
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — delete_role below surfaces a still-attached policy
+            logger.debug("Detach attached policies on role %s failed", role_name, exc_info=True)
         try:
             for pol in iam.list_role_policies(RoleName=role_name).get("PolicyNames", []):
                 iam.delete_role_policy(RoleName=role_name, PolicyName=pol)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — delete_role below surfaces a remaining inline policy
+            logger.debug("Delete inline policies on role %s failed", role_name, exc_info=True)
         iam.delete_role(RoleName=role_name)
     elif rtype == "secret":
         step_clients.client(event, "secretsmanager", region_name=res_region).delete_secret(

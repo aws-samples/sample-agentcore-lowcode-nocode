@@ -165,8 +165,8 @@ def fetch_trace_waterfall(
     if status == "Running":
         try:
             logs_client.stop_query(queryId=query_id)
-        except Exception:
-            pass
+        except Exception:  # noqa: BLE001 — best-effort cancel; partial results are still returned
+            logger.debug("stop_query %s failed", query_id, exc_info=True)
 
     result = build_waterfall(rows)
     result["log_group_name"] = log_group

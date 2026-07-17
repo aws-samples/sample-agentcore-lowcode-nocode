@@ -66,6 +66,22 @@ def _create_kb_role(iam_client, role_name: str, kb_config: dict) -> str:
     except iam_client.exceptions.EntityAlreadyExistsException:
         role_arn = iam_client.get_role(RoleName=role_name)["Role"]["Arn"]
 
+    _put_kb_role_policy(iam_client, role_name, kb_config)
+
+    # IAM eventual consistency
+    time.sleep(10)
+    return role_arn
+
+
+def _put_kb_role_policy(iam_client, role_name: str, kb_config: dict) -> None:
+    """Build + put the KB role's inline policy from *kb_config*.
+
+    Separated from ``_create_kb_role`` so the handler can RE-put the policy
+    after auto-provisioning the vector store (S3 Vectors bucket / OSS
+    collection): the resource ARNs are unknowable before creation, so the
+    first put uses the tightest naming-convention pattern and the re-put
+    tightens each statement to the exact resource ARN (least privilege).
+    """
     statements: list[dict] = [
         {
             "Effect": "Allow",
@@ -99,13 +115,19 @@ def _create_kb_role(iam_client, role_name: str, kb_config: dict) -> str:
     elif data_source_type == "sharepoint":
         secret_arns.append(kb_config.get("sharePointCredentialsSecretArn", ""))
 
-    # OpenSearch Serverless permissions
+    # OpenSearch Serverless permissions. APIAccessAll is required for aoss
+    # DATA-PLANE access (index reads/writes) — but the Resource is scoped to
+    # the collection ARN. When the collection hasn't been created yet (the
+    # auto-provision path runs AFTER role creation because the data-access
+    # policy needs the role ARN), fall back to a collection/* pattern; the
+    # handler re-puts this policy with the exact collection ARN once
+    # _ensure_oss_collection returns it.
     if vector_store_type == "opensearch_serverless":
         statements.append(
             {
                 "Effect": "Allow",
                 "Action": ["aoss:APIAccessAll"],
-                "Resource": kb_config.get("opensearchCollectionArn", "*"),
+                "Resource": kb_config.get("opensearchCollectionArn") or "arn:aws:aoss:*:*:collection/*",
             }
         )
 
@@ -116,15 +138,23 @@ def _create_kb_role(iam_client, role_name: str, kb_config: dict) -> str:
     # the KB with `ValidationException: Bedrock Knowledge Base was unable
     # to assume the given role`.
     if vector_store_type == "s3_vectors":
-        s3v_arn = kb_config.get("s3VectorsBucketArn", "*")
+        s3v_arn = kb_config.get("s3VectorsBucketArn", "")
         # Some s3vectors verbs (QueryVectors, PutVectors, GetVectors,
         # DeleteVectors, DescribeIndex, ListIndexes) target the
         # `<bucket>/index/<idx>` sub-resource, not just the bucket.
         # Granting only the bucket ARN surfaces as a misleading
         # "Bedrock KB was unable to assume the given role" error.
         # See tasks/lessons.md Bug 84.
-        if s3v_arn == "*":
-            s3v_resources = ["*"]
+        if not s3v_arn:
+            # Auto-managed path: the handler creates the bucket AFTER this
+            # role exists (agentcore-kbvec-<deployment_id> naming convention,
+            # see the handler) and then RE-puts this policy with the exact
+            # bucket ARN. Scope the interim grant to the naming-convention
+            # prefix instead of "*".
+            s3v_resources = [
+                "arn:aws:s3vectors:*:*:bucket/agentcore-kbvec-*",
+                "arn:aws:s3vectors:*:*:bucket/agentcore-kbvec-*/index/*",
+            ]
         else:
             s3v_resources = [s3v_arn, f"{s3v_arn}/index/*"]
         statements.append(
@@ -145,19 +175,38 @@ def _create_kb_role(iam_client, role_name: str, kb_config: dict) -> str:
                     "s3vectors:GetVectorBucketPolicy",
                     "s3vectors:PutVectorBucketPolicy",
                     "s3vectors:ListIndexes",
-                    "s3vectors:ListVectorBuckets",
                 ],
                 "Resource": s3v_resources,
             }
         )
+        # ListVectorBuckets is an account-level listing (no resource ARN
+        # form) — isolated so the "*" is visible and minimal.
+        statements.append(
+            {
+                "Effect": "Allow",
+                "Action": ["s3vectors:ListVectorBuckets"],
+                "Resource": "*",
+            }
+        )
 
-    # RDS permissions
+    # RDS permissions. The Aurora vector store CANNOT be auto-provisioned by
+    # this step (the cluster must pre-exist and _build_storage_config wires
+    # kb_config["rdsResourceArn"] straight into the Bedrock storage config),
+    # so the ARN is always knowable — a missing value is a caller error, not
+    # a reason to grant rds-data on "*".
     if vector_store_type == "rds":
+        rds_resource_arn = kb_config.get("rdsResourceArn", "")
+        if not rds_resource_arn:
+            raise ValueError(
+                "rdsResourceArn is required when vectorStoreType='rds' — the Aurora "
+                "cluster must pre-exist and its ARN is used both in the KB storage "
+                "configuration and to scope the KB role's rds-data permissions."
+            )
         statements.append(
             {
                 "Effect": "Allow",
                 "Action": ["rds-data:ExecuteStatement", "rds-data:BatchExecuteStatement"],
-                "Resource": kb_config.get("rdsResourceArn", "*"),
+                "Resource": rds_resource_arn,
             }
         )
         rds_secret = kb_config.get("rdsCredentialsSecretArn", "")
@@ -204,10 +253,6 @@ def _create_kb_role(iam_client, role_name: str, kb_config: dict) -> str:
         PolicyName="BedrockKBAccess",
         PolicyDocument=json.dumps({"Version": "2012-10-17", "Statement": statements}),
     )
-
-    # IAM eventual consistency
-    time.sleep(10)
-    return role_arn
 
 
 def _wait_for_kb_active(bedrock_agent, kb_id: str, max_wait: int = 120) -> None:
@@ -329,21 +374,42 @@ def _ensure_oss_collection(
             {"Rules": [{"ResourceType": "collection", "Resource": [f"collection/{coll_name}"]}], "AWSOwnedKey": True}
         ),
     )
+    # ── SECURITY TRADE-OFF (deliberate, sample platform) ────────────────
+    # The network security policy defaults to AllowFromPublic=True because
+    # the platform's Lambdas are NOT VPC-attached (matches the managed
+    # Bedrock-KB console default): with a private-only policy, neither the
+    # deployment Lambda's create_index call nor Bedrock's ingestion could
+    # reach the collection. Note the collection is still protected by the
+    # aoss DATA-ACCESS policy below (only the KB role + caller principal can
+    # touch it) — "public" here means network reachability, not open data.
+    #
+    # HARDENING: set kb_config["allowPublicNetwork"] = False and supply the
+    # OpenSearch Serverless VPC endpoint ids via
+    # kb_config["opensearchVpcEndpointIds"] (list). This requires the
+    # calling Lambdas to run inside that VPC (VPC-attach the platform's
+    # Lambda functions + create an aoss VPC endpoint) or KB creation will
+    # hang/fail on network access.
+    allow_public = kb_config.get("allowPublicNetwork", True)
+    net_rule: dict = {
+        "Rules": [
+            {"ResourceType": "collection", "Resource": [f"collection/{coll_name}"]},
+            {"ResourceType": "dashboard", "Resource": [f"collection/{coll_name}"]},
+        ],
+        "AllowFromPublic": bool(allow_public),
+    }
+    if not allow_public:
+        vpce_ids = kb_config.get("opensearchVpcEndpointIds") or []
+        if not vpce_ids:
+            raise ValueError(
+                "allowPublicNetwork=False requires opensearchVpcEndpointIds "
+                "(the aoss VPC endpoint ids that should reach this collection)."
+            )
+        net_rule["SourceVPCEs"] = list(vpce_ids)
     _ignore_conflict(
         aoss.create_security_policy,
         name=f"{coll_name}-net"[:32],
         type="network",
-        policy=json.dumps(
-            [
-                {
-                    "Rules": [
-                        {"ResourceType": "collection", "Resource": [f"collection/{coll_name}"]},
-                        {"ResourceType": "dashboard", "Resource": [f"collection/{coll_name}"]},
-                    ],
-                    "AllowFromPublic": True,
-                }
-            ]
-        ),
+        policy=json.dumps([net_rule]),
     )
 
     # 3. data-access policy: KB role + the caller (deployment Lambda) principal.
@@ -355,8 +421,8 @@ def _ensure_oss_collection(
             _, _, tail = caller_arn.partition(":assumed-role/")
             role = tail.split("/")[0]
             caller_arn = f"arn:aws:iam::{_get_account_id(event)}:role/{role}"
-    except Exception:  # noqa: BLE001
-        pass
+    except Exception:  # noqa: BLE001 — optional principal; the KB role alone is sufficient
+        logger.debug("Could not resolve caller ARN for OSS data-access policy", exc_info=True)
     principals = [p for p in [kb_role_arn, caller_arn] if p]
     _ignore_conflict(
         aoss.create_access_policy,
@@ -802,6 +868,17 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
                 "opensearchCollectionArn"
             ):
                 _ensure_oss_collection(region, deployment_id, role_arn, kb_config, store, deployment_id, event)
+
+            # Least privilege: the role was created BEFORE the vector store
+            # existed, so its interim policy used naming-convention patterns
+            # (agentcore-kbvec-* / collection/*). Now that kb_config carries
+            # the exact bucket/collection ARN, re-put the policy so every
+            # statement is scoped to the real resource. Best-effort — the
+            # interim pattern is already functional.
+            try:
+                _put_kb_role_policy(iam_client, role_name, kb_config)
+            except Exception:  # noqa: BLE001
+                logger.warning("KB role policy tighten (re-put) skipped", exc_info=True)
 
             storage_config = _build_storage_config(kb_config)
             vector_kb_config: dict = {

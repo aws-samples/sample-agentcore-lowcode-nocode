@@ -177,7 +177,7 @@ def store_credentials(
         logger.exception("Failed to store OTEL credentials in Secrets Manager")
         raise HTTPException(
             status_code=500,
-            detail=f"Could not store credentials: {e.response.get('Error', {}).get('Message', str(e))}",
+            detail="Could not store credentials",
         ) from e
 
     return StoreCredentialsResponse(secret_arn=resp["ARN"])

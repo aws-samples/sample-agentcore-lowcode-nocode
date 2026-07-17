@@ -25,6 +25,7 @@ from app.services.harness_deployer import (
     pad_session_id,
     sanitize_harness_name,
 )
+from botocore.exceptions import ClientError
 
 # ---------------------------------------------------------------------------
 # sanitize_harness_name — regex [a-zA-Z][a-zA-Z0-9_]{0,39}
@@ -201,7 +202,9 @@ def test_destroy_harness_idempotent_on_notfound():
     ctrl = MagicMock()
     # _resolve_harness_identifier: get_harness succeeds so the id is used as-is.
     ctrl.get_harness.return_value = {"harness": {"harnessId": "h-gone", "status": "READY"}}
-    ctrl.delete_harness.side_effect = Exception("ResourceNotFoundException: not found")
+    ctrl.delete_harness.side_effect = ClientError(
+        {"Error": {"Code": "ResourceNotFoundException", "Message": "not found"}}, "DeleteHarness"
+    )
 
     with patch.object(harness_deployer, "_create_agentcore_control_client", return_value=ctrl):
         result = destroy_harness("h-gone", "us-west-2")
@@ -384,8 +387,11 @@ def test_harness_role_scopes_model_and_resources(monkeypatch):
     assert "bedrock-agentcore:GetResourceOauth2Token" in stmts["AgentCoreAccountLevel"]["Action"]
 
 
-def test_harness_role_falls_back_to_wildcard_without_arns():
-    """When no model/memory/gateway is known the role still works (Resource:*)."""
+def test_harness_role_omits_scoped_statement_without_arns():
+    """When no memory/gateway is connected the scoped statement is OMITTED
+    (no Resource:* fallback — Holmes IAM HIGH). A bare harness still works via
+    the harness-owned-memory + account-level statements. Model falls back to *
+    only because the model is unknown (user-selectable at invoke time)."""
     import json
     from unittest.mock import MagicMock
 
@@ -398,4 +404,25 @@ def test_harness_role_falls_back_to_wildcard_without_arns():
     hd.create_harness_iam_role(iam, "AgentCoreHarness-y")
     stmts = {s["Sid"]: s for s in captured["policy"]["Statement"]}
     assert stmts["BedrockModelAccess"]["Resource"] == "*"
-    assert stmts["AgentCoreMemoryAndGateway"]["Resource"] == "*"
+    assert "AgentCoreMemoryAndGateway" not in stmts
+    # The bare harness keeps working through the dedicated statements.
+    assert "AgentCoreHarnessOwnedMemory" in stmts
+    assert stmts["AgentCoreAccountLevel"]["Resource"] == "*"
+
+
+def test_harness_role_logs_scoped_to_agentcore_log_groups():
+    """CloudWatch Logs statement is scoped to /aws/bedrock-agentcore/* (not *)."""
+    import json
+    from unittest.mock import MagicMock
+
+    from app.services import harness_deployer as hd
+
+    captured = {}
+    iam = MagicMock()
+    iam.create_role.return_value = {"Role": {"Arn": "arn:aws:iam::1:role/AgentCoreHarness-z"}}
+    iam.put_role_policy.side_effect = lambda **kw: captured.update(policy=json.loads(kw["PolicyDocument"]))
+    hd.create_harness_iam_role(iam, "AgentCoreHarness-z")
+    stmts = {s["Sid"]: s for s in captured["policy"]["Statement"]}
+    logs_res = stmts["CloudWatchLogs"]["Resource"]
+    assert logs_res != "*"
+    assert any("/aws/bedrock-agentcore/" in r for r in logs_res)

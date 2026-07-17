@@ -26,9 +26,24 @@ from pathlib import Path
 
 import pytest
 
-# backend/tests/ -> backend/ -> repo root -> infra/stacks/platform_stack.py
+# backend/tests/ -> backend/ -> repo root -> infra/stacks/. The platform stack
+# was split from a single platform_stack.py into the platform/ package
+# (commit "refactor(infra): split 4,430-line platform_stack.py"), so the IAM
+# text assertions scan platform_stack.py PLUS every module in platform/.
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_PLATFORM_STACK = _REPO_ROOT / "infra" / "stacks" / "platform_stack.py"
+_STACKS_DIR = _REPO_ROOT / "infra" / "stacks"
+_PLATFORM_STACK = _STACKS_DIR / "platform_stack.py"
+
+
+def _platform_source_files() -> list[Path]:
+    files = [_PLATFORM_STACK] if _PLATFORM_STACK.is_file() else []
+    files += sorted((_STACKS_DIR / "platform").glob("*.py"))
+    assert files, f"no platform stack sources found under {_STACKS_DIR}"
+    return files
+
+
+def _platform_source() -> str:
+    return "\n".join(p.read_text() for p in _platform_source_files())
 
 
 def _agentcore_steps_source() -> str:
@@ -38,18 +53,17 @@ def _agentcore_steps_source() -> str:
     moving), then slices the literal out of the raw source so substring checks
     work regardless of formatting/comments inside each block.
     """
-    assert _PLATFORM_STACK.is_file(), f"platform_stack.py not found at {_PLATFORM_STACK}"
-    source = _PLATFORM_STACK.read_text()
-    tree = ast.parse(source)
-    lines = source.splitlines()
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
-            targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
-            if "agentcore_steps" in targets:
-                # ast end_lineno is inclusive and 1-based.
-                return "\n".join(lines[node.lineno - 1 : node.end_lineno])
-    raise AssertionError("could not locate `agentcore_steps = {...}` dict in platform_stack.py")
+    for path in _platform_source_files():
+        source = path.read_text()
+        tree = ast.parse(source)
+        lines = source.splitlines()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Dict):
+                targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+                if "agentcore_steps" in targets:
+                    # ast end_lineno is inclusive and 1-based.
+                    return "\n".join(lines[node.lineno - 1 : node.end_lineno])
+    raise AssertionError("could not locate `agentcore_steps = {...}` dict in the platform stack sources")
 
 
 def _block_source(steps_source: str, key: str) -> str:
@@ -225,10 +239,10 @@ def test_manifest_delete_action_is_granted_somewhere(action):
     cognito service actions covered by the role's existing broad grants and the
     runtime-role delete path, so they are not re-asserted here.
     """
-    source = _PLATFORM_STACK.read_text()
+    source = _platform_source()
     assert action in source, (
         f"Manifest teardown calls {action} but it is not granted anywhere in "
-        f"platform_stack.py — the resource will orphan with AccessDenied on delete."
+        f"the platform stack sources — the resource will orphan with AccessDenied on delete."
     )
 
 
@@ -237,7 +251,7 @@ def test_deployment_role_can_delete_mcp_server_lambda():
     (no AgentCore prefix). The deployment role's lambda:DeleteFunction resource
     scope MUST cover MCPServer* or deleting an MCP-server flow orphans the
     function with AccessDenied."""
-    source = _PLATFORM_STACK.read_text()
+    source = _platform_source()
     assert "function:MCPServer" in source, (
         "deployment role lambda:DeleteFunction scope does not cover the "
         "MCPServerRuntime lambda — MCP-server flow deletes will orphan it."

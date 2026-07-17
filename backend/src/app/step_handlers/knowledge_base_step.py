@@ -11,9 +11,12 @@ import logging
 import os
 import time
 
+from botocore.exceptions import ClientError
+
 import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services import step_clients
+from app.services.aws_errors import error_code
 from app.services.deployment_state_store import DeploymentStateStore
 
 logger = logging.getLogger(__name__)
@@ -221,6 +224,35 @@ def _put_kb_role_policy(iam_client, role_name: str, kb_config: dict) -> None:
                 "Effect": "Allow",
                 "Action": ["lambda:InvokeFunction"],
                 "Resource": transform_lambda,
+            }
+        )
+
+    # BDA parsing writes intermediate output to the supplemental-storage
+    # bucket configured on the KB (supplementalDataStorageConfiguration) —
+    # without this grant CreateKnowledgeBase fails on role validation
+    # (matrix-run finding, P-KB-013 third-stage error).
+    if kb_config.get("parsingStrategy") == "bedrock_data_automation":
+        supp_uri = kb_config.get("bdaSupplementalS3Uri") or f"s3://{os.environ.get('ARTIFACTS_BUCKET_NAME', '')}"
+        if supp_uri.startswith("s3://"):
+            supp_bucket = supp_uri[5:].split("/")[0]
+            if supp_bucket:
+                supp_arn = f"arn:aws:s3:::{supp_bucket}"
+                statements.append(
+                    {
+                        "Effect": "Allow",
+                        "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
+                        "Resource": [supp_arn, f"{supp_arn}/*"],
+                    }
+                )
+        # BDA parsing also invokes Bedrock Data Automation on the KB's behalf.
+        statements.append(
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock:InvokeDataAutomationAsync",
+                    "bedrock:GetDataAutomationStatus",
+                ],
+                "Resource": "*",
             }
         )
 
@@ -1054,9 +1086,25 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
         if kms_key:
             ds_params["serverSideEncryptionConfiguration"] = {"kmsKeyArn": kms_key}
 
-        ds_resp = bedrock_agent.create_data_source(**ds_params)
-        ds_id = ds_resp["dataSource"]["dataSourceId"]
-        logger.warning("Data source created: %s for KB %s", ds_id, kb_id)
+        # Idempotent create: a Step Functions retry (or a slow first attempt
+        # that timed out after the service-side create landed) hits
+        # ConflictException on the same name — recover the existing data
+        # source instead of failing the deploy (matrix-run finding, P-KB-008).
+        try:
+            ds_resp = bedrock_agent.create_data_source(**ds_params)
+            ds_id = ds_resp["dataSource"]["dataSourceId"]
+            logger.warning("Data source created: %s for KB %s", ds_id, kb_id)
+        except ClientError as ds_err:
+            if error_code(ds_err) != "ConflictException":
+                raise
+            existing = bedrock_agent.list_data_sources(knowledgeBaseId=kb_id, maxResults=50).get(
+                "dataSourceSummaries", []
+            )
+            match = next((d for d in existing if d.get("name") == ds_params["name"]), None)
+            if not match:
+                raise
+            ds_id = match["dataSourceId"]
+            logger.warning("Data source '%s' already exists (%s), reusing", ds_params["name"], ds_id)
 
         # Step 5: Start ingestion. Wait up to 600s for queryable vectors; record
         # the terminal status so a KB that's still ingesting is reported honestly

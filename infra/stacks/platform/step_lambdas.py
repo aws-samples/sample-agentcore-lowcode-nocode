@@ -337,6 +337,10 @@ def _create_step_role(
                     "bedrock:GetKnowledgeBase",
                     "bedrock:DeleteKnowledgeBase",
                     "bedrock:CreateDataSource",
+                    "bedrock:GetDataSource",
+                    # ListDataSources powers the idempotent create_data_source
+                    # conflict recovery (matrix-run finding, P-KB-008).
+                    "bedrock:ListDataSources",
                     "bedrock:DeleteDataSource",
                     "bedrock:StartIngestionJob",
                     "bedrock:GetIngestionJob",

@@ -890,10 +890,10 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
                 bda_supp_uri = kb_config.get("bdaSupplementalS3Uri") or (
                     f"s3://{_get_env('ARTIFACTS_BUCKET_NAME', '')}/kb-supplemental/{kb_name}/"
                 )
+                # API shape (botocore bedrock-agent model): storageLocations,
+                # each {type, s3Location} — live-verified by the matrix run.
                 vector_kb_config["supplementalDataStorageConfiguration"] = {
-                    "supplementalDataStorageLocations": [
-                        {"supplementalDataStorageLocationType": "S3", "s3Location": {"uri": bda_supp_uri}}
-                    ]
+                    "storageLocations": [{"type": "S3", "s3Location": {"uri": bda_supp_uri}}]
                 }
             kb_params = {
                 "name": kb_name,

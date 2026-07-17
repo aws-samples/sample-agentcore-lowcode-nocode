@@ -1,7 +1,9 @@
 # Production Readiness
 
-Status of the enterprise/governance platform (Loom-inspired 7-phase build +
-Phase-7 cross-account wiring + hardening). Honest assessment: what's proven,
+[← Back to README](../README.md)
+
+Status of the enterprise/governance platform (Loom-inspired governance layer +
+cross-account wiring + hardening). Honest assessment: what's proven,
 what's opt-in, and the known limits.
 
 ## Proven & live-verified (dev stack, real AWS)
@@ -45,8 +47,6 @@ deploy/invoke, cross-account deploy across two real accounts.
 - **Single region / single deploy state machine** per stack. DDB tables are
   PAY_PER_REQUEST (auto-scale). No load test at production scale yet — size the
   Lambda reserved-concurrency + Bedrock quotas before high-volume launch.
-- **Not yet merged/reviewed:** work sits on `feat/loom-enterprise-governance`;
-  open a PR for review + CI before any production cutover.
 
 ## Pre-launch checklist
 
@@ -55,4 +55,4 @@ deploy/invoke, cross-account deploy across two real accounts.
 - [ ] Set required tag policies + a default tag profile (governance).
 - [ ] Configure cost budgets + a `BudgetBreach` alarm.
 - [ ] Load/soak test at expected peak; confirm Bedrock + Lambda quotas.
-- [ ] PR + security review of `feat/loom-enterprise-governance`.
+- [ ] Run a security review of the deployment before any production cutover.

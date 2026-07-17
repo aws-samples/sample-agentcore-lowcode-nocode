@@ -130,3 +130,6 @@ docs/decks/
 # Frontend source lib/ is real source, not a Python build artifact
 !frontend/src/lib/
 !frontend/src/lib/**
+
+# Local agent config — personal working notes, not part of the sample
+CLAUDE.md

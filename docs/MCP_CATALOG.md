@@ -1,5 +1,7 @@
 # Verified MCP catalog for AgentCore Gateway targets
 
+[← Back to README](../README.md)
+
 Researched + verified inventory of external **Model Context Protocol** servers
 that can be connected as an AgentCore Gateway `mcp.mcpServer` target. Companion to
 [`MCP_GATEWAY_INTEGRATION.md`](MCP_GATEWAY_INTEGRATION.md) (the authorization

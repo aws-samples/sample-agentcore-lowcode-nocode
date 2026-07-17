@@ -35,6 +35,10 @@ def send(
 
     body = json.dumps(response_body).encode("utf-8")
     url = event["ResponseURL"]
+    # The ResponseURL is a CloudFormation-issued pre-signed S3 URL, but enforce
+    # https anyway so a forged event can't make urlopen dereference file:// etc.
+    if not url.startswith("https://"):
+        raise ValueError("ResponseURL must be https")
 
     logger.info("Sending %s to %s (physical_id=%s)", status, url[:80], physical_resource_id)
 

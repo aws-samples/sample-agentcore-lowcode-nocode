@@ -196,8 +196,21 @@ def _ensure_gateway_role():
 
 
 def _curl(args):
-    """Run curl (uses the system trust store, avoiding macOS-Python SSL issues)."""
-    r = subprocess.run(["curl", "-sS", "-m", "40"] + args, capture_output=True, text=True)
+    """Run curl (uses the system trust store, avoiding macOS-Python SSL issues).
+
+    All args originate in this script (AWS API responses interpolated into
+    fixed flag positions, never a shell) — list-form exec means no injection
+    surface, but keep the https guard so a compromised API value can't turn
+    curl into a file:// reader.
+    """
+    for a in args:
+        if a.startswith(("file://", "ftp://", "dict://", "gopher://")):
+            raise ValueError(f"blocked URL scheme in curl arg: {a[:40]}")
+    r = subprocess.run(  # noqa: S603 -- list-form argv, no shell, args validated above
+        ["curl", "-sS", "-m", "40", "--proto", "=https", *args],
+        capture_output=True,
+        text=True,
+    )
     return r.stdout
 
 

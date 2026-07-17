@@ -53,11 +53,16 @@ class ToolUnavailable(Exception):
 
 
 def _http_get(url, timeout=10, retries=2):
+    # Refuse non-http(s) schemes outright — urlopen would happily follow
+    # file:// or ftp:// (Bandit B310); the SSRF net-range guard in
+    # _do_fetch_webpage covers hosts, this covers schemes for every caller.
+    if urllib.parse.urlparse(url).scheme not in ("http", "https"):
+        raise ToolUnavailable(f"unsupported URL scheme: {url.split(':', 1)[0]}")
     last_err = None
     for attempt in range(retries + 1):
         try:
             req = urllib.request.Request(url, headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310  # scheme validated above
                 return resp.read()
         except Exception as e:
             last_err = e

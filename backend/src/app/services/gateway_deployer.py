@@ -21,6 +21,8 @@ import zipfile
 
 import boto3
 
+from app.services import codegen_templates
+
 logger = logging.getLogger(__name__)
 
 
@@ -519,66 +521,9 @@ def _ensure_oauth2_credential_provider(
 # Lambda code constants (embedded Lambda source for gateway targets)
 # ---------------------------------------------------------------------------
 
-CUSTOMER_SUPPORT_LAMBDA_CODE = """
-import json
-
-def lambda_handler(event, context):
-    tool_name = context.client_context.custom.get('bedrockAgentCoreToolName', 'unknown')
-
-    if 'check_order_status' in tool_name:
-        order_id = event.get('order_id', '').upper()
-        orders = {
-            'ORD-12345': {'order_id': 'ORD-12345', 'status': 'Shipped', 'tracking_number': '1Z999AA10123456784', 'estimated_delivery': '2025-02-10', 'items': [{'name': 'Laptop Pro 15', 'qty': 1, 'price': '$1,299.00'}, {'name': 'USB-C Charger', 'qty': 1, 'price': '$49.99'}], 'total': '$1,348.99'},
-            'ORD-67890': {'order_id': 'ORD-67890', 'status': 'Processing', 'tracking_number': None, 'estimated_delivery': '2025-02-15', 'items': [{'name': 'Wireless Mouse', 'qty': 1, 'price': '$29.99'}, {'name': 'Mechanical Keyboard', 'qty': 1, 'price': '$89.99'}], 'total': '$119.98'},
-            'ORD-11111': {'order_id': 'ORD-11111', 'status': 'Delivered', 'tracking_number': '1Z999AA10123456785', 'delivered_date': '2025-01-28', 'items': [{'name': '27 inch 4K Monitor', 'qty': 1, 'price': '$449.00'}], 'total': '$449.00'},
-            'ORD-22222': {'order_id': 'ORD-22222', 'status': 'Cancelled', 'reason': 'Customer requested cancellation', 'refund_status': 'Refund processed', 'items': [{'name': 'Noise-Cancelling Headphones', 'qty': 1, 'price': '$199.00'}], 'total': '$199.00'},
-        }
-        order = orders.get(order_id)
-        if not order:
-            return {'statusCode': 200, 'body': json.dumps({'error': f'Order {order_id} not found. Valid demo order IDs: ORD-12345, ORD-67890, ORD-11111, ORD-22222'})}
-        return {'statusCode': 200, 'body': json.dumps(order)}
-
-    elif 'lookup_customer' in tool_name:
-        email = event.get('email', '').lower()
-        customers = {
-            'john@example.com': {'name': 'John Smith', 'customer_id': 'CUST-001', 'email': 'john@example.com', 'membership_tier': 'Gold', 'member_since': '2022-03-15', 'orders': ['ORD-12345', 'ORD-11111'], 'total_spent': '$1,797.99'},
-            'jane@example.com': {'name': 'Jane Doe', 'customer_id': 'CUST-002', 'email': 'jane@example.com', 'membership_tier': 'Silver', 'member_since': '2023-06-20', 'orders': ['ORD-67890'], 'total_spent': '$119.98'},
-            'bob@example.com': {'name': 'Bob Wilson', 'customer_id': 'CUST-003', 'email': 'bob@example.com', 'membership_tier': 'Platinum', 'member_since': '2021-01-10', 'orders': ['ORD-22222'], 'total_spent': '$4,599.00'},
-        }
-        customer = customers.get(email)
-        if not customer:
-            return {'statusCode': 200, 'body': json.dumps({'error': f'No customer found with email {email}. Try: john@example.com, jane@example.com, bob@example.com'})}
-        return {'statusCode': 200, 'body': json.dumps(customer)}
-
-    elif 'search_knowledge_base' in tool_name:
-        query = event.get('query', '').lower()
-        articles = [
-            {'id': 'KB-001', 'title': 'How to Reset Your Account Password', 'summary': 'Go to Settings > Security > Reset Password.'},
-            {'id': 'KB-002', 'title': 'Return and Refund Policy', 'summary': 'Items can be returned within 30 days of delivery.'},
-            {'id': 'KB-003', 'title': 'Shipping and Delivery Information', 'summary': 'Standard shipping: 5-7 business days.'},
-            {'id': 'KB-004', 'title': 'Warranty Coverage Details', 'summary': 'All electronics include 1-year manufacturer warranty.'},
-            {'id': 'KB-005', 'title': 'Troubleshooting Blue Screen Errors', 'summary': 'Common causes: outdated drivers, hardware failure.'},
-            {'id': 'KB-006', 'title': 'How to Track Your Order', 'summary': 'Log in to your account > My Orders.'},
-            {'id': 'KB-007', 'title': 'Membership Tiers and Benefits', 'summary': 'Silver: free standard shipping. Gold: free express.'},
-        ]
-        matches = [a for a in articles if query in a['title'].lower() or query in a['summary'].lower()]
-        if not matches:
-            matches = articles[:3]
-        return {'statusCode': 200, 'body': json.dumps({'results': matches, 'total_found': len(matches)})}
-
-    elif 'get_return_policy' in tool_name:
-        category = event.get('product_category', 'general').lower()
-        policies = {
-            'electronics': {'category': 'Electronics', 'return_window': '30 days', 'condition': 'Must be in original packaging'},
-            'accessories': {'category': 'Accessories', 'return_window': '60 days', 'condition': 'Must be unused'},
-            'software': {'category': 'Software', 'return_window': '14 days', 'condition': 'Physical media only'},
-            'general': {'category': 'General', 'return_window': '30 days', 'condition': 'Item must be in resalable condition'},
-        }
-        policy = policies.get(category, policies['general'])
-        return {'statusCode': 200, 'body': json.dumps(policy)}
-
-    return {'statusCode': 200, 'body': json.dumps({'message': f'Unknown tool: {tool_name}'})}
-"""
+# Standalone customer-support demo Lambda. Canonical source lives in
+# app/services/codegen_templates/customer_support_lambda.py.
+CUSTOMER_SUPPORT_LAMBDA_CODE = codegen_templates.load_impl("customer_support_lambda")
 
 CUSTOMER_SUPPORT_TOOLS_SCHEMA = {
     "inlinePayload": [
@@ -631,190 +576,10 @@ CUSTOMER_SUPPORT_TOOLS_SCHEMA = {
     ]
 }
 
-DYNAMIC_TOOLS_LAMBDA_CODE = """
-import ipaddress
-import json
-import time
-import urllib.request
-import urllib.parse
-
-UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0"
-WMO_CODES = {0:"Clear sky",1:"Mainly clear",2:"Partly cloudy",3:"Overcast",45:"Foggy",48:"Rime fog",51:"Light drizzle",53:"Moderate drizzle",55:"Dense drizzle",61:"Slight rain",63:"Moderate rain",65:"Heavy rain",71:"Slight snow",73:"Moderate snow",75:"Heavy snow",80:"Slight rain showers",81:"Moderate rain showers",82:"Violent rain showers",95:"Thunderstorm",96:"Thunderstorm with hail",99:"Thunderstorm with heavy hail"}
-
-class ToolUnavailable(Exception):
-    # Raised when an external dependency (web/api) can't be reached after retries.
-    # The dispatcher turns this into a STRUCTURED {"error":"tool_unavailable",...}
-    # body so the agent (and tests) can distinguish "the tool failed" from
-    # "the tool ran and found nothing".
-    pass
-
-def _http_get(url, timeout=10, retries=2):
-    last_err = None
-    for attempt in range(retries + 1):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": UA})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.read()
-        except Exception as e:
-            last_err = e
-            if attempt < retries:
-                time.sleep(1 * (attempt + 1))
-    raise ToolUnavailable(str(last_err))
-
-def _do_duckduckgo_search(query):
-    url = "https://api.duckduckgo.com/?" + urllib.parse.urlencode({"q": query, "format": "json", "no_html": "1"})
-    data = json.loads(_http_get(url, timeout=12).decode())
-    results = []
-    if data.get("Abstract"):
-        results.append({"title": data.get("Heading", query), "snippet": data["Abstract"], "url": data.get("AbstractURL", "")})
-    for topic in data.get("RelatedTopics", [])[:5]:
-        if isinstance(topic, dict) and topic.get("Text"):
-            results.append({"title": topic.get("Text", "")[:80], "snippet": topic.get("Text", ""), "url": topic.get("FirstURL", "")})
-    return json.dumps(results) if results else json.dumps({"message": f"No results found for: {query}"})
-
-def _do_wikipedia_search(query):
-    url = "https://en.wikipedia.org/api/rest_v1/page/summary/" + urllib.parse.quote(query)
-    try:
-        data = json.loads(_http_get(url, timeout=10).decode())
-        return json.dumps({"title": data.get("title", query), "summary": data.get("extract", ""), "url": data.get("content_urls", {}).get("desktop", {}).get("page", "")})
-    except Exception:
-        return json.dumps({"error": f"No Wikipedia article found for: {query}"})
-
-def _do_weather(location):
-    geo_url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode({"name": location, "count": 1})
-    geo = json.loads(_http_get(geo_url, timeout=8).decode())
-    results = geo.get("results", [])
-    if not results:
-        return json.dumps({"error": f"Location not found: {location}"})
-    lat, lon = results[0]["latitude"], results[0]["longitude"]
-    place = results[0].get("name", location)
-    country = results[0].get("country", "")
-    wx_url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode({
-        "latitude": lat, "longitude": lon,
-        "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
-        "temperature_unit": "fahrenheit",
-        "wind_speed_unit": "mph",
-    })
-    wx = json.loads(_http_get(wx_url, timeout=8).decode())
-    cur = wx.get("current", {})
-    code = cur.get("weather_code", -1)
-    desc = WMO_CODES.get(code, f"Code {code}")
-    return json.dumps({"location": f"{place}, {country}", "description": desc, "temperature_F": cur.get("temperature_2m"), "humidity_pct": cur.get("relative_humidity_2m"), "wind_mph": cur.get("wind_speed_10m")})
-
-_FETCH_BLOCKED_NETS = [ipaddress.ip_network(n) for n in (
-    "0.0.0.0/8","10.0.0.0/8","100.64.0.0/10","127.0.0.0/8","169.254.0.0/16",
-    "172.16.0.0/12","192.0.0.0/24","192.168.0.0/16","198.18.0.0/15","224.0.0.0/4",
-    "240.0.0.0/4","::1/128","::/128","::ffff:0:0/96","fc00::/7","fe80::/10","ff00::/8",
-)]
-
-def _do_fetch_webpage(url):
-    # SECURITY: Validate scheme + DNS-resolve host and block private/link-local/IMDS
-    # ranges. Substring/literal-host denylists are bypassable via DNS rebinding.
-    import socket as _socket
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https"):
-        return json.dumps({"error": "Only http/https URLs are allowed"})
-    host = (parsed.hostname or "").lower()
-    if not host:
-        return json.dumps({"error": "URL has no host component"})
-    try:
-        infos = _socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), _socket.AF_UNSPEC, _socket.SOCK_STREAM)
-    except Exception as e:
-        return json.dumps({"error": f"DNS resolution failed: {e}"})
-    for info in infos:
-        ip_str = info[4][0].split("%", 1)[0]
-        try:
-            ip_obj = ipaddress.ip_address(ip_str)
-        except ValueError:
-            return json.dumps({"error": f"Unparseable resolved IP: {ip_str}"})
-        for net in _FETCH_BLOCKED_NETS:
-            if ip_obj.version == net.version and ip_obj in net:
-                return json.dumps({"error": "Requests to internal/private endpoints are blocked"})
-    text = _http_get(url, timeout=12).decode(errors="replace")
-    return json.dumps({"url": url, "content": text[:8000]})
-
-CUSTOMERS = {
-    "CUST-001": {"customer_id": "CUST-001", "name": "John Doe", "email": "john@example.com", "member_since": "2023-06-01"},
-    "CUST-002": {"customer_id": "CUST-002", "name": "Jane Smith", "email": "jane@example.com", "member_since": "2024-01-15"},
-}
-
-ORDERS = {
-    "ORD-12345": {"order_id": "ORD-12345", "customer_id": "CUST-001", "status": "delivered", "items": [{"name": "Wireless Headphones", "quantity": 1, "price": 79.99}], "total": 79.99, "order_date": "2025-01-15", "delivery_date": "2025-01-20"},
-    "ORD-12300": {"order_id": "ORD-12300", "customer_id": "CUST-001", "status": "delivered", "items": [{"name": "Running Shoes", "quantity": 1, "price": 249.00}], "total": 249.00, "order_date": "2025-01-02", "delivery_date": "2025-01-08"},
-    "ORD-12400": {"order_id": "ORD-12400", "customer_id": "CUST-001", "status": "delivered", "items": [{"name": "USB-C Charging Cable", "quantity": 2, "price": 12.99}], "total": 25.98, "order_date": "2025-01-20", "delivery_date": "2025-01-23"},
-    "ORD-99000": {"order_id": "ORD-99000", "customer_id": "CUST-002", "status": "delivered", "items": [{"name": "Premium Laptop", "quantity": 1, "price": 1299.00}], "total": 1299.00, "order_date": "2025-01-10", "delivery_date": "2025-01-15"},
-    "ORD-99010": {"order_id": "ORD-99010", "customer_id": "CUST-002", "status": "delivered", "items": [{"name": "Yoga Mat", "quantity": 1, "price": 45.00}], "total": 45.00, "order_date": "2025-01-18", "delivery_date": "2025-01-21"},
-}
-
-REFUNDS = {}
-
-def _do_get_order(event):
-    order_id = event.get("order_id", "")
-    order = ORDERS.get(order_id)
-    if not order:
-        return json.dumps({"error": f"Order {order_id} not found. Valid IDs: {', '.join(ORDERS.keys())}"})
-    return json.dumps(order)
-
-def _do_get_customer(event):
-    customer_id = event.get("customer_id", "")
-    customer = CUSTOMERS.get(customer_id)
-    if not customer:
-        return json.dumps({"error": f"Customer {customer_id} not found. Valid IDs: {', '.join(CUSTOMERS.keys())}"})
-    customer_orders = [o for o in ORDERS.values() if o["customer_id"] == customer_id]
-    return json.dumps({**customer, "total_orders": len(customer_orders), "total_spent": round(sum(o["total"] for o in customer_orders), 2)})
-
-def _do_list_orders(event):
-    customer_id = event.get("customer_id", "")
-    limit = event.get("limit", 10)
-    if customer_id not in CUSTOMERS:
-        return json.dumps({"error": f"Customer {customer_id} not found"})
-    orders = [{"order_id": o["order_id"], "total": o["total"], "status": o["status"], "order_date": o["order_date"]} for o in ORDERS.values() if o["customer_id"] == customer_id]
-    orders.sort(key=lambda x: x["order_date"], reverse=True)
-    return json.dumps({"customer_id": customer_id, "orders": orders[:limit]})
-
-def _do_process_refund(event):
-    import uuid as _uuid
-    order_id = event.get("order_id", "")
-    amount = event.get("amount")
-    reason = event.get("reason", "")
-    order = ORDERS.get(order_id)
-    if not order:
-        return json.dumps({"error": f"Order {order_id} not found"})
-    if amount is None or amount <= 0:
-        return json.dumps({"error": "Refund amount must be positive"})
-    if amount > order["total"]:
-        return json.dumps({"error": f"Refund amount ${amount} exceeds order total ${order['total']}"})
-    refund_id = f"REF-{_uuid.uuid4().hex[:5].upper()}"
-    return json.dumps({"success": True, "refund_id": refund_id, "order_id": order_id, "amount": amount, "reason": reason, "status": "processed", "message": f"Refund of ${amount:.2f} processed. Customer will receive funds in 3-5 business days."})
-
-def lambda_handler(event, context):
-    tool_name = context.client_context.custom.get("bedrockAgentCoreToolName", "unknown")
-    try:
-        if "duckduckgo_search" in tool_name:
-            return {"statusCode": 200, "body": _do_duckduckgo_search(event.get("query", ""))}
-        elif "wikipedia_search" in tool_name:
-            return {"statusCode": 200, "body": _do_wikipedia_search(event.get("query", ""))}
-        elif "weather_api" in tool_name or "get_weather" in tool_name:
-            return {"statusCode": 200, "body": _do_weather(event.get("location", ""))}
-        elif "web_page_fetcher" in tool_name or "fetch_webpage" in tool_name:
-            return {"statusCode": 200, "body": _do_fetch_webpage(event.get("url", ""))}
-        elif "get_order" in tool_name and "list_orders" not in tool_name:
-            return {"statusCode": 200, "body": _do_get_order(event)}
-        elif "get_customer" in tool_name:
-            return {"statusCode": 200, "body": _do_get_customer(event)}
-        elif "list_orders" in tool_name:
-            return {"statusCode": 200, "body": _do_list_orders(event)}
-        elif "process_refund" in tool_name:
-            return {"statusCode": 200, "body": _do_process_refund(event)}
-        else:
-            return {"statusCode": 200, "body": json.dumps({"error": f"Unknown tool: {tool_name}"})}
-    except ToolUnavailable as e:
-        # External dependency unreachable after retries — return a STRUCTURED
-        # error so the agent + tests can tell "tool failed" from "no results".
-        return {"statusCode": 200, "body": json.dumps({"error": "tool_unavailable", "detail": str(e), "tool": tool_name})}
-    except Exception as e:
-        return {"statusCode": 200, "body": json.dumps({"error": str(e)})}
-"""
+# Dynamic tools Lambda (search/wikipedia/weather/fetch + customer-support demo
+# handlers + dispatcher). Canonical source lives in app/services/codegen_templates/
+# (dynamic_tools_impl.py + customer_support_impl.py + dynamic_tools_handler.py).
+DYNAMIC_TOOLS_LAMBDA_CODE = codegen_templates.dynamic_tools_lambda_source()
 
 GATEWAY_TOOL_SCHEMAS: dict[str, dict] = {
     "duckduckgo_search": {
@@ -928,59 +693,9 @@ GATEWAY_TOOL_SCHEMAS: dict[str, dict] = {
 # Knowledge Base Tool Lambda
 # ---------------------------------------------------------------------------
 
-KNOWLEDGE_BASE_LAMBDA_TEMPLATE = """
-import json
-import os
-import boto3
-
-bedrock_runtime = boto3.client("bedrock-agent-runtime", region_name=os.environ.get("AWS_REGION", "us-east-1"))
-
-def lambda_handler(event, context):
-    query = event.get("query", "")
-    kb_id = os.environ["KNOWLEDGE_BASE_ID"]
-    model_arn = os.environ["FOUNDATION_MODEL_ARN"]
-
-    try:
-        resp = bedrock_runtime.retrieve_and_generate(
-            input={"text": query},
-            retrieveAndGenerateConfiguration={
-                "type": "KNOWLEDGE_BASE",
-                "knowledgeBaseConfiguration": {
-                    "knowledgeBaseId": kb_id,
-                    "modelArn": model_arn,
-                }
-            }
-        )
-        answer = resp.get("output", {}).get("text", "No answer found.")
-        citations = []
-        for c in resp.get("citations", [])[:5]:
-            refs = c.get("retrievedReferences", [])
-            for ref in refs[:2]:
-                loc = ref.get("location", {})
-                citations.append({
-                    "text": ref.get("content", {}).get("text", "")[:200],
-                    "source": loc.get("s3Location", {}).get("uri", "") or loc.get("webLocation", {}).get("url", ""),
-                })
-        # No citations => the KB retrieved nothing. Right after deploy this almost
-        # always means ingestion has not yet produced queryable vectors (eventual
-        # consistency), not that the fact is absent. Return a RETRYABLE signal so
-        # the agent/caller retries instead of reporting a hard failure (P-E2E fix).
-        if not citations:
-            return {"statusCode": 200, "body": json.dumps({
-                "answer": answer,
-                "citations": [],
-                "still_ingesting": True,
-                "retryable": True,
-                "message": "Knowledge base returned no matches yet — it may still be ingesting. Retry shortly.",
-            })}
-        return {"statusCode": 200, "body": json.dumps({"answer": answer, "citations": citations})}
-    except Exception as e:
-        # Distinguish an ingestion-in-progress error from a real failure so the
-        # caller can retry the former.
-        msg = str(e)
-        retryable = any(s in msg for s in ("still", "ingest", "no data", "empty", "ResourceNotReady"))
-        return {"statusCode": 200, "body": json.dumps({"error": msg, "retryable": retryable})}
-"""
+# Knowledge Base RAG query Lambda. Canonical source lives in
+# app/services/codegen_templates/kb_lambda.py.
+KNOWLEDGE_BASE_LAMBDA_TEMPLATE = codegen_templates.load_impl("kb_lambda")
 
 
 def create_knowledge_base_lambda(

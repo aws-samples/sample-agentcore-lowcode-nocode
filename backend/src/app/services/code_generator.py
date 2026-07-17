@@ -46,7 +46,18 @@ If you are tempted to convert this to Jinja or a code-AST builder, please:
 import os
 
 from app.models.deployment_models import RuntimeConfig
+from app.services import codegen_templates
 from app.services.agentic_rag_codegen import agentic_rag_tool_name, agentic_rag_tool_source
+
+# Canonical built-in tool implementations (single source of truth, shared with
+# gateway_deployer and cfn_template_generator). Injected into generated agent
+# code AFTER f-string evaluation via a plain ``.replace`` on the
+# ``__TOOL_IMPL__`` marker — never inside an f-string — so the canonical
+# source needs no brace escaping.
+_TOOL_IMPL_MARKER = "__TOOL_IMPL__"
+_TOOL_IMPL_BLOCK = (
+    codegen_templates.load_impl("dynamic_tools_impl") + "\n\n" + codegen_templates.load_impl("agent_tools_adapter")
+)
 
 # Provider to package mapping (Strands-only)
 PROVIDER_PACKAGES: dict[str, str] = {
@@ -237,8 +248,10 @@ def _generate_langchain_web_search(system_prompt: str, model_id: str, region: st
     """Generate Web Search agent using BedrockAgentCoreApp + boto3 Converse API.
 
     Uses DuckDuckGo + Open-Meteo weather via stdlib urllib (zero extra deps beyond boto3).
+    Tool implementations come from the canonical ``codegen_templates`` package and
+    are spliced in AFTER f-string evaluation (see ``_TOOL_IMPL_BLOCK``).
     """
-    return f'''"""AgentCore Runtime - Web Search Agent
+    code = f'''"""AgentCore Runtime - Web Search Agent
 
 Uses BedrockAgentCoreApp SDK for AgentCore Runtime protocol.
 Lightweight tool-calling loop via boto3 Converse API.
@@ -257,10 +270,6 @@ app = BedrockAgentCoreApp()
 SYSTEM_PROMPT = """{system_prompt}"""
 MODEL_ID = os.environ.get("MODEL_ID", "{model_id}")
 REGION = os.environ.get("AWS_REGION", "{region}")
-
-UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0"
-
-WMO_CODES = {{0:"Clear sky",1:"Mainly clear",2:"Partly cloudy",3:"Overcast",45:"Foggy",48:"Rime fog",51:"Light drizzle",53:"Moderate drizzle",55:"Dense drizzle",61:"Slight rain",63:"Moderate rain",65:"Heavy rain",71:"Slight snow",73:"Moderate snow",75:"Heavy snow",80:"Slight rain showers",81:"Moderate rain showers",82:"Violent rain showers",95:"Thunderstorm",96:"Thunderstorm with hail",99:"Thunderstorm with heavy hail"}}
 
 TOOL_CONFIG = {{
     "tools": [
@@ -313,98 +322,12 @@ TOOL_CONFIG = {{
 }}
 
 
-def _http_get(url: str, timeout: int = 12, retries: int = 2) -> bytes:
-    """HTTP GET with retry logic."""
-    last_err = None
-    for attempt in range(retries + 1):
-        try:
-            req = urllib.request.Request(url, headers={{"User-Agent": UA}})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.read()
-        except Exception as e:
-            last_err = e
-            if attempt < retries:
-                time.sleep(1 * (attempt + 1))
-    raise last_err
-
-
-def _do_search(query: str) -> str:
-    """Run a DuckDuckGo text search via the Instant Answer API (stdlib only)."""
-    try:
-        url = "https://api.duckduckgo.com/?" + urllib.parse.urlencode({{"q": query, "format": "json", "no_html": "1"}})
-        data = json.loads(_http_get(url).decode())
-        results = []
-        if data.get("Abstract"):
-            results.append({{"title": data.get("Heading", query), "snippet": data["Abstract"], "url": data.get("AbstractURL", "")}})
-        for topic in data.get("RelatedTopics", [])[:5]:
-            if isinstance(topic, dict) and topic.get("Text"):
-                results.append({{"title": topic.get("Text", "")[:80], "snippet": topic.get("Text", ""), "url": topic.get("FirstURL", "")}})
-        return json.dumps(results) if results else json.dumps({{"message": f"No results found for: {{query}}"}})
-    except Exception as e:
-        return json.dumps({{"error": str(e)}})
-
-
-def _do_weather(location: str) -> str:
-    """Get current weather using Open-Meteo API (free, no API key, reliable from AWS)."""
-    try:
-        geo_url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode({{"name": location, "count": 1}})
-        geo = json.loads(_http_get(geo_url, timeout=8).decode())
-        results = geo.get("results", [])
-        if not results:
-            return json.dumps({{"error": f"Location not found: {{location}}"}})
-        lat, lon = results[0]["latitude"], results[0]["longitude"]
-        place = results[0].get("name", location)
-        country = results[0].get("country", "")
-        wx_url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode({{
-            "latitude": lat, "longitude": lon,
-            "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
-            "temperature_unit": "fahrenheit", "wind_speed_unit": "mph",
-        }})
-        wx = json.loads(_http_get(wx_url, timeout=8).decode())
-        cur = wx.get("current", {{}})
-        code = cur.get("weather_code", -1)
-        desc = WMO_CODES.get(code, f"Code {{code}}")
-        return json.dumps({{
-            "location": f"{{place}}, {{country}}",
-            "description": desc,
-            "temperature_F": cur.get("temperature_2m"),
-            "humidity_pct": cur.get("relative_humidity_2m"),
-            "wind_mph": cur.get("wind_speed_10m"),
-        }})
-    except Exception as e:
-        return json.dumps({{"error": str(e)}})
-
-
-def _do_fetch(url: str) -> str:
-    """Fetch a webpage and return its text content.
-
-    SECURITY: Only allows http/https URLs to prevent SSRF via file://, gopher://, etc.
-    Blocks requests to private/internal IP ranges (169.254.x.x, 10.x.x.x, etc.).
-    """
-    try:
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return json.dumps({{"error": "Only http and https URLs are allowed"}})
-        # Block requests to metadata endpoints and private IPs
-        hostname = parsed.hostname or ""
-        if hostname in ("169.254.169.254", "metadata.google.internal", "localhost", "127.0.0.1", "0.0.0.0", "::1"):
-            return json.dumps({{"error": "Requests to internal/metadata endpoints are blocked"}})
-        if hostname.startswith("10.") or hostname.startswith("172.") or hostname.startswith("192.168."):
-            return json.dumps({{"error": "Requests to private IP ranges are blocked"}})
-        html = _http_get(url, timeout=12).decode("utf-8", errors="replace")
-        text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = re.sub(r"\\s+", " ", text).strip()
-        return text[:8000]
-    except Exception as e:
-        return f"Error fetching {{url}}: {{e}}"
-
+__TOOL_IMPL__
 
 TOOL_HANDLERS = {{
-    "duckduckgo_search": lambda args: _do_search(args.get("query", "")),
-    "get_weather": lambda args: _do_weather(args.get("location", "")),
-    "fetch_webpage": lambda args: _do_fetch(args.get("url", "")),
+    "duckduckgo_search": lambda args: _tool_safe(_do_duckduckgo_search, args.get("query", "")),
+    "get_weather": lambda args: _tool_safe(_do_weather, args.get("location", "")),
+    "fetch_webpage": lambda args: _tool_safe(_do_fetch_webpage, args.get("url", "")),
 }}
 
 _bedrock = None
@@ -463,6 +386,7 @@ def invoke(payload):
 if __name__ == "__main__":
     app.run()
 '''
+    return code.replace(_TOOL_IMPL_MARKER, _TOOL_IMPL_BLOCK)
 
 
 def _generate_strands_gateway(system_prompt: str, model_id: str, creds: dict) -> str:
@@ -1013,9 +937,11 @@ def _generate_mcp_server_runtime(system_prompt: str, model_id: str, region: str)
     """Generate MCP Server Runtime — tools hosted directly on the runtime via MCP protocol.
 
     No Gateway or Lambda needed. Tools are embedded Python functions served
-    via BedrockAgentCoreApp with MCP protocol handlers.
+    via BedrockAgentCoreApp with MCP protocol handlers. Tool implementations
+    come from the canonical ``codegen_templates`` package and are spliced in
+    AFTER f-string evaluation (see ``_TOOL_IMPL_BLOCK``).
     """
-    return f'''"""AgentCore Runtime - MCP Server with Embedded Tools
+    code = f'''"""AgentCore Runtime - MCP Server with Embedded Tools
 
 Hosts tools directly on the runtime via MCP protocol.
 No Gateway or Lambda needed — tools are Python functions served inline.
@@ -1045,99 +971,23 @@ def _get_bedrock():
 
 
 # ── Embedded Tool Definitions ────────────────────────────────────────────
+# Canonical implementations injected from app/services/codegen_templates.
 
-
-UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0"
-WMO_CODES = {{0:"Clear sky",1:"Mainly clear",2:"Partly cloudy",3:"Overcast",45:"Foggy",48:"Rime fog",51:"Light drizzle",53:"Moderate drizzle",55:"Dense drizzle",61:"Slight rain",63:"Moderate rain",65:"Heavy rain",71:"Slight snow",73:"Moderate snow",75:"Heavy snow",80:"Slight rain showers",81:"Moderate rain showers",82:"Violent rain showers",95:"Thunderstorm",96:"Thunderstorm with hail",99:"Thunderstorm with heavy hail"}}
-
-
-def _http_get(url: str, timeout: int = 10, retries: int = 2) -> bytes:
-    """HTTP GET with retry logic."""
-    import time as _time
-    last_err = None
-    for attempt in range(retries + 1):
-        try:
-            req = urllib.request.Request(url, headers={{"User-Agent": UA}})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                return resp.read()
-        except Exception as e:
-            last_err = e
-            if attempt < retries:
-                _time.sleep(1 * (attempt + 1))
-    raise last_err
-
+__TOOL_IMPL__
 
 def tool_get_weather(city: str) -> str:
     """Get current weather using Open-Meteo API (free, no API key, reliable from AWS)."""
-    try:
-        geo_url = "https://geocoding-api.open-meteo.com/v1/search?" + urllib.parse.urlencode({{"name": city, "count": 1}})
-        geo = json.loads(_http_get(geo_url, timeout=8).decode())
-        results = geo.get("results", [])
-        if not results:
-            return json.dumps({{"error": f"Location not found: {{city}}"}})
-        lat, lon = results[0]["latitude"], results[0]["longitude"]
-        place = results[0].get("name", city)
-        country = results[0].get("country", "")
-        wx_url = "https://api.open-meteo.com/v1/forecast?" + urllib.parse.urlencode({{
-            "latitude": lat, "longitude": lon,
-            "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,weather_code",
-            "temperature_unit": "fahrenheit", "wind_speed_unit": "mph",
-        }})
-        wx = json.loads(_http_get(wx_url, timeout=8).decode())
-        cur = wx.get("current", {{}})
-        code = cur.get("weather_code", -1)
-        desc = WMO_CODES.get(code, f"Code {{code}}")
-        return json.dumps({{
-            "city": f"{{place}}, {{country}}",
-            "temperature_f": cur.get("temperature_2m"),
-            "humidity_pct": cur.get("relative_humidity_2m"),
-            "wind_mph": cur.get("wind_speed_10m"),
-            "description": desc,
-        }})
-    except Exception as e:
-        return json.dumps({{"error": str(e)}})
+    return _tool_safe(_do_weather, city)
 
 
 def tool_search_web(query: str) -> str:
     """Search the web using DuckDuckGo Instant Answer API."""
-    try:
-        url = "https://api.duckduckgo.com/?" + urllib.parse.urlencode(
-            {{"q": query, "format": "json", "no_html": "1"}}
-        )
-        data = json.loads(_http_get(url, timeout=12).decode())
-        results = []
-        if data.get("Abstract"):
-            results.append({{"title": data.get("Heading", query), "snippet": data["Abstract"], "url": data.get("AbstractURL", "")}})
-        for topic in data.get("RelatedTopics", [])[:5]:
-            if isinstance(topic, dict) and topic.get("Text"):
-                results.append({{"title": topic.get("Text", "")[:80], "snippet": topic.get("Text", ""), "url": topic.get("FirstURL", "")}})
-        return json.dumps(results) if results else json.dumps({{"message": f"No results for: {{query}}"}})
-    except Exception as e:
-        return json.dumps({{"error": str(e)}})
+    return _tool_safe(_do_duckduckgo_search, query)
 
 
 def tool_fetch_url(url: str) -> str:
-    """Fetch and extract text content from a URL.
-
-    SECURITY: Validates URL scheme and blocks internal/metadata endpoints.
-    """
-    try:
-        parsed = urllib.parse.urlparse(url)
-        if parsed.scheme not in ("http", "https"):
-            return json.dumps({{"error": "Only http/https URLs are allowed"}})
-        hostname = (parsed.hostname or "").lower()
-        if hostname in ("169.254.169.254", "metadata.google.internal", "localhost", "127.0.0.1", "0.0.0.0", "::1"):
-            return json.dumps({{"error": "Requests to internal endpoints are blocked"}})
-        if hostname.startswith("10.") or hostname.startswith("172.") or hostname.startswith("192.168."):
-            return json.dumps({{"error": "Requests to private IP ranges are blocked"}})
-        html = _http_get(url, timeout=12).decode("utf-8", errors="replace")
-        text = re.sub(r"<script[^>]*>.*?</script>", "", html, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<style[^>]*>.*?</style>", "", text, flags=re.DOTALL | re.IGNORECASE)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = re.sub(r"\\s+", " ", text).strip()
-        return text[:8000]
-    except Exception as e:
-        return json.dumps({{"error": str(e)}})
+    """Fetch text content from a URL (SSRF-guarded: DNS-resolves and blocks private ranges)."""
+    return _tool_safe(_do_fetch_webpage, url)
 
 
 # ── Tool Registry ────────────────────────────────────────────────────────
@@ -1252,6 +1102,7 @@ def invoke(payload):
 if __name__ == "__main__":
     app.run()
 '''
+    return code.replace(_TOOL_IMPL_MARKER, _TOOL_IMPL_BLOCK)
 
 
 def _generate_memory_agent(

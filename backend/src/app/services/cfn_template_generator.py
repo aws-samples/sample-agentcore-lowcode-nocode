@@ -25,6 +25,7 @@ from dataclasses import dataclass
 import yaml
 
 from app.models.deployment_models import DeployRequest, RuntimeConfig
+from app.services import codegen_templates
 from app.services.code_generator import generate_agent_code
 from app.services.observability import build_otel_env_vars
 
@@ -924,14 +925,14 @@ class CfnTemplateGenerator:
         dynamic_tools = [t for t in tool_ids if t in _DYNAMIC_TOOL_IDS]
 
         if dynamic_tools:
-            self._add_tool_lambda(template, "DynamicToolsLambda", "dynamic_tools.handler", dynamic_tools)
+            self._add_tool_lambda(template, "DynamicToolsLambda", "dynamic_tools.lambda_handler", dynamic_tools)
             self._add_gateway_target(
                 template, "DynamicToolsTarget", "DynamicTools", "DynamicToolsLambda", dynamic_tools
             )
 
         if customer_tools:
             self._add_tool_lambda(
-                template, "CustomerSupportToolsLambda", "customer_support_tools.handler", customer_tools
+                template, "CustomerSupportToolsLambda", "customer_support_tools.lambda_handler", customer_tools
             )
             self._add_gateway_target(
                 template, "CustomerSupportTarget", "CustomerSupportTools", "CustomerSupportToolsLambda", customer_tools
@@ -1192,38 +1193,11 @@ def handler(event, context):
             },
         }
 
-        # KB Lambda code (inline)
-        kb_lambda_code = (
-            "import json, os, boto3\n"
-            "bedrock_runtime = boto3.client('bedrock-agent-runtime', region_name=os.environ.get('AWS_REGION', 'us-east-1'))\n"
-            "def lambda_handler(event, context):\n"
-            "    query = event.get('query', '')\n"
-            "    kb_id = os.environ['KNOWLEDGE_BASE_ID']\n"
-            "    model_arn = os.environ['FOUNDATION_MODEL_ARN']\n"
-            "    try:\n"
-            "        resp = bedrock_runtime.retrieve_and_generate(\n"
-            "            input={'text': query},\n"
-            "            retrieveAndGenerateConfiguration={\n"
-            "                'type': 'KNOWLEDGE_BASE',\n"
-            "                'knowledgeBaseConfiguration': {\n"
-            "                    'knowledgeBaseId': kb_id,\n"
-            "                    'modelArn': model_arn,\n"
-            "                }\n"
-            "            }\n"
-            "        )\n"
-            "        answer = resp.get('output', {}).get('text', 'No answer found.')\n"
-            "        citations = []\n"
-            "        for c in resp.get('citations', [])[:5]:\n"
-            "            for ref in c.get('retrievedReferences', [])[:2]:\n"
-            "                loc = ref.get('location', {})\n"
-            "                citations.append({\n"
-            "                    'text': ref.get('content', {}).get('text', '')[:200],\n"
-            "                    'source': loc.get('s3Location', {}).get('uri', '') or loc.get('webLocation', {}).get('url', ''),\n"
-            "                })\n"
-            "        return {'statusCode': 200, 'body': json.dumps({'answer': answer, 'citations': citations})}\n"
-            "    except Exception as e:\n"
-            "        return {'statusCode': 200, 'body': json.dumps({'error': str(e)})}\n"
-        )
+        # KB Lambda code (inline ZipFile) — canonical source, shared with the
+        # UI deploy path (gateway_deployer.KNOWLEDGE_BASE_LAMBDA_TEMPLATE).
+        # CFN inline ZipFile caps at 4096 bytes; the canonical template is well
+        # under that (guarded by tests/test_codegen_templates.py).
+        kb_lambda_code = codegen_templates.load_impl("kb_lambda")
 
         # Lambda function
         template["Resources"]["KBToolLambda"] = {
@@ -2380,8 +2354,9 @@ def handler(event, context):
         """Package tool Lambda code as a zip.
 
         Only includes the Lambda files that are actually needed based on the
-        connected tools.  Reads source from the project's tool-lambdas
-        directory; falls back to generating minimal stubs if unavailable.
+        connected tools. Source comes from the canonical
+        ``app.services.codegen_templates`` package — the exact same code the
+        UI deploy path ships via gateway_deployer.
         """
         # Determine which Lambda files are needed
         # gateway_tools items may be dicts with toolId or plain strings
@@ -2393,115 +2368,19 @@ def handler(event, context):
             needs_dynamic = True
         if template_id == "customer-support-blueprint":
             needs_customer = True
-
-        needed_files = []
-        if needs_dynamic:
-            needed_files.append("dynamic_tools.py")
-        if needs_customer:
-            needed_files.append("customer_support_tools.py")
         # Fallback: include both if nothing matched (safety net)
-        if not needed_files:
-            needed_files = ["dynamic_tools.py", "customer_support_tools.py"]
+        if not needs_dynamic and not needs_customer:
+            needs_dynamic = needs_customer = True
 
         buf = io.BytesIO()
-        tool_lambdas_dir = os.path.join(os.path.dirname(__file__), "..", "..", "tool_lambdas")
-
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-            for filename in needed_files:
-                filepath = os.path.join(tool_lambdas_dir, filename)
-                if os.path.exists(filepath):
-                    with open(filepath) as f:
-                        zf.writestr(filename, f.read())
-                else:
-                    zf.writestr(filename, self._generate_tool_lambda_stub(filename))
+            if needs_dynamic:
+                zf.writestr("dynamic_tools.py", codegen_templates.dynamic_tools_lambda_source())
+            if needs_customer:
+                zf.writestr("customer_support_tools.py", codegen_templates.customer_support_tools_lambda_source())
 
         buf.seek(0)
         return buf.read()
-
-    def _generate_tool_lambda_stub(self, filename: str) -> str:
-        """Generate a minimal tool Lambda stub."""
-        if "customer_support" in filename:
-            return '''"""Customer Support Tools Lambda for AgentCore Gateway.
-
-Provides: get_order, get_customer, list_orders, process_refund
-"""
-import json
-
-MOCK_ORDERS = {
-    "ORD-12345": {"order_id": "ORD-12345", "customer_id": "CUST-001", "status": "delivered", "total": 150.00,
-                  "items": [{"name": "Widget A", "qty": 2, "price": 75.00}]},
-}
-MOCK_CUSTOMERS = {
-    "CUST-001": {"customer_id": "CUST-001", "name": "Alice Example", "email": "alice@example.com", "orders": ["ORD-12345"]},
-}
-
-
-def handler(event, context):
-    """MCP tool handler for Gateway."""
-    tool_name = context.client_context.custom.get("bedrockAgentCoreToolName", "") if hasattr(context, "client_context") and context.client_context else event.get("name", "")
-    args = event
-
-    if "get_order" in tool_name:
-        order = MOCK_ORDERS.get(args.get("order_id", ""), {"error": "Order not found"})
-        return {"content": [{"type": "text", "text": json.dumps(order)}]}
-    elif "get_customer" in tool_name:
-        customer = MOCK_CUSTOMERS.get(args.get("customer_id", ""), {"error": "Customer not found"})
-        return {"content": [{"type": "text", "text": json.dumps(customer)}]}
-    elif "list_orders" in tool_name:
-        cid = args.get("customer_id", "")
-        orders = [o for o in MOCK_ORDERS.values() if o["customer_id"] == cid]
-        return {"content": [{"type": "text", "text": json.dumps(orders)}]}
-    elif "process_refund" in tool_name:
-        return {"content": [{"type": "text", "text": json.dumps({"status": "refund_processed", "order_id": args.get("order_id"), "amount": args.get("amount")})}]}
-    return {"content": [{"type": "text", "text": f"Unknown tool: {tool_name}"}]}
-'''
-        else:
-            return '''"""Dynamic Tools Lambda for AgentCore Gateway.
-
-Provides: duckduckgo_search, wikipedia_search, get_weather, fetch_webpage
-"""
-import json
-import urllib.request
-import urllib.parse
-
-UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
-
-
-def _http_get(url, timeout=10):
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode()
-
-
-def handler(event, context):
-    """MCP tool handler for Gateway."""
-    tool_name = context.client_context.custom.get("bedrockAgentCoreToolName", "") if hasattr(context, "client_context") and context.client_context else event.get("name", "")
-    args = event
-
-    if "duckduckgo_search" in tool_name:
-        query = urllib.parse.quote_plus(args.get("query", ""))
-        data = _http_get(f"https://api.duckduckgo.com/?q={query}&format=json&no_html=1")
-        return {"content": [{"type": "text", "text": data[:4000]}]}
-    elif "wikipedia_search" in tool_name:
-        query = urllib.parse.quote_plus(args.get("query", ""))
-        data = _http_get(f"https://en.wikipedia.org/api/rest_v1/page/summary/{query}")
-        return {"content": [{"type": "text", "text": data[:4000]}]}
-    elif "get_weather" in tool_name:
-        loc = urllib.parse.quote_plus(args.get("location", ""))
-        geo = _http_get(f"https://geocoding-api.open-meteo.com/v1/search?name={loc}&count=1")
-        geo_data = json.loads(geo)
-        if not geo_data.get("results"):
-            return {"content": [{"type": "text", "text": "Location not found"}]}
-        lat = geo_data["results"][0]["latitude"]
-        lon = geo_data["results"][0]["longitude"]
-        weather = _http_get(f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true")
-        return {"content": [{"type": "text", "text": weather}]}
-    elif "fetch_webpage" in tool_name:
-        url = args.get("url", "")
-        data = _http_get(url)
-        return {"content": [{"type": "text", "text": data[:8000]}]}
-    return {"content": [{"type": "text", "text": f"Unknown tool: {tool_name}"}]}
-'''
 
     # ------------------------------------------------------------------
     # deploy.sh / teardown.sh / README.md generation

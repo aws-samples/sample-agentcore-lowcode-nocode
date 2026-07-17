@@ -109,6 +109,18 @@ def _cleanup_resource(res: dict, region: str, event: dict) -> None:
 
     if rtype == "gateway":
         ctrl = step_clients.client(event, "bedrock-agentcore-control", region_name=res_region)
+        # DeleteGateway rejects gateways that still have targets ("has targets
+        # associated with it") — a failed deploy that got past target creation
+        # would leak the gateway forever. Delete targets first.
+        try:
+            targets = ctrl.list_gateway_targets(gatewayIdentifier=rid, maxResults=100).get("items", [])
+            for t in targets:
+                try:
+                    ctrl.delete_gateway_target(gatewayIdentifier=rid, targetId=t["targetId"])
+                except Exception:
+                    logger.debug("delete_gateway_target %s on %s failed", t.get("targetId"), rid, exc_info=True)
+        except Exception:
+            logger.debug("list_gateway_targets on %s failed", rid, exc_info=True)
         ctrl.delete_gateway(gatewayIdentifier=rid)
     elif rtype == "agent_runtime":
         ctrl = step_clients.client(event, "bedrock-agentcore-control", region_name=res_region)

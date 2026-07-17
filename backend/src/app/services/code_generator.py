@@ -1301,6 +1301,48 @@ def _get_memory_client():
     return _memory_client
 
 
+_memory_strategies_cache = None
+
+
+def _get_long_term_context(actor_id, session_id, query, top_k=3):
+    """Retrieve long-term memory records extracted by the memory strategies.
+
+    get_last_k_turns only sees the CURRENT session's raw events; facts a
+    strategy (semantic/summary/userPreference/episodic) extracted from EARLIER
+    sessions live in strategy namespaces and must be fetched with
+    retrieve_memories. Namespace templates are resolved per strategy.
+    """
+    global _memory_strategies_cache
+    client = _get_memory_client()
+    if not client or not MEMORY_ID:
+        return ""
+    try:
+        if _memory_strategies_cache is None:
+            _memory_strategies_cache = client.get_memory_strategies(MEMORY_ID) or []
+        lines = []
+        for strat in _memory_strategies_cache:
+            sid = strat.get("strategyId") or strat.get("memoryStrategyId") or ""
+            for ns_tpl in strat.get("namespaces") or []:
+                ns = (
+                    ns_tpl.replace("{{memoryStrategyId}}", sid)
+                    .replace("{{actorId}}", actor_id)
+                    .replace("{{sessionId}}", session_id)
+                )
+                if "{{" in ns:
+                    continue  # unresolved template variable — skip
+                for rec in client.retrieve_memories(
+                    memory_id=MEMORY_ID, namespace=ns, query=query, top_k=top_k,
+                ):
+                    content = rec.get("content", {{}})
+                    text = content.get("text", "") if isinstance(content, dict) else str(content)
+                    if text:
+                        lines.append(text)
+        return "\\n".join(lines)
+    except Exception as e:
+        print(f"Warning: Could not retrieve long-term memory: {{e}}")
+        return ""
+
+
 def _get_recent_context(actor_id, session_id, k=5):
     """Retrieve recent conversation turns from memory."""
     client = _get_memory_client()
@@ -1354,11 +1396,19 @@ def invoke(payload):
     session_id = payload.get("session_id", "default")
     actor_id = payload.get("actor_id", "user")
 
-    # Retrieve recent context from memory
+    # Retrieve recent context (this session) + long-term records (extracted
+    # from prior sessions by the configured memory strategies).
     recent_context = _get_recent_context(actor_id, session_id)
-    enriched_prompt = message
+    long_term_context = _get_long_term_context(actor_id, session_id, message)
+    context_parts = []
+    if long_term_context:
+        context_parts.append(f"Relevant long-term memory:\\n{{long_term_context}}")
     if recent_context:
-        enriched_prompt = f"Previous conversation context:\\n{{recent_context}}\\n\\nCurrent message: {{message}}"
+        context_parts.append(f"Previous conversation context:\\n{{recent_context}}")
+    enriched_prompt = message
+    if context_parts:
+        joined = "\\n\\n".join(context_parts)
+        enriched_prompt = f"{{joined}}\\n\\nCurrent message: {{message}}"
 
     # Strands Agent handles tool discovery + calling via MCPClient automatically
     result = _get_agent()(enriched_prompt)

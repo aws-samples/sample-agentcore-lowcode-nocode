@@ -389,7 +389,6 @@ def _create_step_role(
             iam.PolicyStatement(
                 actions=[
                     "aoss:CreateCollection",
-                    "aoss:BatchGetCollection",
                     "aoss:DeleteCollection",
                     "aoss:CreateIndex",
                     "aoss:DescribeIndex",
@@ -399,12 +398,16 @@ def _create_step_role(
                 resources=[f"arn:aws:aoss:{stack.region}:{stack.account}:collection/*"],
             )
         )
-        # aoss security/data-access policies do NOT support resource-level
-        # permissions (account-level APIs) — Resource must stay "*"; least
-        # privilege is enforced by the exact action list.
+        # aoss security/data-access policies AND the Batch/List read APIs do
+        # NOT support resource-level permissions (account-level APIs) —
+        # Resource must stay "*"; least privilege is enforced by the exact
+        # action list. (BatchGetCollection on collection/* fails AccessDenied
+        # — live-verified by the matrix run.)
         role.add_to_policy(
             iam.PolicyStatement(
                 actions=[
+                    "aoss:BatchGetCollection",
+                    "aoss:ListCollections",
                     "aoss:CreateSecurityPolicy",
                     "aoss:GetSecurityPolicy",
                     "aoss:DeleteSecurityPolicy",

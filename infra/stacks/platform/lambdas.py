@@ -456,13 +456,15 @@ def build_deployment_lambda(
     # resource-level permission support (Resource must stay "*").
     role.add_to_policy(
         iam.PolicyStatement(
-            actions=["aoss:BatchGetCollection", "aoss:DeleteCollection"],
+            actions=["aoss:DeleteCollection"],
             resources=[f"arn:aws:aoss:{stack.region}:{stack.account}:collection/*"],
         )
     )
+    # BatchGetCollection is an account-level API — it fails AccessDenied when
+    # scoped to collection ARNs (live-verified by the matrix run).
     role.add_to_policy(
         iam.PolicyStatement(
-            actions=["aoss:DeleteSecurityPolicy", "aoss:DeleteAccessPolicy"],
+            actions=["aoss:BatchGetCollection", "aoss:DeleteSecurityPolicy", "aoss:DeleteAccessPolicy"],
             resources=["*"],
         )
     )

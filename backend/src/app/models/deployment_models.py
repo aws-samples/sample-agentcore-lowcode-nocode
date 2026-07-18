@@ -203,6 +203,14 @@ class DeploymentState(BaseModel):
     # role to tear down, without the original SFN event.
     target_account_id: str | None = None
     target_region: str | None = None
+    # Async (slow-class) teardown tracking. KB-backed deletes exceed API
+    # Gateway's 29s integration cap, so DELETE /api/runtime/{id} dispatches
+    # them to a background self-invoke and the caller polls
+    # GET /api/deploy/{deployment_id} for these fields.
+    # "deleting" → "deleted" | "delete_failed"; delete_message carries the
+    # final cleanup summary (truncated to ~1KB).
+    delete_status: str | None = None
+    delete_message: str | None = None
 
 
 # ============================================================================

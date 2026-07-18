@@ -1653,14 +1653,189 @@ async def handle_import_runtime(request: ImportRuntimeRequest, raw_request: Requ
     }
 
 
+# Resource types whose teardown is slow enough to blow past API Gateway's 29s
+# integration cap (live-verified in the matrix run): a managed KB delete polls
+# to a terminal state (~2 min worst case) BEFORE its backing S3-Vectors bucket /
+# OSS collection can be reclaimed. Deployments carrying any of these are torn
+# down in a background self-invoke (_async_delete) instead of inline.
+_SLOW_DELETE_RESOURCE_TYPES = {"knowledge_base", "oss_collection", "s3_vectors_bucket"}
+
+
+def _lookup_deployment_record(runtime_id: str) -> dict | None:
+    """Resolve the deployment record for *runtime_id* (or a deployment_id).
+
+    Tries the runtime_id GSI/scan first, then falls back to treating the value
+    as a deployment_id (frontend fallback for partial-failed deploys where the
+    agent runtime was never created but gateway/MCP server were).
+    """
+    store = _get_state_store()
+    record = _scan_for_runtime(store._table, runtime_id)
+    if not record:
+        direct = store.get(runtime_id)
+        if direct:
+            record = direct.model_dump(mode="json")
+    return record
+
+
+def _is_slow_delete(deployment_record: dict | None) -> bool:
+    """Whether this deployment's teardown belongs to the SLOW class.
+
+    Slow = it carries a flow-created Knowledge Base (KB delete polls to a
+    terminal state before the backing store can go) or any manifest entry of a
+    KB-adjacent type. Everything else is the FAST class and stays inline,
+    preserving the existing synchronous behavior for the 95% case.
+    """
+    if not deployment_record:
+        return False
+    kb_result = deployment_record.get("knowledge_base_result") or {}
+    if kb_result.get("created_by_flow"):
+        return True
+    for res in deployment_record.get("created_resources") or []:
+        if str(res.get("type")) in _SLOW_DELETE_RESOURCE_TYPES:
+            return True
+    return False
+
+
+def _set_delete_status(deployment_id: str, delete_status: str, delete_message: str | None = None) -> None:
+    """Write delete_status (+ optional delete_message, ~1KB cap) onto the
+    deployment record so GET /api/deploy/{deployment_id} can surface async
+    teardown progress. Best-effort: never fails the delete itself."""
+    try:
+        from app.services.deployment_state_store import _update_item
+
+        update_expr = "SET delete_status = :ds"
+        expr_values: dict = {":ds": delete_status}
+        if delete_message is not None:
+            update_expr += ", delete_message = :dm"
+            expr_values[":dm"] = delete_message[:1024]
+        _update_item(
+            _get_state_store()._table,
+            key={"deployment_id": deployment_id},
+            update_expr=update_expr,
+            expr_values=expr_values,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Could not write delete_status=%s for %s",
+            delete_status,
+            deployment_id,
+            exc_info=True,
+        )
+
+
 @deployment_app.delete(
     "/api/runtime/{runtime_id}",
     response_model=DeleteResponse,
     response_model_by_alias=True,
 )
 async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> DeleteResponse:
-    """Delete a runtime and clean up all associated resources. Caller must own it."""
+    """Delete a runtime and clean up all associated resources. Caller must own it.
+
+    Thin dispatcher: KB-backed teardowns (KB cascade waits + backing-store
+    deletes) exceed API Gateway's 29s integration cap and used to 503 even
+    though the Lambda finished — those are dispatched to a background
+    self-invoke (mirrors the _async_generate/_async_test pattern) and tracked
+    via delete_status on the deployment record. Everything else runs inline in
+    _run_delete_cleanup exactly as before.
+    """
     runtime_id = _validate_runtime_id(runtime_id)
+    caller_sub = _get_user_id(raw_request)
+
+    # Fetch the deployment record to classify fast vs slow and pre-validate
+    # ownership. The lookup is cheap; _run_delete_cleanup re-does it internally
+    # so the cleanup body works identically from the async path.
+    deployment_record = None
+    try:
+        deployment_record = _lookup_deployment_record(runtime_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Delete dispatch: state lookup failed for %s: %s", runtime_id, exc)
+
+    # Tenant isolation: caller must own the deployment.
+    # See tasks/lessons.md Bug 37.
+    if deployment_record:
+        owner = deployment_record.get("user_id")
+        if owner and owner != caller_sub:
+            raise HTTPException(status_code=404, detail="Runtime not found")
+
+    if _is_slow_delete(deployment_record):
+        dep_id = deployment_record.get("deployment_id", "")
+        try:
+            if dep_id:
+                _set_delete_status(dep_id, "deleting")
+            lambda_client = boto3.client("lambda", region_name=config.aws_region)
+            function_name = os.environ.get("AWS_LAMBDA_FUNCTION_NAME", "")
+            lambda_client.invoke(
+                FunctionName=function_name,
+                InvocationType="Event",
+                Payload=json.dumps(
+                    {
+                        "_async_delete": True,
+                        "runtime_id": runtime_id,
+                        "caller_sub": caller_sub,
+                    }
+                ).encode(),
+            )
+            return DeleteResponse(
+                success=True,
+                message=(
+                    "Deletion started — KB-backed teardown continues in the background; "
+                    "poll GET /api/deploy/{deployment_id} for delete_status."
+                ),
+            )
+        except Exception:  # noqa: BLE001
+            # Better slow than dropped: if the Event self-invoke itself fails
+            # (missing IAM, local dev without a function name), fall back to
+            # the inline cleanup and accept the possible API GW timeout.
+            logger.warning(
+                "Async delete dispatch failed for %s; falling back to inline cleanup",
+                runtime_id,
+                exc_info=True,
+            )
+
+    return _run_delete_cleanup(runtime_id, caller_sub)
+
+
+def _handle_async_delete(event: dict):
+    """Background (slow-class) teardown — dispatched by handle_delete_runtime.
+
+    Runs the exact same _run_delete_cleanup body without the API Gateway 29s
+    cap, then records the outcome on the deployment record (delete_status =
+    "deleted" | "delete_failed", delete_message = the cleanup summary) so the
+    frontend can poll GET /api/deploy/{deployment_id}.
+    """
+    runtime_id = event["runtime_id"]
+    caller_sub = event.get("caller_sub")
+
+    dep_id = ""
+    try:
+        record = _lookup_deployment_record(runtime_id)
+        dep_id = (record or {}).get("deployment_id", "")
+    except Exception:  # noqa: BLE001
+        logger.warning("Async delete: record lookup failed for %s", runtime_id, exc_info=True)
+
+    try:
+        result = _run_delete_cleanup(runtime_id, caller_sub)
+        if dep_id:
+            _set_delete_status(
+                dep_id,
+                "deleted" if result.success else "delete_failed",
+                result.message,
+            )
+        return {"success": result.success}
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Async delete failed for %s", runtime_id)
+        if dep_id:
+            _set_delete_status(dep_id, "delete_failed", str(exc))
+        return {"success": False}
+
+
+def _run_delete_cleanup(runtime_id: str, caller_sub: str | None) -> DeleteResponse:
+    """Synchronous teardown body shared by the inline (fast) and background
+    (slow / _async_delete) delete paths. Re-does the record lookup internally
+    (cheap) so both callers behave identically. The tenant-isolation check
+    below still raises HTTPException — fine for the sync path; the async path
+    pre-validates ownership before dispatching.
+    """
     cleanup_messages: list[str] = []
     # Audit #11 (tasks/lessons.md Bug 106): track per-step cleanup failures.
     # Bug 44 only flipped the success flag for runtime-destroy; gateway / KB /
@@ -1670,7 +1845,6 @@ async def handle_delete_runtime(runtime_id: str, raw_request: Request) -> Delete
     # an honest signal that resources may have leaked.
     cleanup_failures: list[str] = []
     region = config.aws_region
-    caller_sub = _get_user_id(raw_request)
 
     # Look up deployment state for gateway config.
     # Try by runtime_id first, then fall back to deployment_id (covers partial failures
@@ -2457,6 +2631,11 @@ def handler(event, context):
             return _handle_async_test(event)
         if event.get("_async_generate"):
             return _handle_async_generate(event)
+        # Slow-class (KB-backed) runtime teardown — dispatched by
+        # handle_delete_runtime so the API response stays under API Gateway's
+        # 29s cap while the KB cascade + backing-store deletes finish here.
+        if event.get("_async_delete"):
+            return _handle_async_delete(event)
         # EventBridge-scheduled Cedar-ENFORCE promotion sweep (Loom-study 0.6):
         # self-drives pending permits to ACTIVE without a user touchpoint.
         if event.get("policy_sweep") or (

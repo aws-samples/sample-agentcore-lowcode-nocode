@@ -95,6 +95,7 @@ async def get_evaluation_config(
             break
 
     matched = None
+    detail = None
     for cfg in configs:
         cfg_name = cfg.get("onlineEvaluationConfigName", "")
         # evaluation_step.py names configs `eval_<agent_id sanitized>` (re-sub
@@ -105,13 +106,41 @@ async def get_evaluation_config(
             break
 
     if matched is None:
+        # Custom-named configs (evaluationConfig.configName on deploy) never
+        # match the `eval_<agent_id>` name heuristic — live-verified: config
+        # ACTIVE in AWS, endpoint 404. Fall back to describing each config and
+        # matching on the runtime it TARGETS: evaluation_step.py always creates
+        # dataSourceConfig.cloudWatchLogs with serviceNames=[agent_id] and
+        # logGroupNames=[/aws/bedrock-agentcore/runtimes/<agent_id>-DEFAULT],
+        # so either field referencing this runtime_id identifies its config.
+        # (The name heuristic above runs first, so an `eval_`-named config is
+        # still preferred when both exist.)
+        for cfg in configs:
+            cfg_id = cfg.get("onlineEvaluationConfigId")
+            if not cfg_id:
+                continue
+            try:
+                candidate = ctrl.get_online_evaluation_config(onlineEvaluationConfigId=cfg_id)
+            except Exception:  # noqa: BLE001 — a stale/deleting config must not break the search
+                logger.debug("get_online_evaluation_config %s failed during fallback", cfg_id, exc_info=True)
+                continue
+            cw = (candidate.get("dataSourceConfig") or {}).get("cloudWatchLogs") or {}
+            service_names = cw.get("serviceNames") or []
+            log_groups = cw.get("logGroupNames") or []
+            if runtime_id in service_names or any(runtime_id in lg for lg in log_groups):
+                matched = cfg
+                detail = candidate
+                break
+
+    if matched is None:
         raise HTTPException(
             status_code=404,
             detail="No evaluation config found for this runtime",
         )
 
     cfg_id = matched.get("onlineEvaluationConfigId")
-    detail = ctrl.get_online_evaluation_config(onlineEvaluationConfigId=cfg_id)
+    if detail is None:
+        detail = ctrl.get_online_evaluation_config(onlineEvaluationConfigId=cfg_id)
     return {
         "runtime_name": runtime_name,
         "version_id": version_id,

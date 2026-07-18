@@ -1121,10 +1121,17 @@ def handler(event: dict, context) -> dict:  # noqa: ARG001
             ds_id = match["dataSourceId"]
             logger.warning("Data source '%s' already exists (%s), reusing", ds_params["name"], ds_id)
 
-        # Step 5: Start ingestion. Wait up to 600s for queryable vectors; record
-        # the terminal status so a KB that's still ingesting is reported honestly
-        # rather than silently implied ready (P-E2E matrix finding).
-        _job_id, ingestion_status = _start_and_wait_ingestion(bedrock_agent, kb_id, ds_id, max_wait=600)
+        # Step 5: Start ingestion. Wait for queryable vectors; record the
+        # terminal status so a KB that's still ingesting is reported honestly
+        # rather than silently implied ready (P-E2E matrix finding). The wait is
+        # bounded to stay inside the SFN task timeout (600s) and the 30-min
+        # state-machine budget — an IN_PROGRESS return is NOT a failure: the KB
+        # exists and its vectors become queryable as the crawl finishes in the
+        # background (verified live for web_crawler P-KB-008: example.com
+        # dispatches + indexes shortly after this window, and the agent then
+        # retrieves the crawled content).
+        _ingest_wait = 540
+        _job_id, ingestion_status = _start_and_wait_ingestion(bedrock_agent, kb_id, ds_id, max_wait=_ingest_wait)
 
         event["knowledge_base_result"] = {
             "kb_id": kb_id,

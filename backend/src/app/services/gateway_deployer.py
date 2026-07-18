@@ -319,6 +319,24 @@ def _get_gateways_from_response(response: dict) -> list:
     return response.get("items", response.get("gateways", response.get("gatewaySummaries", [])))
 
 
+def _list_all_gateways(agentcore_ctrl) -> list:
+    """List EVERY gateway, following pagination.
+
+    The conflict-recovery path matches an existing gateway by name; a single
+    unpaginated ``list_gateways()`` silently misses gateways past the first
+    page, so a redeploy into a busy account fails to find its own gateway and
+    raises "exists but not found via list". Follow nextToken to completion.
+    """
+    gateways: list = []
+    next_token = None
+    while True:
+        resp = agentcore_ctrl.list_gateways(nextToken=next_token) if next_token else agentcore_ctrl.list_gateways()
+        gateways.extend(_get_gateways_from_response(resp))
+        next_token = resp.get("nextToken")
+        if not next_token:
+            return gateways
+
+
 # ---------------------------------------------------------------------------
 # Boto3 wrapper helpers
 # ---------------------------------------------------------------------------
@@ -2423,8 +2441,7 @@ def deploy_gateway(
             # "already exists" message fallback kept (ValidationException shape).
             if is_error(create_err, "ConflictException") or "already exists" in err_str:
                 logger.info("Gateway '%s' already exists, looking up", gateway_name)
-                existing = agentcore_ctrl.list_gateways()
-                for gw in _get_gateways_from_response(existing):
+                for gw in _list_all_gateways(agentcore_ctrl):
                     if gw.get("name") == gateway_name:
                         gw_id = gw["gatewayId"]
                         gw_detail = agentcore_ctrl.get_gateway(gatewayIdentifier=gw_id)

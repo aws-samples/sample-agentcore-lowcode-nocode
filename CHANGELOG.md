@@ -21,10 +21,14 @@ All notable changes to this project are documented here. The format follows
   tables, 3 S3 buckets, no `States.TaskFailed` retry, CloudFront Function SPA
   routing instead of CustomErrorResponses)
 
-### Fixed — full-matrix verification (11 live-found deploy/runtime defects)
-Every deployable pattern was verified end-to-end against real AWS
-(93 patterns PASS with canary evidence; the only non-PASS is an AWS-side
-web-crawler ingestion stall, not a platform defect). Fixes:
+### Fixed — full-matrix verification (12 live-found deploy/runtime defects)
+Every deployable pattern was verified end-to-end against real AWS —
+**94 patterns PASS with canary evidence, 0 FAIL, 0 PARTIAL** (the remaining
+294 are BLOCKED by design: non-Bedrock frameworks / third-party
+IdPs / SaaS creds / customer VPC infra, each code-cited). Fixes:
+- Web-crawler KB verified end-to-end (example.com → ingest → index → agent
+  retrieves the crawled content); the ingestion wait is bounded to the SFN
+  task budget and an in-progress crawl is treated as success, not failure
 - Generated memory agents now retrieve long-term memory records across sessions
   (`retrieve_memories` was never called); memory+knowledge-base canvases no
   longer silently drop KB retrieval

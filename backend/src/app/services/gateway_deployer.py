@@ -2109,11 +2109,14 @@ def _deploy_connector_targets(
             _delete_connector_credential_provider(agentcore_ctrl, entry)
         if created_secrets:
             sm = _create_secrets_client(region)
-            for sarn in created_secrets:
+            for _sidx, sarn in enumerate(created_secrets):
                 try:
                     sm.delete_secret(SecretId=sarn, ForceDeleteWithoutRecovery=True)
                 except Exception:  # noqa: BLE001 — best-effort rollback
-                    logger.warning("Rollback: could not delete connector secret %s", _safe_log_token(sarn))
+                    # Log NOTHING from the secret-bearing scope (no ARN/value):
+                    # CodeQL py/clear-text-logging taints created_secrets; a
+                    # positional index is enough to correlate with the create log.
+                    logger.warning("Rollback: could not delete connector secret #%d", _sidx)
         for uri in created_spec_s3_uris:
             _delete_spec_s3_object(uri, region)
 
@@ -3139,12 +3142,15 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: dict
                         if domain:
                             cognito_client.delete_user_pool_domain(UserPoolId=user_pool_id, Domain=domain)
                     except Exception:  # noqa: BLE001 — pool delete below still surfaces real failures
-                        logger.debug("Cognito domain delete failed for pool %s", user_pool_id, exc_info=True)
+                        # No client_info-derived value in the log: that dict also
+                        # holds client_secret, so CodeQL py/clear-text-logging
+                        # taints user_pool_id/client_id too. Message only.
+                        logger.debug("Cognito domain delete failed (continuing)", exc_info=True)
                     if client_id_val:
                         try:
                             cognito_client.delete_user_pool_client(UserPoolId=user_pool_id, ClientId=client_id_val)
                         except Exception:  # noqa: BLE001 — client is cascade-deleted with the pool anyway
-                            logger.debug("Cognito client delete failed for pool %s", user_pool_id, exc_info=True)
+                            logger.debug("Cognito client delete failed (continuing)", exc_info=True)
                     cognito_client.delete_user_pool(UserPoolId=user_pool_id)
                     cleanup_log.append(f"Cognito pool {user_pool_id} deleted")
             except Exception as e:
@@ -3447,11 +3453,12 @@ def _deploy_external_mcp_targets(
             _delete_connector_credential_provider(agentcore_ctrl, pname)
         if created_secrets:
             sm = _create_secrets_client(region)
-            for sarn in created_secrets:
+            for _sidx, sarn in enumerate(created_secrets):
                 try:
                     sm.delete_secret(SecretId=sarn, ForceDeleteWithoutRecovery=True)
                 except Exception:  # noqa: BLE001 — best-effort rollback
-                    logger.warning("Rollback: could not delete MCP-server secret %s", _safe_log_token(sarn))
+                    # No ARN/value in the log (CodeQL py/clear-text-logging taint).
+                    logger.warning("Rollback: could not delete MCP-server secret #%d", _sidx)
 
     try:
         for sel in external_mcp_servers:

@@ -573,7 +573,7 @@ class DeploymentStateStore:
             return None
 
     def scan_pending_enforce(self, max_items: int = 200) -> list[DeploymentState]:
-        """Return deployments whose Cedar ENFORCE promotion is still pending.
+        """Return deployments whose Cedar ENFORCE policy plane needs reconciling.
 
         Used by the scheduled policy-sweep (EventBridge) so a permit converges to
         ACTIVE even when NO user touchpoint (invoke/status poll) fires after the
@@ -581,16 +581,31 @@ class DeploymentStateStore:
         Without this self-drive, a deployed-and-idle ENFORCE agent's tool plane
         can stay fail-closed (deny-all) indefinitely (observed live in P-PLAT-027).
 
-        A bounded FilterExpression scan is acceptable here: pending-enforce rows
-        are rare and short-lived, and this runs on a schedule (not per-request).
-        `max_items` caps the sweep so a large table can't blow the Lambda budget;
-        the next tick picks up any remainder.
+        Two classes are returned:
+        1. ``enforce_pending`` set (non-null) — the classic pending-promotion row.
+        2. ``mode == "ENFORCE"`` with an ``engine_id`` — the reconcile class. A
+           policy that reached ACTIVE (so ``enforce_pending`` was cleared to null)
+           can REGRESS to UPDATE_FAILED when AgentCore's gateway-authz plane
+           re-validates it; once the pending payload is null, nothing would ever
+           re-drive it and the tool plane silently goes deny-all forever. The
+           promoter re-checks the live policy status for these and re-drives
+           ``update_policy`` if it is not ACTIVE (idempotent no-op when healthy).
+           This is the fix for the >2h non-convergence found in production-
+           readiness testing.
+
+        A bounded FilterExpression scan is acceptable here: ENFORCE rows are rare
+        and this runs on a schedule (not per-request). `max_items` caps the sweep
+        so a large table can't blow the Lambda budget; the next tick picks up any
+        remainder.
         """
         items: list[dict] = []
         kwargs: dict = {
-            "FilterExpression": "attribute_exists(policy_result.enforce_pending) "
-            "AND policy_result.enforce_pending <> :null",
-            "ExpressionAttributeValues": {":null": None},
+            "FilterExpression": (
+                "(attribute_exists(policy_result.enforce_pending) AND policy_result.enforce_pending <> :null) "
+                "OR (policy_result.#m = :enforce AND attribute_exists(policy_result.engine_id))"
+            ),
+            "ExpressionAttributeNames": {"#m": "mode"},
+            "ExpressionAttributeValues": {":null": None, ":enforce": "ENFORCE"},
         }
         while len(items) < max_items:
             resp = self._table.scan(**kwargs)

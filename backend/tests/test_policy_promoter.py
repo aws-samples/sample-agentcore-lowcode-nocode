@@ -146,3 +146,37 @@ def test_best_effort_never_raises():
     with patch.object(pp, "_ctrl", return_value=ctrl):
         out = pp.try_promote_to_enforce(_state(), "us-east-1")
     assert out["promoted"] is False  # degraded, no exception
+
+
+def test_reconcile_redrive_when_enforce_pending_cleared_but_policy_regressed():
+    """Production-readiness: mode=ENFORCE, enforce_pending already cleared to
+    None (policy once ACTIVE), but the policy REGRESSED to UPDATE_FAILED. The
+    old code returned None (no-op) and the tool plane stayed deny-all forever.
+    The reconcile path must detect the non-ACTIVE policy and re-drive
+    update_policy using the policy's own live definition."""
+    ctrl = MagicMock()
+    # list_policies: one policy, not ACTIVE (regressed)
+    ctrl.list_policies.return_value = {"policies": [{"name": "allow", "status": "UPDATE_FAILED", "policyId": "p1"}]}
+    # get_policy: first call (reconcile) returns live definition; poll after
+    # update_policy returns ACTIVE.
+    ctrl.get_policy.side_effect = [
+        {"status": "UPDATE_FAILED", "policyId": "p1", "definition": {"cedar": {"statement": "permit(...);"}}},
+        {"status": "ACTIVE", "policyId": "p1"},
+    ]
+    pr = {"mode": "ENFORCE", "engine_id": "eng-1", "engine_arn": "arn:eng", "gateway_id": "gw-1"}
+    state = {"deployment_id": "d1", "policy_result": pr}
+    with patch.object(pp, "_ctrl", return_value=ctrl):
+        out = pp.try_promote_to_enforce(state, "us-east-1")
+    assert out is not None and out["promoted"] is True
+    ctrl.update_policy.assert_called_once()
+
+
+def test_reconcile_noop_when_all_policies_active():
+    """mode=ENFORCE, enforce_pending None, all policies healthy → cheap no-op."""
+    ctrl = MagicMock()
+    ctrl.list_policies.return_value = {"policies": [{"name": "allow", "status": "ACTIVE", "policyId": "p1"}]}
+    pr = {"mode": "ENFORCE", "engine_id": "eng-1", "engine_arn": "arn:eng", "gateway_id": "gw-1"}
+    with patch.object(pp, "_ctrl", return_value=ctrl):
+        out = pp.try_promote_to_enforce({"deployment_id": "d1", "policy_result": pr}, "us-east-1")
+    assert out is None
+    ctrl.update_policy.assert_not_called()

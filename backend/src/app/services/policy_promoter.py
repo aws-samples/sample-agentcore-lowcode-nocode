@@ -41,6 +41,11 @@ def _ctrl(region: str):
     return boto3.client("bedrock-agentcore-control", region_name=region)
 
 
+def _get_policies_from_response(resp: dict) -> list:
+    """Extract the policies list from a list_policies response (SDK-key tolerant)."""
+    return resp.get("policies", resp.get("items", resp.get("policySummaries", [])))
+
+
 def _active_policy_count(ctrl, engine_id: str) -> int:
     try:
         lp = ctrl.list_policies(policyEngineId=engine_id, maxResults=100)
@@ -69,9 +74,13 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
     for pol in policies or []:
         name = pol.get("name")
         stmt = pol.get("statement", "")
-        if not name or not stmt:
-            continue
         cur = existing.get(name)
+        # A reconcile-class payload (see try_promote_to_enforce) carries no
+        # statement because the policy already exists — recover it in place
+        # using its own live definition. A brand-new policy still needs a
+        # statement to create.
+        if not name or (not stmt and not cur):
+            continue
         status = (cur or {}).get("status", "")
         if status == "ACTIVE":
             active += 1
@@ -92,7 +101,18 @@ def _ensure_policies_active(ctrl, engine_id: str, policies: list) -> int:
             logger.info("promote: policy %s is %s (another run owns it) — skipping", name, status)
             continue
         _desc = pol.get("description") or "Auto-permit for allowed gateway tools (ENFORCE)."
-        _defn = {"cedar": {"statement": stmt}}
+        # Reconcile-in-place with no supplied statement: re-drive the policy's
+        # OWN live definition (fetched via get_policy) so a regressed
+        # UPDATE_FAILED policy re-validates without needing the original Cedar.
+        _defn = {"cedar": {"statement": stmt}} if stmt else None
+        if _defn is None and cur:
+            try:
+                _live = ctrl.get_policy(engineId=engine_id, policyId=cur.get("policyId") or cur.get("id"))
+            except TypeError:
+                _live = ctrl.get_policy(policyEngineId=engine_id, policyId=cur.get("policyId") or cur.get("id"))
+            _defn = _live.get("definition")
+        if _defn is None:
+            continue
         try:
             if cur:
                 # RECOVER IN PLACE (the elegant race-free fix): a CREATE_FAILED
@@ -174,14 +194,47 @@ def try_promote_to_enforce(deployment_state: dict, region: str) -> dict | None:
     """
     pr = (deployment_state or {}).get("policy_result") or {}
     pending = pr.get("enforce_pending")
-    # Nothing pending → no-op. Note: mode == ENFORCE alone is NOT a no-op
-    # anymore — the fail-closed path (P-PLAT-027) attaches in ENFORCE with the
-    # permit policies still pending (default-deny bricks the tool plane), and
-    # this promoter is what creates them to restore the permitted tools.
-    if not pending:
-        return None
     already_enforcing = pr.get("mode") == "ENFORCE"
-    if already_enforcing and not pr.get("enforce_validation_pending"):
+
+    # RECONCILE class: mode is already ENFORCE and enforce_pending was cleared
+    # (policy once reached ACTIVE), but AgentCore's gateway-authz plane can
+    # REGRESS a policy back to UPDATE_FAILED afterward. With the pending payload
+    # gone, no touchpoint would ever re-drive it and the tool plane silently
+    # goes deny-all forever (found live in production-readiness testing: a
+    # policy stuck UPDATE_FAILED >2h that flipped ACTIVE instantly on a single
+    # update_policy re-drive). If any policy on the engine is not ACTIVE,
+    # reconstruct a minimal pending payload from the live engine so the
+    # re-drive below runs. When everything is ACTIVE this is a cheap no-op.
+    if not pending:
+        if not already_enforcing:
+            return None
+        engine_id = pr.get("engine_id")
+        if not engine_id:
+            return None
+        try:
+            _ctrl_r = _ctrl(region)
+            _pols = _get_policies_from_response(_ctrl_r.list_policies(policyEngineId=engine_id, maxResults=100))
+            _unhealthy = [p for p in _pols if p.get("status") not in ("ACTIVE", "CREATING", "UPDATING", "DELETING")]
+            if not _unhealthy:
+                return None  # all healthy — nothing to reconcile
+            logger.warning(
+                "policy reconcile: engine %s has %d non-ACTIVE policy(ies) under ENFORCE — re-driving",
+                engine_id,
+                len(_unhealthy),
+            )
+            # Reconstruct just enough pending payload for the re-drive path. The
+            # policies already exist (RECOVER-IN-PLACE update_policy uses their
+            # live definition), so statements can be empty here.
+            pending = {
+                "engine_id": engine_id,
+                "gateway_id": pr.get("gateway_id") or (pr.get("engine_arn") or ""),
+                "policies": [{"name": p.get("name", ""), "statement": ""} for p in _unhealthy],
+                "_reconcile": True,
+            }
+        except Exception:  # noqa: BLE001
+            logger.debug("policy reconcile: list_policies failed for %s", pr.get("engine_id"), exc_info=True)
+            return None
+    elif already_enforcing and not pr.get("enforce_validation_pending"):
         return None
 
     engine_id = pending.get("engine_id")

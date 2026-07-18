@@ -133,3 +133,7 @@ docs/decks/
 
 # Local agent config — personal working notes, not part of the sample
 CLAUDE.md
+
+# CDK runs via npx; no local npm project in infra/ — don't recreate the empty stub
+infra/package-lock.json
+/package-lock.json

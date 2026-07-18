@@ -1,5 +1,7 @@
 # AgentCore Visual Workflow Platform
 
+[![CI](https://github.com/aws-samples/sample-agentcore-lowcode-nocode/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/aws-samples/sample-agentcore-lowcode-nocode/actions/workflows/ci.yml)
+
 A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, configure, and deploy AI agents through a drag-and-drop canvas interface. Inspired by n8n's node-based editor, built for AWS Bedrock AgentCore. Deployed to AWS with API Gateway, Lambda, Step Functions, DynamoDB, and CloudFront — fully serverless, pay-per-request.
 
 ![Visual canvas — a customer support agent wired to Gateway, Identity, Memory, and Observability](docs/images/canvas.png)
@@ -34,9 +36,10 @@ A visual workflow builder for **AWS Bedrock AgentCore** that lets you design, co
 
 ## Prerequisites
 
-- **AWS CLI** v2 — configured with credentials (`aws configure`)
-- **Node.js** 18+
+- **AWS CLI** v2 — configured with credentials for the target account (`aws configure`)
+- **Node.js** 20+ (CI runs on 22)
 - **Python** 3.12+
+- The deploy region **must be `us-east-1`** — the stack's WAF WebACL is CLOUDFRONT-scoped, which AWS only accepts there; `deploy.sh` fails fast otherwise.
 
 No Docker installation required. CDK is invoked via `npx` (no global install needed).
 
@@ -51,7 +54,7 @@ COGNITO_USERS="user@example.com" ./scripts/deploy.sh
 COGNITO_USERS="user@example.com" ENVIRONMENT_NAME=prod ./scripts/deploy.sh
 ```
 
-The deploy script validates prerequisites and AWS credentials, installs CDK/backend/Lambda dependencies, builds the AgentCore dependency bundles, runs `cdk deploy` (API Gateway, Lambda, Step Functions, DynamoDB, S3, CloudFront), builds and uploads the frontend, and prints the URLs. Lambda code is packaged automatically by CDK — no Docker build or ECR push required.
+The deploy script validates prerequisites and AWS credentials, installs backend/Lambda Python dependencies, builds the AgentCore dependency bundles, runs `cdk deploy` via `npx` (API Gateway, Lambda, Step Functions, DynamoDB, S3, CloudFront), then builds and uploads the frontend and prints the URLs. Lambda code is packaged automatically by CDK — no Docker build or ECR push required. A first-time deploy takes roughly 15–20 minutes.
 
 To also export OTLP traces from every platform Lambda and deployed agent to a backend like Langfuse, see the platform-level OTEL deploy mode in [Observability](docs/OBSERVABILITY.md).
 
@@ -97,14 +100,22 @@ aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
 ## Cleanup
 
 ```bash
-# Tear down all resources
+# Tear down all resources (prompts for confirmation)
 ./scripts/cleanup.sh
 
 # Tear down a specific environment
 ENVIRONMENT_NAME=prod ./scripts/cleanup.sh
+
+# Non-interactive teardown (CI / scripted) — skips the confirmation prompt
+FORCE_DESTROY=true ./scripts/cleanup.sh
 ```
 
-The cleanup script validates credentials, empties the S3 bucket, runs `cdk destroy --force`, and verifies all resources are removed.
+The cleanup script validates credentials, deletes every AgentCore resource the
+platform created (runtimes, gateways, memories, KBs, vector stores, Cognito
+pools, secrets, IAM roles), empties the S3 buckets, runs `cdk destroy` on the
+stack, and verifies all resources are removed. It is scoped strictly to the
+`agentcore-workflow-<env>` stack and never touches unrelated resources in the
+account.
 
 ## Running Tests
 

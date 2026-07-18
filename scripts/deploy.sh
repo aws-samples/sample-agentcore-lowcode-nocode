@@ -151,8 +151,8 @@ install_cdk_dependencies() {
     python3 -m pip install -r requirements.txt --quiet
   fi
 
-  # Install Node.js CDK dependencies (for npx cdk)
-  npm install --silent 2>/dev/null || true
+  # CDK is invoked via npx (no local npm project in infra/), so nothing to
+  # install here — npx resolves aws-cdk on demand.
 
   cd "${PROJECT_ROOT}"
   log_success "CDK dependencies installed."

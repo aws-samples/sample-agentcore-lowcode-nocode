@@ -2152,20 +2152,36 @@ def _run_delete_cleanup(runtime_id: str, caller_sub: str | None) -> DeleteRespon
                     ):
                         raise
             if kb_id:
-                bedrock_agent.delete_knowledge_base(knowledgeBaseId=kb_id)
-                cleanup_messages.append(f"Knowledge Base deleted: {kb_id}")
-            # Delete KB IAM role
+                # Manifest teardown may have ALREADY deleted this KB (it also
+                # carries a knowledge_base resource) — a second delete then
+                # returns ResourceNotFoundException, which is SUCCESS (the KB is
+                # gone), not a failure. Swallow not-found so the async delete
+                # isn't falsely marked delete_failed while everything actually
+                # deleted (production-readiness: false-negative teardown).
+                try:
+                    bedrock_agent.delete_knowledge_base(knowledgeBaseId=kb_id)
+                    cleanup_messages.append(f"Knowledge Base deleted: {kb_id}")
+                except Exception as kb_exc:  # noqa: BLE001
+                    if not is_error(kb_exc, "ResourceNotFoundException") and "not found" not in str(kb_exc).lower():
+                        raise
+                    cleanup_messages.append(f"Knowledge Base already gone: {kb_id}")
+            # Delete KB IAM role (idempotent — manifest may have removed it)
             kb_role_arn = kb_result.get("kb_role_arn", "")
             if kb_role_arn:
                 kb_iam_role_name = kb_role_arn.split("/")[-1] if "/" in kb_role_arn else ""
                 if kb_iam_role_name:
                     iam_c = boto3.client("iam")
-                    for p in iam_c.list_attached_role_policies(RoleName=kb_iam_role_name).get("AttachedPolicies", []):
-                        iam_c.detach_role_policy(RoleName=kb_iam_role_name, PolicyArn=p["PolicyArn"])
-                    for pn in iam_c.list_role_policies(RoleName=kb_iam_role_name).get("PolicyNames", []):
-                        iam_c.delete_role_policy(RoleName=kb_iam_role_name, PolicyName=pn)
-                    iam_c.delete_role(RoleName=kb_iam_role_name)
-                    cleanup_messages.append(f"KB IAM role deleted: {kb_iam_role_name}")
+                    try:
+                        for p in iam_c.list_attached_role_policies(RoleName=kb_iam_role_name).get(
+                            "AttachedPolicies", []
+                        ):
+                            iam_c.detach_role_policy(RoleName=kb_iam_role_name, PolicyArn=p["PolicyArn"])
+                        for pn in iam_c.list_role_policies(RoleName=kb_iam_role_name).get("PolicyNames", []):
+                            iam_c.delete_role_policy(RoleName=kb_iam_role_name, PolicyName=pn)
+                        iam_c.delete_role(RoleName=kb_iam_role_name)
+                        cleanup_messages.append(f"KB IAM role deleted: {kb_iam_role_name}")
+                    except iam_c.exceptions.NoSuchEntityException:
+                        cleanup_messages.append(f"KB IAM role already gone: {kb_iam_role_name}")
         except Exception as exc:
             cleanup_messages.append(f"KB cleanup error: {exc}")
             cleanup_failures.append("knowledge_base")

@@ -952,7 +952,22 @@ def _prune_orphaned_lambda_permissions(lambda_client, function_name: str) -> int
     """
     try:
         pol_raw = lambda_client.get_policy(FunctionName=function_name).get("Policy")
-    except Exception:  # noqa: BLE001 — no policy yet / NotFound: nothing to prune
+    except Exception as e:  # noqa: BLE001
+        # ResourceNotFound => the function simply has no resource policy yet:
+        # nothing to prune, genuinely benign.
+        if is_error(e, "ResourceNotFoundException", "ResourceNotFound"):
+            return 0
+        # Anything else (notably AccessDenied when the caller role lacks
+        # lambda:GetPolicy) means the prune is INERT — it can never remove a
+        # dangling principal, so the reused-Lambda AddPermission failure would
+        # silently return. Surface it loudly (Defect A) instead of swallowing.
+        logger.warning(
+            "Orphan-permission prune could not read the policy of %s (%s); "
+            "dangling gateway-role principals will NOT be cleaned — check that "
+            "the deploy role has lambda:GetPolicy on function:AgentCore*",
+            function_name,
+            type(e).__name__,
+        )
         return 0
     try:
         statements = json.loads(pol_raw).get("Statement", []) or []
@@ -3109,12 +3124,90 @@ def deploy_gateway(
 
     except Exception as e:
         logger.error("Gateway deployment failed: %s", e)
+        # Defect D: a gateway-step failure AFTER the gateway/role/targets were
+        # created but BEFORE the runtime exists leaks those resources — the
+        # deployment manifest only records them on the success path, so nothing
+        # ever tears them down (no runtime → no cleanup; no standalone delete
+        # route). Best-effort release of whatever we provisioned before failing,
+        # so a failed deploy leaves no orphan gateway/role/Lambda-grant behind.
+        _leaked_gateway = locals().get("gateway") or {}
+        _leaked_gw_id = _leaked_gateway.get("gatewayId") if isinstance(_leaked_gateway, dict) else None
+        if _leaked_gw_id:
+            try:
+                _abort_cfg = {
+                    "gateway_id": _leaked_gw_id,
+                    "gateway_name": locals().get("gateway_name"),
+                    "client_info": locals().get("client_info"),
+                    "lambda_function_name": locals().get("lambda_function_name")
+                    or "AgentCoreLambdaTestFunction",
+                    "custom_tool_lambdas": locals().get("custom_tool_lambdas") or [],
+                    "custom_tool_roles": locals().get("custom_tool_roles") or [],
+                    "connector_credential_providers": locals().get("connector_credential_providers") or [],
+                    "connector_secret_arns": locals().get("connector_secret_arns") or [],
+                    "connector_spec_s3_uris": locals().get("connector_spec_s3_uris") or [],
+                }
+                cleanup_gateway_resources("gateway-deploy-abort", region, _abort_cfg)
+                logger.info("Released leaked gateway %s after failed deploy", _leaked_gw_id)
+            except Exception as _ce:  # noqa: BLE001 — abort cleanup is best-effort
+                logger.warning("Abort-cleanup after failed gateway deploy failed: %s", str(_ce)[:160])
         return {"success": False, "error": str(e)}
 
 
 # ---------------------------------------------------------------------------
 # Gateway cleanup
 # ---------------------------------------------------------------------------
+
+
+# Tool Lambdas created once and reused by EVERY gateway deploy. They must never
+# be unconditionally deleted on a per-gateway teardown (Defect C) — doing so
+# bricks every other live gateway still wired to them. They are released by
+# reference count instead (see _release_shared_tool_lambda).
+_SHARED_TOOL_LAMBDAS = frozenset({"AgentCoreDynamicTools", "AgentCoreCustomerSupportTools"})
+
+
+def _release_shared_tool_lambda(lambda_client, function_name: str, gateway_role_name: str | None) -> str:
+    """Reference-counted teardown for a SHARED singleton tool Lambda (Defect C).
+
+    Remove only THIS gateway's ``AllowAgentCoreInvoke-<role>`` statement, then
+    delete the function ONLY when no such invoke statements remain (i.e. no other
+    live gateway still depends on it). Returns a human-readable log line.
+
+    A shared Lambda deleted while another gateway still uses it makes that
+    gateway serve 0 tools (its MCP ``tools/list`` hits a missing function) — the
+    "tear down A, B goes dead" failure the matrix run reproduced live.
+    """
+    if gateway_role_name:
+        stmt_id = re.sub(r"[^A-Za-z0-9_-]", "-", f"AllowAgentCoreInvoke-{gateway_role_name}")[:100]
+        try:
+            lambda_client.remove_permission(FunctionName=function_name, StatementId=stmt_id)
+        except Exception as e:  # noqa: BLE001 — statement may already be gone
+            if not is_error(e, "ResourceNotFoundException", "ResourceNotFound"):
+                logger.debug("remove_permission(%s) on shared lambda failed (continuing)", stmt_id, exc_info=True)
+
+    # Count remaining per-gateway invoke grants. If any survive, another gateway
+    # still needs the function — keep it. Also prune any now-orphaned statements
+    # so the policy stays clean for the next deploy.
+    try:
+        _prune_orphaned_lambda_permissions(lambda_client, function_name)
+        pol_raw = lambda_client.get_policy(FunctionName=function_name).get("Policy")
+        statements = json.loads(pol_raw).get("Statement", []) or []
+    except Exception as e:  # noqa: BLE001
+        if is_error(e, "ResourceNotFoundException", "ResourceNotFound"):
+            return f"Shared tool Lambda {function_name} already absent"
+        # Can't read the policy (e.g. GetPolicy denied): DON'T risk deleting a
+        # Lambda other gateways may need. Leave it in place.
+        return f"Shared tool Lambda {function_name} kept (policy unreadable: {type(e).__name__})"
+
+    remaining = [s for s in statements if (s.get("Sid") or "").startswith("AllowAgentCoreInvoke-")]
+    if remaining:
+        return f"Shared tool Lambda {function_name} kept ({len(remaining)} other gateway grant(s) remain)"
+    try:
+        lambda_client.delete_function(FunctionName=function_name)
+        return f"Shared tool Lambda {function_name} deleted (last gateway released it)"
+    except Exception as e:  # noqa: BLE001
+        if is_error(e, "ResourceNotFoundException"):
+            return f"Shared tool Lambda {function_name} already absent"
+        return f"Shared tool Lambda delete error: {e}"
 
 
 def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: dict | None = None) -> list[str]:
@@ -3183,11 +3276,22 @@ def cleanup_gateway_resources(runtime_id: str, region: str, gateway_config: dict
         else:
             cleanup_log.append(f"External IDP ({idp_provider}) — no Cognito cleanup needed")
 
-    # Delete Lambda function
+    # Delete Lambda function. SHARED singleton tool Lambdas
+    # (AgentCoreDynamicTools / AgentCoreCustomerSupportTools) are reused by every
+    # gateway, so they are released by reference count — NOT unconditionally
+    # deleted (Defect C: deleting one kills every other live gateway wired to it).
+    # A per-gateway auto-created Lambda (AgentCoreLambdaTestFunction-* etc.) is not
+    # shared and is deleted outright.
+    lambda_client = None
     try:
         lambda_client = _create_lambda_client(region)
-        lambda_client.delete_function(FunctionName=lambda_name)
-        cleanup_log.append(f"Lambda {lambda_name} deleted")
+        if lambda_name in _SHARED_TOOL_LAMBDAS:
+            gw_name = gateway_config.get("gateway_name")
+            gw_role_name = f"AgentCoreGateway-{gw_name}" if gw_name else None
+            cleanup_log.append(_release_shared_tool_lambda(lambda_client, lambda_name, gw_role_name))
+        else:
+            lambda_client.delete_function(FunctionName=lambda_name)
+            cleanup_log.append(f"Lambda {lambda_name} deleted")
     except Exception as e:
         if not is_error(e, "ResourceNotFoundException"):
             cleanup_log.append(f"Lambda delete error: {e}")
@@ -3654,6 +3758,60 @@ def _default_lambda_tool_schema(function_arn: str) -> dict:
     }
 
 
+def _openapi_target_cred_config(agentcore_ctrl, target: dict, base_name: str) -> dict | None:
+    """Pick the outbound credential provider for an OpenAPI ``targets[]`` entry.
+
+    OpenAPI targets are arbitrary external HTTP APIs, so ``GATEWAY_IAM_ROLE``
+    (SigV4) is INVALID for them (Defect B). Valid options:
+
+      * ``none`` / unset  → return ``None`` (public spec — omit the block).
+      * ``api_key``       → API_KEY provider from a pre-minted ``secret_arn``.
+      * ``oauth2_client_credentials`` → OAUTH provider from a pre-minted
+        ``oauth_provider_arn``.
+
+    The multi-target modal currently collects only the spec (public is the
+    default), so ``None`` is the common path; the auth branches are honored when
+    a richer payload supplies them (keeps parity with the connector OpenAPI path).
+    """
+    auth_type = (target.get("auth_type") or target.get("authType") or "none").lower()
+    if auth_type in ("", "none"):
+        return None
+    if auth_type == "api_key":
+        secret_arn = target.get("secret_arn") or target.get("secretArn")
+        if not secret_arn:
+            logger.warning(
+                "OpenAPI target %s requests api_key auth but has no secret_arn; deploying as public",
+                base_name,
+            )
+            return None
+        provider_arn = _ensure_api_key_credential_provider(agentcore_ctrl, f"openapi-{base_name}", secret_arn=secret_arn)
+        descriptor = {
+            "parameter_name": target.get("credential_parameter_name") or target.get("credentialParameterName"),
+            "location": target.get("credential_location") or target.get("credentialLocation"),
+            "prefix": target.get("credential_prefix") or target.get("credentialPrefix"),
+        }
+        return _mcp_api_key_cred_config(provider_arn, descriptor)
+    if auth_type in ("oauth2_client_credentials", "oauth"):
+        provider_arn = target.get("oauth_provider_arn") or target.get("oauthProviderArn")
+        if not provider_arn:
+            logger.warning(
+                "OpenAPI target %s requests oauth but has no oauth_provider_arn; deploying as public",
+                base_name,
+            )
+            return None
+        return {
+            "credentialProviderType": "OAUTH",
+            "credentialProvider": {
+                "oauthCredentialProvider": {
+                    "providerArn": provider_arn,
+                    "scopes": target.get("scopes") or [],
+                }
+            },
+        }
+    logger.warning("OpenAPI target %s has unsupported auth_type %r; deploying as public", base_name, auth_type)
+    return None
+
+
 def _deploy_config_targets(
     agentcore_ctrl,
     gateway_id: str,
@@ -3720,8 +3878,16 @@ def _deploy_config_targets(
                 "gatewayIdentifier": gateway_id,
                 "name": base_name,
                 "targetConfiguration": {"mcp": {"openApiSchema": openapi_schema}},
-                "credentialProviderConfigurations": [{"credentialProviderType": "GATEWAY_IAM_ROLE"}],
             }
+            # An OpenAPI target is an external HTTP API, NOT an AWS-native target:
+            # GATEWAY_IAM_ROLE (SigV4) is invalid for it (AgentCore rejects with
+            # "IamCredentialProvider is required for openApiSchema targets" — Defect
+            # B). Valid providers are API_KEY / OAUTH, or none at all for a public
+            # spec. The modal collects only the spec, so the default is public
+            # (omit the block); api_key/oauth are honored if present in the payload.
+            cred_cfg = _openapi_target_cred_config(agentcore_ctrl, target, base_name)
+            if cred_cfg is not None:
+                create_params["credentialProviderConfigurations"] = [cred_cfg]
             _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, base_name, create_params)
             created_target_names.append(base_name)
             logger.info("Deployed openapi gateway target %s", base_name)
@@ -3747,6 +3913,9 @@ def _deploy_config_targets(
                 "gatewayIdentifier": gateway_id,
                 "name": base_name,
                 "targetConfiguration": {"mcp": {"smithyModel": {"inlinePayload": model_content}}},
+                # Smithy models front AWS SDK services (e.g. DynamoDB): they ARE
+                # AWS-native, so GATEWAY_IAM_ROLE (SigV4 signed by the gateway
+                # execution role) is the correct provider here — unlike openapi.
                 "credentialProviderConfigurations": [{"credentialProviderType": "GATEWAY_IAM_ROLE"}],
             }
             _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, base_name, create_params)

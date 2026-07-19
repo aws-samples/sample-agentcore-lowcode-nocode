@@ -213,6 +213,14 @@ def _create_step_role(
                     "lambda:InvokeFunction",
                     "lambda:AddPermission",
                     "lambda:RemovePermission",
+                    # GetPolicy is REQUIRED by _prune_orphaned_lambda_permissions:
+                    # without it the prune's GetPolicy call is implicitly denied,
+                    # the bare except swallows it, and no dangling gateway-role
+                    # principal is ever removed — so a shared tool Lambda reused
+                    # by a new gateway fails AddPermission with "invalid principal"
+                    # forever (matrix-run Defect A; the root cause of the
+                    # multi-gateway / multi-target deploy failures).
+                    "lambda:GetPolicy",
                 ],
                 resources=[f"arn:aws:lambda:{stack.region}:{stack.account}:function:AgentCore*"],
             )

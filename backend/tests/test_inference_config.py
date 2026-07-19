@@ -1,6 +1,7 @@
 """Guard: Converse inferenceConfig must omit `temperature` for models that
 reject it (Sonnet-5+/Opus-5+/Fable/Mythos), else CustomerFacing generators
 (agent + tool) fail with ValidationException 'temperature is deprecated'."""
+
 from app.services.agent_generator import _inference_config as agen_cfg
 from app.services.tool_generator import _inference_config as tool_cfg
 

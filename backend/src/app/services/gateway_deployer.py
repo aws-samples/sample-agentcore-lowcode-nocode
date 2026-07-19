@@ -2846,6 +2846,25 @@ def deploy_gateway(
             connector_credential_providers = connector_credential_providers + mcp_credential_providers
             connector_secret_arns = connector_secret_arns + mcp_secret_arns
 
+        # Step 4e: Deploy explicit gateway_config.targets of the NON-MCP families
+        # (openapi / lambda / smithy) as individual gateway targets on THIS same
+        # gateway. This is what lets a user wire e.g. two MCP servers + a Lambda +
+        # an OpenAPI spec to one gateway node: the mcp_server entries flow through
+        # external_mcp_servers above, and the rest flow here. Each gets a unique
+        # name. mcp_server entries present in `targets` are skipped by the helper
+        # (already handled) to avoid double-deploy.
+        config_targets = gateway_config.get("targets") or []
+        _config_target_families = {(t or {}).get("type") for t in config_targets}
+        _has_crawled_config_target = bool(_config_target_families & {"openapi", "smithy"})
+        if config_targets:
+            _deploy_config_targets(
+                agentcore_ctrl,
+                gateway["gatewayId"],
+                region,
+                config_targets,
+                gateway_role_arn=gateway.get("roleArn", ""),
+            )
+
         # Step 5: Synchronize NON-LAMBDA targets (OpenAPI / external MCP) so their
         # tools are crawled into the servable MCP plane. Bug 134:
         # synchronize_gateway_targets REQUIRES a targetIdList (the old call omitted
@@ -2854,7 +2873,13 @@ def deploy_gateway(
         # tools directly. Connector (OpenAPI) targets MUST be crawled regardless of
         # the semantic-search toggle, so we always sync the non-lambda set whenever
         # any crawled target exists (or semantic search was explicitly requested).
-        if connectors or external_mcp_servers or mcp_server_runtime_arn or gateway_config.get("semanticSearchEnabled"):
+        if (
+            connectors
+            or external_mcp_servers
+            or mcp_server_runtime_arn
+            or _has_crawled_config_target
+            or gateway_config.get("semanticSearchEnabled")
+        ):
             try:
                 _sync_ids = []
                 for _t in _get_targets_from_response(
@@ -3565,3 +3590,175 @@ def _deploy_external_mcp_targets(
         raise
 
     return {"credential_provider_names": created_providers, "secret_arns": created_secrets}
+
+
+def _grant_gateway_invoke_on_lambda(region: str, function_arn: str, gateway_role_arn: str) -> None:
+    """Grant the gateway execution role ``lambda:InvokeFunction`` on a
+    user-supplied Lambda ARN (idempotent, per-role StatementId).
+
+    Mirrors the grant `_create_or_update_lambda` applies to our managed tool
+    Lambdas, but targets a function we did NOT create (a raw ARN from a gateway
+    ``lambda`` target). Best-effort on propagation races; a conflicting statement
+    (already granted) is treated as success.
+    """
+    if not (function_arn and gateway_role_arn):
+        return
+    lambda_client = _create_lambda_client(region)
+    role_name = gateway_role_arn.rsplit("/", 1)[-1]
+    # PRUNE first: a prior (now-deleted) gateway role can leave a dangling
+    # principal (AROA...) in this function's resource policy, which makes EVERY
+    # subsequent add_permission reject with "The provided principal was invalid"
+    # — even a valid one. This is the root cause of multi-gateway deploy
+    # failures against a shared/reused Lambda (matches the managed-Lambda path).
+    _prune_orphaned_lambda_permissions(lambda_client, function_arn)
+    stmt_id = re.sub(r"[^A-Za-z0-9_-]", "-", f"AllowAgentCoreInvoke-{role_name}")[:100]
+    for attempt in range(8):
+        try:
+            lambda_client.add_permission(
+                FunctionName=function_arn,
+                StatementId=stmt_id,
+                Action="lambda:InvokeFunction",
+                Principal=gateway_role_arn,
+            )
+            logger.info("Granted %s invoke on user Lambda %s", role_name, _safe_log_token(function_arn))
+            return
+        except lambda_client.exceptions.ResourceConflictException:
+            return  # already permitted — fine
+        except lambda_client.exceptions.InvalidParameterValueException as e:
+            if "principal" not in str(e).lower() or attempt == 7:
+                raise
+            time.sleep(8)
+
+
+def _default_lambda_tool_schema(function_arn: str) -> dict:
+    """Build a generic single-tool schema for a bare Lambda ARN target.
+
+    AgentCore's ``McpLambdaTargetConfiguration`` REQUIRES a ``toolSchema``, but a
+    gateway ``lambda`` target only carries the function ARN. Derive a passthrough
+    tool named after the function that accepts a free-form object payload so the
+    target is valid and invocable.
+    """
+    fn_name = function_arn.rsplit(":function:", 1)[-1].split(":")[0] or "invoke"
+    tool_name = re.sub(r"[^a-zA-Z0-9_-]", "_", fn_name)[:60] or "invoke"
+    return {
+        "inlinePayload": [
+            {
+                "name": tool_name,
+                "description": f"Invoke the {fn_name} Lambda function.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                },
+            }
+        ]
+    }
+
+
+def _deploy_config_targets(
+    agentcore_ctrl,
+    gateway_id: str,
+    region: str,
+    targets: list[dict],
+    gateway_role_arn: str = "",
+    name_prefix: str = "cfgtgt",
+) -> dict:
+    """Deploy a mixed list of gateway ``targets`` (openapi / lambda / smithy) —
+    all on the SAME gateway — creating one gateway target per entry.
+
+    This is the multi-target counterpart to ``_deploy_connector_targets`` /
+    ``_deploy_external_mcp_targets``. It handles the NON-MCP families (mcp_server
+    entries are wired via ``external_mcp_servers``):
+
+      * ``lambda``  → ``targetConfiguration.mcp.lambda`` (+ gateway-role invoke
+        grant on the user-supplied ARN), using a generic passthrough toolSchema.
+      * ``openapi`` → ``targetConfiguration.mcp.openApiSchema`` (inline / staged),
+        mirroring the connector OpenAPI path (no credential provider — public /
+        gateway-IAM specs; auth'd specs should use the connector path).
+      * ``smithy``  → ``targetConfiguration.mcp.smithyModel`` from inline content.
+
+    Each target gets a UNIQUE ``name`` (``<prefix>-<family>-<index>``) on the
+    gateway. Returns ``{"target_names": [...]}`` for logging / assertions.
+    Unknown / unsupported families are skipped with a warning (never fatal).
+    """
+    created_target_names: list[str] = []
+
+    for idx, raw in enumerate(targets or []):
+        target = raw or {}
+        ttype = target.get("type") or target.get("target_type") or ""
+        base_name = re.sub(r"[^a-zA-Z0-9-]", "-", f"{name_prefix}-{ttype or 'x'}-{idx}")[:48]
+
+        if ttype == "lambda":
+            function_arn = target.get("function_arn") or target.get("functionArn")
+            if not function_arn:
+                logger.warning("Gateway lambda target #%d has no function_arn; skipping", idx)
+                continue
+            if gateway_role_arn:
+                _grant_gateway_invoke_on_lambda(region, function_arn, gateway_role_arn)
+            tool_schema = (
+                target.get("tool_schema") or target.get("toolSchema") or _default_lambda_tool_schema(function_arn)
+            )
+            create_params = {
+                "gatewayIdentifier": gateway_id,
+                "name": base_name,
+                "targetConfiguration": {"mcp": {"lambda": {"lambdaArn": function_arn, "toolSchema": tool_schema}}},
+                "credentialProviderConfigurations": [{"credentialProviderType": "GATEWAY_IAM_ROLE"}],
+            }
+            _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, base_name, create_params)
+            created_target_names.append(base_name)
+            logger.info("Deployed lambda gateway target %s -> %s", base_name, _safe_log_token(function_arn))
+
+        elif ttype == "openapi":
+            spec_inline = target.get("spec_content") or target.get("specContent")
+            spec_url = target.get("spec_url") or target.get("specUrl")
+            if not spec_inline:
+                if not spec_url:
+                    logger.warning("Gateway openapi target #%d has no spec_url/spec_content; skipping", idx)
+                    continue
+                spec_inline = _fetch_openapi_spec(spec_url)
+            openapi_schema = _build_openapi_schema(spec_inline, connector_id=base_name, region=region)
+            create_params = {
+                "gatewayIdentifier": gateway_id,
+                "name": base_name,
+                "targetConfiguration": {"mcp": {"openApiSchema": openapi_schema}},
+                "credentialProviderConfigurations": [{"credentialProviderType": "GATEWAY_IAM_ROLE"}],
+            }
+            _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, base_name, create_params)
+            created_target_names.append(base_name)
+            logger.info("Deployed openapi gateway target %s", base_name)
+
+        elif ttype == "smithy":
+            # AgentCore's smithyModel is an inline/staged API schema. The bare
+            # model_name ('dynamodb') carries no schema, so require inline content
+            # (model_content / spec_content) — skip loudly otherwise.
+            model_content = (
+                target.get("model_content")
+                or target.get("modelContent")
+                or target.get("spec_content")
+                or target.get("specContent")
+            )
+            if not model_content:
+                logger.warning(
+                    "Gateway smithy target #%d ('%s') has no inline model content; skipping",
+                    idx,
+                    target.get("model_name") or target.get("modelName"),
+                )
+                continue
+            create_params = {
+                "gatewayIdentifier": gateway_id,
+                "name": base_name,
+                "targetConfiguration": {"mcp": {"smithyModel": {"inlinePayload": model_content}}},
+                "credentialProviderConfigurations": [{"credentialProviderType": "GATEWAY_IAM_ROLE"}],
+            }
+            _create_gateway_target_with_retry(agentcore_ctrl, gateway_id, base_name, create_params)
+            created_target_names.append(base_name)
+            logger.info("Deployed smithy gateway target %s", base_name)
+
+        elif ttype == "mcp_server":
+            # mcp_server entries are wired via external_mcp_servers (secret hygiene
+            # + SSRF validation live there); ignore here to avoid double-deploy.
+            continue
+
+        else:
+            logger.warning("Unknown gateway target family '%s' (#%d); skipping", ttype, idx)
+
+    return {"target_names": created_target_names}

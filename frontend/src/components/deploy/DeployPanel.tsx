@@ -22,6 +22,7 @@ import { DeployProgress } from './DeployProgress';
 import { DeployResult } from './DeployResult';
 import { DeployActions } from './DeployActions';
 import { useDeployment } from './useDeployment';
+import { mapGatewayDeployTargets } from '../../utils/gatewayConfig';
 import { ConfirmDialog } from '../common/ConfirmDialog';
 import { ChatInterface } from './ChatInterface';
 
@@ -134,30 +135,20 @@ export function DeployPanel({
     return WORKFLOW_TEMPLATES.find((t) => t.id === templateId) || null;
   }, [templateId]);
 
-  const externalMcpServers = useMemo(() => {
-    if (!gatewayConfig || gatewayConfig.targetType !== 'mcp_server') return undefined;
-    const tc = gatewayConfig.targetConfig as { serverId?: string; serverUrl?: string; customName?: string; authType?: string; endpointVars?: Record<string, string>; apiKey?: string; oauth?: { clientId?: string; clientSecret?: string; discoveryUrl?: string; scopes?: string[] } } | undefined;
-    if (!tc?.serverId) return undefined;
-
-    const isCustom = tc.serverId === '__custom__';
-    // A custom target sends a raw endpoint + auth_type (no catalog id); the
-    // backend synthesizes the entry and SSRF-validates the URL.
-    if (isCustom && !tc.serverUrl) return undefined;
-    const entry: Record<string, unknown> = isCustom
-      ? { endpoint: tc.serverUrl, auth_type: tc.authType || 'none', name: tc.customName || 'custom-mcp' }
-      : { server_id: tc.serverId };
-
-    if (tc.endpointVars && Object.keys(tc.endpointVars).length) entry.endpoint_vars = tc.endpointVars;
-    if (tc.apiKey) entry.secret_value = tc.apiKey;
-    if (tc.oauth?.clientId) {
-      entry.oauth = {
-        client_id: tc.oauth.clientId,
-        client_secret: tc.oauth.clientSecret,
-        discovery_url: tc.oauth.discoveryUrl,
-        scopes: tc.oauth.scopes,
-      };
-    }
-    return [entry];
+  // Split the gateway's mixed targets[] (falling back to the single legacy
+  // target) into the two arrays the deploy path needs: `externalMcpServers`
+  // (mcp_server family, secret-carrying) and `gatewayTargets` (openapi / lambda
+  // / smithy) which we thread into gatewayConfig.targets for the backend loop.
+  const { externalMcpServers, gatewayConfigForDeploy } = useMemo(() => {
+    if (!gatewayConfig) return { externalMcpServers: undefined, gatewayConfigForDeploy: gatewayConfig };
+    const { externalMcpServers: mcp, gatewayTargets } = mapGatewayDeployTargets(gatewayConfig);
+    return {
+      externalMcpServers: mcp.length > 0 ? mcp : undefined,
+      // Backend deploy loop reads gateway_config.targets for the non-MCP
+      // families. Overwrite with just those so mcp_server entries (handled via
+      // externalMcpServers) aren't double-deployed.
+      gatewayConfigForDeploy: { ...gatewayConfig, targets: gatewayTargets },
+    };
   }, [gatewayConfig]);
 
   const [isDownloadingCfn, setIsDownloadingCfn] = useState(false);
@@ -182,7 +173,7 @@ export function DeployPanel({
     nodeId,
     deploymentMode,
     connectedTools,
-    gatewayConfig: gatewayConfig || null,
+    gatewayConfig: gatewayConfigForDeploy || null,
     externalMcpServers,
     gatewayTools,
     templateId: templateId || null,
@@ -233,7 +224,7 @@ export function DeployPanel({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          nodeId, config: fullConfig, connectedTools, gatewayConfig, gatewayTools, templateId,
+          nodeId, config: fullConfig, connectedTools, gatewayConfig: gatewayConfigForDeploy, gatewayTools, templateId,
           identityConfig: (identityConfig?.oauth2Config || identityConfig?.mode === 'per_agent') ? {
             mode: identityConfig?.mode ?? 'shared',
             provider: identityConfig?.oauth2Config?.provider,
@@ -285,7 +276,7 @@ export function DeployPanel({
     } finally {
       setIsExportingPython(false);
     }
-  }, [config, nodeId, connectedTools, gatewayConfig, externalMcpServers, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, observabilityConfig, a2aConfig, identityConfig, resourceTagState, setDeploymentStatus]);
+  }, [config, nodeId, connectedTools, gatewayConfigForDeploy, externalMcpServers, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, observabilityConfig, a2aConfig, identityConfig, resourceTagState, setDeploymentStatus]);
 
   const handleDownloadCfn = useCallback(async () => {
     if (!config || !nodeId) return;
@@ -303,7 +294,7 @@ export function DeployPanel({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          nodeId, config: fullConfig, connectedTools, gatewayConfig, gatewayTools, templateId,
+          nodeId, config: fullConfig, connectedTools, gatewayConfig: gatewayConfigForDeploy, gatewayTools, templateId,
           identityConfig: (identityConfig?.oauth2Config || identityConfig?.mode === 'per_agent') ? {
             mode: identityConfig?.mode ?? 'shared',
             provider: identityConfig?.oauth2Config?.provider,
@@ -355,7 +346,7 @@ export function DeployPanel({
     } finally {
       setIsDownloadingCfn(false);
     }
-  }, [config, nodeId, connectedTools, gatewayConfig, externalMcpServers, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, identityConfig, a2aConfig, observabilityConfig, resourceTagState, setDeploymentStatus]);
+  }, [config, nodeId, connectedTools, gatewayConfigForDeploy, externalMcpServers, gatewayTools, templateId, customTools, connectors, memoryConfig, evaluationConfig, policyConfig, guardrailsConfig, mcpServerConfig, knowledgeBaseConfig, identityConfig, a2aConfig, observabilityConfig, resourceTagState, setDeploymentStatus]);
 
   const handlePublishToRegistry = useCallback(async () => {
     if (!config) return;

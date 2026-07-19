@@ -90,8 +90,19 @@ export interface VPCConfiguration {
 
 export interface GatewayConfiguration {
   name: string;
+  /**
+   * Single-target legacy fields. Kept for backward compatibility with saved
+   * canvases and existing tests. When `targets` is present and non-empty it is
+   * the source of truth and these are ignored; otherwise they are the target.
+   */
   targetType: GatewayTargetType;
   targetConfig: GatewayTargetConfig;
+  /**
+   * Multiple targets of different families on ONE gateway. Each entry is a
+   * discriminated union on `.type`. When present and non-empty this supersedes
+   * the single `targetType`/`targetConfig` pair above.
+   */
+  targets?: GatewayTargetConfig[];
   enableSemanticSearch: boolean;
   apiKeyCredentials?: APIKeyCredentials;
   oauth2Credentials?: OAuth2Credentials;

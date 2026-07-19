@@ -68,7 +68,7 @@ After deployment completes, the script prints two URLs:
 You can retrieve these at any time from the CloudFormation stack outputs (`CloudFrontUrl`, `ApiGatewayUrl`, `S3BucketName`):
 
 ```bash
-aws cloudformation describe-stacks --stack-name agentcore-workflow-dev \
+aws cloudformation describe-stacks --stack-name agentcore-workflow-dev --region us-east-1 \
   --query "Stacks[0].Outputs" --output table
 ```
 
@@ -76,23 +76,26 @@ aws cloudformation describe-stacks --stack-name agentcore-workflow-dev \
 
 `COGNITO_USERS` pre-creates Cognito **users** but assigns them to **no group**. Group membership grants capability **scopes**, so a brand-new user signs in effectively read-only (browse works; Clone/publish are disabled) until you assign a group:
 
+> **Always pass `--region us-east-1`** (the stack is us-east-1). Without it the
+> AWS CLI uses your shell/profile default region and the pool lookup returns
+> empty, so `$POOL_ID` is blank and `admin-add-user-to-group` fails with
+> `Invalid length for parameter UserPoolId, value: 0`.
+
 ```bash
-POOL_ID=$(aws cognito-idp list-user-pools --max-results 40 \
+POOL_ID=$(aws cognito-idp list-user-pools --max-results 40 --region us-east-1 \
   --query "UserPools[?Name=='agentcore-workflow-dev-users'].Id | [0]" --output text)
 
 # Full access (all scopes) + admin UI + registry approver:
-aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
-  --username you@example.com --group-name g-admins-super
-aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
-  --username you@example.com --group-name t-admin
-aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
-  --username you@example.com --group-name registry-admin
+for g in g-admins-super t-admin registry-admin; do
+  aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+    --username you@example.com --group-name "$g" --region us-east-1
+done
 
 # ...or a standard end-user who can build/deploy/invoke + browse & clone the registry:
-aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
-  --username you@example.com --group-name g-users-default
-aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
-  --username you@example.com --group-name t-user
+for g in g-users-default t-user; do
+  aws cognito-idp admin-add-user-to-group --user-pool-id "$POOL_ID" \
+    --username you@example.com --group-name "$g" --region us-east-1
+done
 ```
 
 **Sign out and back in** after changing groups — scopes are read from the ID token at sign-in. See [Personas](docs/PERSONAS.md) and [Registry & RBAC](docs/REGISTRY_AND_RBAC.md) for the full model.

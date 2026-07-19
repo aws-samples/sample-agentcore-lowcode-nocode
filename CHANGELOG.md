@@ -50,6 +50,37 @@ IdPs / SaaS creds / customer VPC infra, each code-cited). Fixes:
   CloudWatch target (not just the `eval_<id>` name heuristic)
 - `list_gateways` conflict recovery is paginated (multi-page accounts)
 
+### Added — multi-target gateways & custom MCP endpoints
+- One gateway node can now carry **multiple targets of different families**
+  (Lambda ARNs, external MCP servers, OpenAPI specs, Smithy models) via a
+  repeatable target-array editor; the deploy creates one gateway target per
+  entry with family-appropriate outbound credentials
+- The MCP-server picker gained a **Custom endpoint…** option (any https MCP
+  URL with none / API-key / OAuth2-CC / IAM SigV4 outbound auth, SSRF-validated)
+- Generate Agent emits gateway nodes with the required `targetType`/
+  `targetConfig` (deterministic spec normalization — no more "Target Type is
+  required" errors after Apply to Canvas)
+
+### Fixed — gateway deploy/teardown hardening (live-verified end-to-end)
+- **"AddPermission … The provided principal was invalid"** on multi-target and
+  multi-gateway deploys: the orphaned-permission prune was inert because the
+  gateway step role lacked `lambda:GetPolicy`; granted, and the prune now warns
+  instead of silently swallowing AccessDenied
+- OpenAPI targets in the multi-target path no longer request
+  `GATEWAY_IAM_ROLE` (AgentCore rejects it); public specs omit the credential
+  block, API-key/OAuth are honored
+- Shared singleton tool Lambdas (`AgentCoreDynamicTools` /
+  `AgentCoreCustomerSupportTools`) are released by **reference count** on every
+  teardown path (user delete, failure auto-cleanup, manifest) — tearing down
+  one gateway no longer breaks other live gateways sharing the Lambda, and the
+  Lambda is deleted when the last gateway releases it (including the
+  empty-policy vs missing-function `ResourceNotFoundException` ambiguity)
+- Failed gateway deploys release everything they provisioned (no orphan
+  gateway/role/Cognito/grants)
+- Bedrock Converse calls omit `temperature` for Claude Sonnet 5+ / Opus 5 /
+  Fable models (param deprecated → ValidationException broke Generate Agent)
+- Chat panel always renders the message input on a fresh session
+
 ## [0.1.0] - 2026-07-17
 
 Initial public sample: visual drag-and-drop workflow builder for Amazon Bedrock

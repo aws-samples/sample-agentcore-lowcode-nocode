@@ -9,7 +9,7 @@ urllib3
 # OpenTelemetry SDK + OTLP HTTP exporter for platform-level OTEL.
 # Used by services/_otel_platform.py to emit spans for every API request
 # the workflow Lambda + deployment Lambda + step handlers receive.
-opentelemetry-api>=1.41.0
+opentelemetry-api>=1.43.0
 opentelemetry-sdk>=1.41.0
 opentelemetry-exporter-otlp-proto-http>=1.41.0
 opentelemetry-instrumentation-botocore>=0.62b0

@@ -715,6 +715,15 @@ def build_deployment_lambda(
                 "lambda:GetFunction",
                 "lambda:InvokeFunction",
                 "lambda:DeleteFunction",
+                # Required by _release_shared_tool_lambda (Defect C): the manifest
+                # teardown ref-counts SHARED tool Lambdas (AgentCoreDynamicTools /
+                # AgentCoreCustomerSupportTools) — it must read the resource policy
+                # (GetPolicy) and drop this gateway's AllowAgentCoreInvoke-<role>
+                # statement (RemovePermission). Without these the release helper
+                # fail-safes to "kept": grants are never pruned and the Lambda
+                # leaks at refcount zero.
+                "lambda:GetPolicy",
+                "lambda:RemovePermission",
             ],
             resources=[
                 f"arn:aws:lambda:{stack.region}:{stack.account}:function:AgentCore*",

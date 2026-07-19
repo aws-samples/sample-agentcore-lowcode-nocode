@@ -813,6 +813,13 @@ def _create_step_role(
                 actions=[
                     "lambda:DeleteFunction",
                     "lambda:GetFunction",
+                    # Required by _release_shared_tool_lambda (Defect C): the
+                    # failure-path auto-cleanup ref-counts SHARED tool Lambdas —
+                    # it reads the resource policy and drops this gateway's
+                    # invoke grant. Without these it fail-safes to "kept" and
+                    # the shared Lambda leaks with dangling grants.
+                    "lambda:GetPolicy",
+                    "lambda:RemovePermission",
                 ],
                 resources=[f"arn:aws:lambda:{stack.region}:{stack.account}:function:AgentCore*"],
             )

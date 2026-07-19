@@ -91,8 +91,9 @@ def test_shared_lambda_kept_when_other_gateway_grant_remains():
     lam = MagicMock()
     # After A's statement is removed, B's grant still remains.
     lam.get_policy.return_value = {"Policy": _policy("AllowAgentCoreInvoke-AgentCoreGateway-B")}
-    with patch.object(gd, "_prune_orphaned_lambda_permissions", return_value=0), patch.object(
-        gd, "_create_iam_client", return_value=MagicMock()
+    with (
+        patch.object(gd, "_prune_orphaned_lambda_permissions", return_value=0),
+        patch.object(gd, "_create_iam_client", return_value=MagicMock()),
     ):
         msg = gd._release_shared_tool_lambda(lam, "AgentCoreDynamicTools", "AgentCoreGateway-A")
     lam.remove_permission.assert_called_once_with(
@@ -107,8 +108,9 @@ def test_shared_lambda_deleted_when_last_gateway_releases():
     """When no invoke grants remain, the shared Lambda is finally deleted."""
     lam = MagicMock()
     lam.get_policy.return_value = {"Policy": _policy()}  # no statements left
-    with patch.object(gd, "_prune_orphaned_lambda_permissions", return_value=0), patch.object(
-        gd, "_create_iam_client", return_value=MagicMock()
+    with (
+        patch.object(gd, "_prune_orphaned_lambda_permissions", return_value=0),
+        patch.object(gd, "_create_iam_client", return_value=MagicMock()),
     ):
         msg = gd._release_shared_tool_lambda(lam, "AgentCoreDynamicTools", "AgentCoreGateway-A")
     lam.delete_function.assert_called_once_with(FunctionName="AgentCoreDynamicTools")
@@ -120,8 +122,9 @@ def test_shared_lambda_not_deleted_when_policy_unreadable():
     may still need."""
     lam = MagicMock()
     lam.get_policy.side_effect = _client_error("AccessDeniedException", "no getpolicy", "GetPolicy")
-    with patch.object(gd, "_prune_orphaned_lambda_permissions", return_value=0), patch.object(
-        gd, "_create_iam_client", return_value=MagicMock()
+    with (
+        patch.object(gd, "_prune_orphaned_lambda_permissions", return_value=0),
+        patch.object(gd, "_create_iam_client", return_value=MagicMock()),
     ):
         msg = gd._release_shared_tool_lambda(lam, "AgentCoreDynamicTools", "AgentCoreGateway-A")
     lam.delete_function.assert_not_called()
@@ -134,10 +137,11 @@ def test_cleanup_uses_refcount_release_for_shared_lambda():
     lam = MagicMock()
     ctrl = MagicMock()
     ctrl.list_gateway_targets.return_value = {"items": []}
-    with patch.object(gd, "_create_agentcore_control_client", return_value=ctrl), patch.object(
-        gd, "_create_lambda_client", return_value=lam
-    ), patch.object(gd, "_release_shared_tool_lambda", return_value="released") as rel, patch.object(
-        gd, "time", MagicMock()
+    with (
+        patch.object(gd, "_create_agentcore_control_client", return_value=ctrl),
+        patch.object(gd, "_create_lambda_client", return_value=lam),
+        patch.object(gd, "_release_shared_tool_lambda", return_value="released") as rel,
+        patch.object(gd, "time", MagicMock()),
     ):
         gd.cleanup_gateway_resources(
             "rt-x",
@@ -158,9 +162,12 @@ def test_cleanup_hard_deletes_non_shared_lambda():
     lam = MagicMock()
     ctrl = MagicMock()
     ctrl.list_gateway_targets.return_value = {"items": []}
-    with patch.object(gd, "_create_agentcore_control_client", return_value=ctrl), patch.object(
-        gd, "_create_lambda_client", return_value=lam
-    ), patch.object(gd, "_release_shared_tool_lambda") as rel, patch.object(gd, "time", MagicMock()):
+    with (
+        patch.object(gd, "_create_agentcore_control_client", return_value=ctrl),
+        patch.object(gd, "_create_lambda_client", return_value=lam),
+        patch.object(gd, "_release_shared_tool_lambda") as rel,
+        patch.object(gd, "time", MagicMock()),
+    ):
         gd.cleanup_gateway_resources(
             "rt-x",
             "us-east-1",

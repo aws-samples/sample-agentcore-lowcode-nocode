@@ -3138,8 +3138,7 @@ def deploy_gateway(
                     "gateway_id": _leaked_gw_id,
                     "gateway_name": locals().get("gateway_name"),
                     "client_info": locals().get("client_info"),
-                    "lambda_function_name": locals().get("lambda_function_name")
-                    or "AgentCoreLambdaTestFunction",
+                    "lambda_function_name": locals().get("lambda_function_name") or "AgentCoreLambdaTestFunction",
                     "custom_tool_lambdas": locals().get("custom_tool_lambdas") or [],
                     "custom_tool_roles": locals().get("custom_tool_roles") or [],
                     "connector_credential_providers": locals().get("connector_credential_providers") or [],
@@ -3784,7 +3783,9 @@ def _openapi_target_cred_config(agentcore_ctrl, target: dict, base_name: str) ->
                 base_name,
             )
             return None
-        provider_arn = _ensure_api_key_credential_provider(agentcore_ctrl, f"openapi-{base_name}", secret_arn=secret_arn)
+        provider_arn = _ensure_api_key_credential_provider(
+            agentcore_ctrl, f"openapi-{base_name}", secret_arn=secret_arn
+        )
         descriptor = {
             "parameter_name": target.get("credential_parameter_name") or target.get("credentialParameterName"),
             "location": target.get("credential_location") or target.get("credentialLocation"),

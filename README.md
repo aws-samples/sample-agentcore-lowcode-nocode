@@ -141,7 +141,6 @@ Integration tests run against a real deployed stack — see [Development](docs/D
 | [RBAC Rollout](docs/RBAC_ROLLOUT.md) | Advisory → enforce rollout procedure |
 | [Costs](docs/COSTS.md) | AWS resources created + infrastructure pricing estimates |
 | [Development](docs/DEVELOPMENT.md) | Local development, full test matrix, tech stack |
-| [Production Readiness](docs/PRODUCTION_READINESS.md) | What's proven live, operational hardening, known limits |
 | [Data Retention](docs/DATA_RETENTION.md) | TTLs, PII posture, audit access |
 | [MCP Catalog](docs/MCP_CATALOG.md) | External MCP catalog servers as Gateway targets |
 | [MCP Gateway Integration](docs/MCP_GATEWAY_INTEGRATION.md) | MCP protocol details for gateway-connected agents |

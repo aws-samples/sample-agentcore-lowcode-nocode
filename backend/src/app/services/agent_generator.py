@@ -34,6 +34,20 @@ AGENT_GENERATOR_MODEL_ID = os.environ.get(
 )
 
 
+def _inference_config(model_id: str, max_tokens: int, temperature: float) -> dict:
+    """Build a Converse inferenceConfig, omitting temperature for models that
+    reject it. Claude Sonnet 5 / Opus 5 and later return
+    ``ValidationException: temperature is deprecated for this model`` — those
+    models only accept maxTokens here. (Mirrors the harness_deployer guard.)"""
+    cfg: dict = {"maxTokens": max_tokens}
+    mid = (model_id or "").lower()
+    if not any(
+        m in mid for m in ("claude-sonnet-5", "claude-opus-5", "claude-haiku-5", "claude-fable", "claude-mythos")
+    ):
+        cfg["temperature"] = temperature
+    return cfg
+
+
 # ---------------------------------------------------------------------------
 # Prompts
 # ---------------------------------------------------------------------------
@@ -380,7 +394,7 @@ def generate_canvas(
                 modelId=AGENT_GENERATOR_MODEL_ID,
                 messages=messages,
                 system=[{"text": CLARIFICATION_PROMPT}],
-                inferenceConfig={"maxTokens": 600, "temperature": 0.4},
+                inferenceConfig=_inference_config(AGENT_GENERATOR_MODEL_ID, 600, 0.4),
             )
             text_blocks = resp.get("output", {}).get("message", {}).get("content", [])
             text = next((b.get("text", "") for b in text_blocks if "text" in b), "")
@@ -423,7 +437,7 @@ def generate_canvas(
                 modelId=AGENT_GENERATOR_MODEL_ID,
                 messages=attempt_messages,
                 system=[{"text": GENERATION_PROMPT}],
-                inferenceConfig={"maxTokens": 4000, "temperature": 0.3},
+                inferenceConfig=_inference_config(AGENT_GENERATOR_MODEL_ID, 4000, 0.3),
                 toolConfig={
                     "tools": [_SUBMIT_TOOL],
                     "toolChoice": {"tool": {"name": "submit_canvas"}},

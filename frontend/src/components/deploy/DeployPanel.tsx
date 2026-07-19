@@ -136,9 +136,17 @@ export function DeployPanel({
 
   const externalMcpServers = useMemo(() => {
     if (!gatewayConfig || gatewayConfig.targetType !== 'mcp_server') return undefined;
-    const tc = gatewayConfig.targetConfig as { serverId?: string; endpointVars?: Record<string, string>; apiKey?: string; oauth?: { clientId?: string; clientSecret?: string; discoveryUrl?: string; scopes?: string[] } } | undefined;
+    const tc = gatewayConfig.targetConfig as { serverId?: string; serverUrl?: string; customName?: string; authType?: string; endpointVars?: Record<string, string>; apiKey?: string; oauth?: { clientId?: string; clientSecret?: string; discoveryUrl?: string; scopes?: string[] } } | undefined;
     if (!tc?.serverId) return undefined;
-    const entry: Record<string, unknown> = { server_id: tc.serverId };
+
+    const isCustom = tc.serverId === '__custom__';
+    // A custom target sends a raw endpoint + auth_type (no catalog id); the
+    // backend synthesizes the entry and SSRF-validates the URL.
+    if (isCustom && !tc.serverUrl) return undefined;
+    const entry: Record<string, unknown> = isCustom
+      ? { endpoint: tc.serverUrl, auth_type: tc.authType || 'none', name: tc.customName || 'custom-mcp' }
+      : { server_id: tc.serverId };
+
     if (tc.endpointVars && Object.keys(tc.endpointVars).length) entry.endpoint_vars = tc.endpointVars;
     if (tc.apiKey) entry.secret_value = tc.apiKey;
     if (tc.oauth?.clientId) {

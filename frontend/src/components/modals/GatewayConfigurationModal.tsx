@@ -187,7 +187,10 @@ export function GatewayConfigurationModal({
 
       case 'mcp_server': {
         const mcpCfg = config.targetConfig as MCPServerTargetConfig;
+        const isCustom = mcpCfg.serverId === '__custom__';
         const selected = mcpCatalog.find((s) => s.id === mcpCfg.serverId);
+        // For a catalog entry use its auth_type; for custom use the user's choice.
+        const effectiveAuth = isCustom ? mcpCfg.authType || 'none' : selected?.auth_type;
         // Extract {placeholder} tokens from the selected catalog endpoint.
         const placeholders = selected?.endpoint
           ? Array.from(selected.endpoint.matchAll(/\{([a-zA-Z0-9_]+)\}/g)).map((m) => m[1])
@@ -208,14 +211,50 @@ export function GatewayConfigurationModal({
                   value: s.id,
                   label: `${s.display_name} — ${s.auth_type === 'none' ? 'no auth' : s.auth_type}${s.live_testable ? ' ✓' : ''}`,
                 })),
+                { value: '__custom__', label: 'Custom endpoint…' },
               ]}
               required
-              helpText="Verified external MCP servers wireable as a Gateway target (direct tiers only)."
+              helpText="Pick a verified catalog server, or 'Custom endpoint…' to wire any external MCP server URL (direct tiers only)."
             />
             {selected && (
               <p className="text-[11px] text-gray-500 -mt-2">
                 Endpoint: <span className="font-mono">{selected.endpoint}</span> · tier {selected.tier}
               </p>
+            )}
+            {/* Custom endpoint — raw https MCP server URL + auth type */}
+            {isCustom && (
+              <>
+                <TextField
+                  id="customName"
+                  label="Name (optional)"
+                  value={mcpCfg.customName || ''}
+                  onChange={(value) => updateTargetConfig('customName', value)}
+                  placeholder="my-mcp-server"
+                  helpText="Label for the gateway target; a safe id is derived from it."
+                />
+                <TextField
+                  id="serverUrl"
+                  label="MCP Endpoint URL"
+                  value={mcpCfg.serverUrl || ''}
+                  onChange={(value) => updateTargetConfig('serverUrl', value)}
+                  placeholder="https://your-mcp-host.example.com/mcp"
+                  helpText="Must be https. Validated at deploy (private/link-local/metadata hosts are blocked)."
+                  required
+                />
+                <SelectField
+                  id="customAuthType"
+                  label="Outbound Auth"
+                  value={mcpCfg.authType || 'none'}
+                  onChange={(value) => updateTargetConfig('authType', value)}
+                  options={[
+                    { value: 'none', label: 'None (public server)' },
+                    { value: 'api_key', label: 'API key (Bearer / header)' },
+                    { value: 'oauth2_client_credentials', label: 'OAuth2 client-credentials (M2M)' },
+                    { value: 'iam_sigv4', label: 'IAM SigV4 (AWS-native target)' },
+                  ]}
+                  helpText="How the gateway authenticates outbound to this MCP server."
+                />
+              </>
             )}
             {/* Endpoint placeholders (e.g. a Shopify store domain). */}
             {placeholders.map((token) => (
@@ -232,7 +271,7 @@ export function GatewayConfigurationModal({
               />
             ))}
             {/* Tier-2 API key */}
-            {selected?.auth_type === 'api_key' && (
+            {effectiveAuth === 'api_key' && (
               <TextField
                 id="apiKey"
                 label="API Key"
@@ -244,7 +283,7 @@ export function GatewayConfigurationModal({
               />
             )}
             {/* Tier-3 OAuth client-credentials */}
-            {selected?.auth_type === 'oauth2_client_credentials' && (
+            {effectiveAuth === 'oauth2_client_credentials' && (
               <>
                 <TextField
                   id="oauthClientId" label="OAuth Client ID"

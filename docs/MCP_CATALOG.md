@@ -7,6 +7,13 @@ that can be connected as an AgentCore Gateway `mcp.mcpServer` target. Companion 
 [`MCP_GATEWAY_INTEGRATION.md`](MCP_GATEWAY_INTEGRATION.md) (the authorization
 architecture) and the code catalog `backend/src/app/services/mcp_catalog.py`.
 
+> **Not in the catalog?** The Gateway node's **MCP Server** dropdown also has a
+> **"Custom endpoint…"** option: paste any remote HTTPS MCP endpoint and pick its
+> outbound auth (none / API key / OAuth2 client-credentials / IAM SigV4). The
+> endpoint is SSRF-validated at deploy (https-only, DNS-resolved, private/link-
+> local/metadata ranges blocked) and wired exactly like a catalog entry. Only the
+> direct tiers apply — a stdio-only server still needs a hosted proxy first.
+
 ## The one filter that matters: remote vs stdio
 
 A Gateway target must be a **remotely-hosted HTTPS MCP endpoint**. Most MCP

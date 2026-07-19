@@ -323,3 +323,61 @@ def test_deploy_external_mcp_unknown_id_raises(monkeypatch):
             [{"server_id": "does-not-exist"}],
             owner_sub="alice",
         )
+
+
+def test_deploy_external_mcp_custom_endpoint_no_auth(monkeypatch):
+    """Custom (non-catalog) endpoint: raw https URL + auth_type=none wires a
+    Tier-1 mcpServer target with no credential provider."""
+    captured = _patch_target_capture(monkeypatch)
+    out = gd._deploy_external_mcp_targets(
+        _FakeCtrl(),
+        "gw-1",
+        "us-east-1",
+        [{"endpoint": "https://example.com/mcp", "auth_type": "none", "name": "My MCP"}],
+        owner_sub="alice",
+    )
+    assert len(captured) == 1
+    tc = captured[0]["params"]["targetConfiguration"]["mcp"]["mcpServer"]
+    assert tc["endpoint"] == "https://example.com/mcp"
+    assert "credentialProviderConfigurations" not in captured[0]["params"]
+    assert out["secret_arns"] == []
+
+
+def test_deploy_external_mcp_custom_endpoint_api_key(monkeypatch):
+    """Custom endpoint with auth_type=api_key mints a secret + API_KEY provider."""
+    captured = _patch_target_capture(monkeypatch)
+    out = gd._deploy_external_mcp_targets(
+        _FakeCtrl(),
+        "gw-1",
+        "us-east-1",
+        [{"endpoint": "https://example.com/mcp", "auth_type": "api_key", "secret_value": "sk-x"}],
+        owner_sub="alice",
+    )
+    assert out["secret_arns"] == ["arn:aws:secretsmanager:...:secret:fake"]
+    assert captured[0]["params"]["credentialProviderConfigurations"][0]["credentialProviderType"] == "API_KEY"
+
+
+def test_deploy_external_mcp_custom_endpoint_rejects_non_https(monkeypatch):
+    """A custom endpoint must be https (SSRF/scheme guard)."""
+    _patch_target_capture(monkeypatch)
+    with pytest.raises(Exception, match="https|scheme|URL"):
+        gd._deploy_external_mcp_targets(
+            _FakeCtrl(),
+            "gw-1",
+            "us-east-1",
+            [{"endpoint": "http://insecure.example.com/mcp", "auth_type": "none"}],
+            owner_sub="alice",
+        )
+
+
+def test_deploy_external_mcp_custom_endpoint_rejects_private_host(monkeypatch):
+    """A custom endpoint resolving to a private/metadata host is blocked."""
+    _patch_target_capture(monkeypatch)
+    with pytest.raises(Exception, match="(?i)block|private|disallow|link-local|metadata|network"):
+        gd._deploy_external_mcp_targets(
+            _FakeCtrl(),
+            "gw-1",
+            "us-east-1",
+            [{"endpoint": "https://169.254.169.254/latest/meta-data", "auth_type": "none"}],
+            owner_sub="alice",
+        )

@@ -3463,11 +3463,42 @@ def _deploy_external_mcp_targets(
     try:
         for sel in external_mcp_servers:
             server_id = (sel or {}).get("server_id") or (sel or {}).get("serverId")
-            if not server_id:
-                raise RuntimeError("External MCP selection missing 'server_id'.")
-            entry = get_mcp_server(server_id)
-            if entry is None:
-                raise RuntimeError(f"Unknown MCP server id: {server_id}")
+            raw_endpoint = (sel or {}).get("endpoint") or (sel or {}).get("server_url") or (sel or {}).get("serverUrl")
+
+            # CUSTOM endpoint path: the caller supplied a raw https MCP endpoint
+            # not in the curated catalog. Synthesize an in-memory catalog entry
+            # from the selection's own fields (endpoint + auth_type) instead of
+            # a catalog lookup. The endpoint is SSRF-validated (https-only, DNS-
+            # resolved, private/IMDS ranges blocked) exactly like the OpenAPI
+            # spec-url path. Only the direct tiers are wireable (no adapter).
+            if not server_id and raw_endpoint:
+                custom_auth = (sel.get("auth_type") or sel.get("authType") or "none").lower()
+                if custom_auth not in ("none", "api_key", "oauth2_client_credentials", "iam_sigv4"):
+                    raise RuntimeError(
+                        f"Custom MCP auth_type '{custom_auth}' is not a direct tier "
+                        "(use none / api_key / oauth2_client_credentials / iam_sigv4)."
+                    )
+                validated_endpoint = _validate_outbound_url(raw_endpoint)
+                server_id = "custom-" + re.sub(r"[^a-z0-9]+", "-", (sel.get("name") or "mcp").lower()).strip("-")[:32]
+                entry = {
+                    "id": server_id,
+                    "display_name": sel.get("name") or "Custom MCP",
+                    "endpoint": validated_endpoint,
+                    "auth_type": custom_auth,
+                    "tier": {
+                        "none": "direct-none",
+                        "api_key": "direct-apikey",
+                        "oauth2_client_credentials": "direct-oauth",
+                        "iam_sigv4": "direct-iam",
+                    }[custom_auth],
+                    "api_key_descriptor": sel.get("api_key_descriptor") or {},
+                }
+            else:
+                if not server_id:
+                    raise RuntimeError("External MCP selection needs a 'server_id' or a custom 'endpoint'.")
+                entry = get_mcp_server(server_id)
+                if entry is None:
+                    raise RuntimeError(f"Unknown MCP server id: {server_id}")
 
             endpoint = _fill_endpoint_placeholders(
                 entry.get("endpoint") or "", sel.get("endpoint_vars") or sel.get("endpointVars") or {}

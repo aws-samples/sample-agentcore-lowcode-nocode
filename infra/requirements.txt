@@ -4,4 +4,4 @@
 # let Dependabot propose bumps that CI then re-verifies.
 aws-cdk-lib==2.238.0
 constructs==10.4.5
-cdk-nag==2.37.55
+cdk-nag==3.0.1

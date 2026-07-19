@@ -74,7 +74,11 @@ GENERATION_PROMPT = """Generate an AgentCore canvas spec from the conversation. 
      "systemPrompt": "<the agent's role and instructions>",
      "protocol": "HTTP", "pythonRuntime": "PYTHON_3_13", "enableOtel": false}
 - `gateway` (OPTIONAL): MCP gateway with predefined tools. Configuration:
-    {"name": "Gateway", "tools": [], "auth": "cognito"}
+    {"name": "Gateway", "targetType": "lambda", "targetConfig": {"type": "lambda"},
+     "enableSemanticSearch": true}
+  (targetType/targetConfig are REQUIRED by the canvas; "lambda" is correct when
+  the gateway's tools come from wired `tool` nodes — the deploy turns them into
+  Lambda targets automatically.)
 - `memory` (OPTIONAL): persistent memory. Configuration:
     {"name": "AgentMemory", "enabled": true, "eventExpiryDuration": 90,
      "strategies": [{"type": "semantic", "name": "semantic_strategy"}]}
@@ -245,6 +249,32 @@ _BUILTIN_TOOL_IDS = {
     "weather_api",
     "web_page_fetcher",
 }
+
+
+def _normalize_spec(spec: dict) -> None:
+    """Deterministically repair well-known config gaps in a generated spec.
+
+    The canvas hard-requires `targetType` + `targetConfig` on every gateway node
+    (REQUIRED_FIELDS in frontend validation), but the model sometimes emits a
+    gateway with only {"name", "tools"} — leaving the applied canvas with
+    "Target Type is required / Target Config is required" errors the user must
+    fix by hand. When the gateway's tools come from wired `tool` nodes, the
+    correct family is `lambda` (the deploy turns tool nodes into Lambda
+    targets), so default the missing fields instead of relying on prompt
+    compliance. In-place; tolerant of malformed nodes (validation catches those).
+    """
+    for n in spec.get("nodes") or []:
+        if not isinstance(n, dict) or n.get("type") != "gateway":
+            continue
+        cfg = n.get("configuration")
+        if not isinstance(cfg, dict):
+            cfg = {}
+            n["configuration"] = cfg
+        if not cfg.get("targetType"):
+            cfg["targetType"] = "lambda"
+        if not isinstance(cfg.get("targetConfig"), dict) or not cfg["targetConfig"].get("type"):
+            cfg["targetConfig"] = {"type": cfg["targetType"]}
+        cfg.setdefault("enableSemanticSearch", True)
 
 
 def _validate_spec(spec: dict) -> str | None:
@@ -451,6 +481,8 @@ def generate_canvas(
                 continue
 
             spec = tool_use.get("input") or {}
+            if isinstance(spec, dict):
+                _normalize_spec(spec)
             err = _validate_spec(spec)
             if err is None:
                 return {

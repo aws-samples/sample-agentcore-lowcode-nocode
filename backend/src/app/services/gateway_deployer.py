@@ -3192,10 +3192,23 @@ def _release_shared_tool_lambda(lambda_client, function_name: str, gateway_role_
         statements = json.loads(pol_raw).get("Statement", []) or []
     except Exception as e:  # noqa: BLE001
         if is_error(e, "ResourceNotFoundException", "ResourceNotFound"):
-            return f"Shared tool Lambda {function_name} already absent"
-        # Can't read the policy (e.g. GetPolicy denied): DON'T risk deleting a
-        # Lambda other gateways may need. Leave it in place.
-        return f"Shared tool Lambda {function_name} kept (policy unreadable: {type(e).__name__})"
+            # AMBIGUOUS: GetPolicy raises the SAME ResourceNotFoundException for
+            # "function doesn't exist" AND "function exists but its resource
+            # policy is empty" — which is exactly the refcount-zero state after
+            # the last gateway's grant was removed above (verified live: the
+            # Lambda leaked as Active while teardown reported "already absent").
+            # Disambiguate with get_function: if the function still exists, an
+            # empty policy means zero grants remain → this WAS the last gateway,
+            # fall through to the delete below.
+            try:
+                lambda_client.get_function(FunctionName=function_name)
+            except Exception:  # noqa: BLE001 — genuinely gone (or unreadable: keep out)
+                return f"Shared tool Lambda {function_name} already absent"
+            statements = []
+        else:
+            # Can't read the policy (e.g. GetPolicy denied): DON'T risk deleting
+            # a Lambda other gateways may need. Leave it in place.
+            return f"Shared tool Lambda {function_name} kept (policy unreadable: {type(e).__name__})"
 
     remaining = [s for s in statements if (s.get("Sid") or "").startswith("AllowAgentCoreInvoke-")]
     if remaining:

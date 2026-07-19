@@ -117,6 +117,38 @@ def test_shared_lambda_deleted_when_last_gateway_releases():
     assert "deleted" in msg
 
 
+def test_shared_lambda_deleted_when_policy_becomes_empty():
+    """Refcount-zero live shape: removing the LAST grant leaves the function
+    with NO resource policy, and GetPolicy then raises ResourceNotFoundException
+    — the same code AWS uses for a missing function. The helper must
+    disambiguate via get_function and still DELETE (verified live: the shared
+    Lambda leaked as Active while teardown said 'already absent')."""
+    lam = MagicMock()
+    lam.get_policy.side_effect = _client_error("ResourceNotFoundException", "no policy", "GetPolicy")
+    lam.get_function.return_value = {"Configuration": {"State": "Active"}}  # function EXISTS
+    with (
+        patch.object(gd, "_prune_orphaned_lambda_permissions", return_value=0),
+        patch.object(gd, "_create_iam_client", return_value=MagicMock()),
+    ):
+        msg = gd._release_shared_tool_lambda(lam, "AgentCoreDynamicTools", "AgentCoreGateway-B")
+    lam.delete_function.assert_called_once_with(FunctionName="AgentCoreDynamicTools")
+    assert "deleted" in msg
+
+
+def test_shared_lambda_absent_when_function_gone_too():
+    """When GetPolicy 404s AND the function itself is gone, report absent."""
+    lam = MagicMock()
+    lam.get_policy.side_effect = _client_error("ResourceNotFoundException", "no fn", "GetPolicy")
+    lam.get_function.side_effect = _client_error("ResourceNotFoundException", "no fn", "GetFunction")
+    with (
+        patch.object(gd, "_prune_orphaned_lambda_permissions", return_value=0),
+        patch.object(gd, "_create_iam_client", return_value=MagicMock()),
+    ):
+        msg = gd._release_shared_tool_lambda(lam, "AgentCoreDynamicTools", "AgentCoreGateway-B")
+    lam.delete_function.assert_not_called()
+    assert "already absent" in msg
+
+
 def test_shared_lambda_not_deleted_when_policy_unreadable():
     """If GetPolicy is denied we must NOT risk deleting a Lambda other gateways
     may still need."""

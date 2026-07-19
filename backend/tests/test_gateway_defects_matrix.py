@@ -206,3 +206,104 @@ def test_prune_silent_on_resource_not_found():
     lam.get_policy.side_effect = _client_error("ResourceNotFoundException", "no policy", "GetPolicy")
     with patch.object(gd, "_create_iam_client", return_value=MagicMock()):
         assert gd._prune_orphaned_lambda_permissions(lam, "fn") == 0
+
+
+# ---------------------------------------------------------------------------
+# Defect C — MANIFEST teardown paths (the live re-verification caught the
+# shared Lambda still being hard-deleted via created_resources[], which
+# bypasses cleanup_gateway_resources entirely)
+# ---------------------------------------------------------------------------
+
+
+def test_manifest_teardown_refcounts_shared_lambda():
+    """deployment_handler._delete_managed_resource must route a shared tool
+    Lambda through the ref-counted release, passing the recorded gateway_role.
+
+    NOTE: _delete_managed_resource shadows boto3 with a cross-account shim that
+    resolves clients via step_clients.client — that is the seam to patch.
+    """
+    import app.deployment_handler as dh
+
+    lam = MagicMock()
+    with (
+        patch("app.services.step_clients.client", return_value=lam),
+        patch.object(dh, "_release_shared_tool_lambda", return_value="released x") as rel,
+    ):
+        msg = dh._delete_managed_resource(
+            {
+                "type": "lambda",
+                "name": "AgentCoreDynamicTools",
+                "gateway_role": "AgentCoreGateway-gwA",
+                "region": "us-east-1",
+            },
+            "us-east-1",
+        )
+    rel.assert_called_once_with(lam, "AgentCoreDynamicTools", "AgentCoreGateway-gwA")
+    lam.delete_function.assert_not_called()
+    assert "released x" in msg
+
+
+def test_manifest_teardown_hard_deletes_non_shared_lambda():
+    """A non-shared per-deploy Lambda is still hard-deleted. The dispatcher
+    resolves clients through step_clients (its local boto3 shim), so that is
+    the seam to patch."""
+    import app.deployment_handler as dh
+
+    lam = MagicMock()
+    with (
+        patch("app.services.step_clients.client", return_value=lam),
+        patch.object(dh, "_release_shared_tool_lambda") as rel,
+    ):
+        msg = dh._delete_managed_resource(
+            {"type": "lambda", "name": "AgentCore-KBTool-abc12345", "region": "us-east-1"},
+            "us-east-1",
+        )
+    rel.assert_not_called()
+    lam.delete_function.assert_called_once_with(FunctionName="AgentCore-KBTool-abc12345")
+    assert "deleted" in msg
+
+
+def test_failure_path_manifest_teardown_refcounts_shared_lambda():
+    """status_update_step._cleanup_resource (failure-path auto-cleanup) must
+    also ref-count the shared Lambda, not hard-delete it."""
+    from app.step_handlers import status_update_step as sus
+
+    lam = MagicMock()
+    with (
+        patch.object(sus.step_clients, "client", return_value=lam),
+        patch.object(sus, "_release_shared_tool_lambda", return_value="released y") as rel,
+    ):
+        sus._cleanup_resource(
+            {
+                "type": "lambda",
+                "name": "AgentCoreCustomerSupportTools",
+                "gateway_role": "AgentCoreGateway-gwB",
+                "region": "us-east-1",
+            },
+            "us-east-1",
+            {},
+        )
+    rel.assert_called_once_with(lam, "AgentCoreCustomerSupportTools", "AgentCoreGateway-gwB")
+    lam.delete_function.assert_not_called()
+
+
+def test_gateway_step_records_gateway_role_for_shared_lambda():
+    """The manifest entry for a shared tool Lambda must carry gateway_role so
+    teardown can drop the right invoke grant."""
+    from app.step_handlers import gateway_step as gs
+
+    store = MagicMock()
+    gs._record_gateway_resources(
+        store,
+        "dep-1",
+        "us-east-1",
+        {
+            "gateway_id": "gw-1",
+            "gateway_name": "mygw",
+            "lambda_function_name": "AgentCoreDynamicTools",
+            "client_info": {},
+        },
+    )
+    lambda_entries = [c.args[1] for c in store.record_resource.call_args_list if c.args[1].get("type") == "lambda"]
+    assert lambda_entries, "no lambda manifest entry recorded"
+    assert lambda_entries[0]["gateway_role"] == "AgentCoreGateway-mygw"

@@ -21,6 +21,7 @@ from app.services.agent_versions_store import (
     get_versions_store,
 )
 from app.services.deployment_state_store import DeploymentStateStore
+from app.services.gateway_deployer import _SHARED_TOOL_LAMBDAS, _release_shared_tool_lambda
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +208,15 @@ def _cleanup_resource(res: dict, region: str, event: dict) -> None:
         ctrl = step_clients.client(event, "bedrock-agentcore-control", region_name=res_region)
         ctrl.delete_memory(memoryId=rid)
     elif rtype == "lambda":
-        step_clients.client(event, "lambda", region_name=res_region).delete_function(FunctionName=rname or rid)
+        _fn = rname or rid
+        _lam = step_clients.client(event, "lambda", region_name=res_region)
+        # Defect C (failure-path manifest teardown): shared singleton tool
+        # Lambdas are released by reference count, never hard-deleted while
+        # another live gateway still holds an invoke grant on them.
+        if _fn in _SHARED_TOOL_LAMBDAS:
+            logger.info(_release_shared_tool_lambda(_lam, _fn, res.get("gateway_role")))
+        else:
+            _lam.delete_function(FunctionName=_fn)
     elif rtype == "iam_role":
         iam = step_clients.client(event, "iam")
         role_name = rname or rid

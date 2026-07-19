@@ -10,7 +10,7 @@ import os
 import app.services._otel_platform  # noqa: F401
 from app.models.deployment_models import DeploymentStatusEnum, DeploymentStepName
 from app.services.deployment_state_store import DeploymentStateStore
-from app.services.gateway_deployer import _put_connector_secret, deploy_gateway
+from app.services.gateway_deployer import _SHARED_TOOL_LAMBDAS, _put_connector_secret, deploy_gateway
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +57,18 @@ def _record_gateway_resources(
         _rec({"type": "cognito_user_pool", "id": pool_id})
 
     # Tool Lambdas + their exec roles (built-in dynamic-tools / customer-support,
-    # KB query tool, and per-custom-tool lambdas/roles).
+    # KB query tool, and per-custom-tool lambdas/roles). SHARED singleton tool
+    # Lambdas (AgentCoreDynamicTools / AgentCoreCustomerSupportTools) are reused
+    # by every gateway, so their manifest entry also records WHICH gateway role
+    # owns this deployment's invoke grant — the teardown dispatchers use it to
+    # release the Lambda by reference count instead of hard-deleting it out from
+    # under other live gateways (Defect C, manifest path).
     for fn in [gateway_result.get("lambda_function_name"), gateway_result.get("kb_lambda_name")]:
         if fn:
-            _rec({"type": "lambda", "name": fn})
+            entry = {"type": "lambda", "name": fn}
+            if fn in _SHARED_TOOL_LAMBDAS and gw_name:
+                entry["gateway_role"] = f"AgentCoreGateway-{gw_name}"
+            _rec(entry)
     for fn in gateway_result.get("custom_tool_lambdas") or []:
         if fn:
             _rec({"type": "lambda", "name": fn})

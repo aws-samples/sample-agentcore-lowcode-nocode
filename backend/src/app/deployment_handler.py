@@ -46,7 +46,12 @@ from app.models.tool_generation_models import (
 from app.services.aws_errors import is_error
 from app.services.config import load_config
 from app.services.deployment_state_store import DeploymentStateStore
-from app.services.gateway_deployer import cleanup_gateway_resources, get_cognito_token
+from app.services.gateway_deployer import (
+    _SHARED_TOOL_LAMBDAS,
+    _release_shared_tool_lambda,
+    cleanup_gateway_resources,
+    get_cognito_token,
+)
 from app.services.harness_deployer import destroy_harness, invoke_harness
 from app.services.runtime_deployer import destroy_runtime
 from app.services.tool_generator import generate_tool
@@ -1443,8 +1448,17 @@ def _delete_managed_resource(res: dict, region: str) -> str:
             iam.delete_role(RoleName=rname or rid)
             return f"[manifest] iam role {rname or rid} deleted"
         if rtype == "lambda":
-            boto3.client("lambda", region_name=res_region).delete_function(FunctionName=rname or rid)
-            return f"[manifest] lambda {rname or rid} deleted"
+            _fn = rname or rid
+            _lam = boto3.client("lambda", region_name=res_region)
+            # Defect C (manifest path): a SHARED singleton tool Lambda
+            # (AgentCoreDynamicTools / AgentCoreCustomerSupportTools) is reused by
+            # every gateway — release it by reference count (drop only this
+            # gateway's invoke grant; delete only when no grants remain) instead
+            # of hard-deleting it out from under other live gateways.
+            if _fn in _SHARED_TOOL_LAMBDAS:
+                return f"[manifest] {_release_shared_tool_lambda(_lam, _fn, res.get('gateway_role'))}"
+            _lam.delete_function(FunctionName=_fn)
+            return f"[manifest] lambda {_fn} deleted"
         if rtype == "policy_engine":
             ctrl = boto3.client("bedrock-agentcore-control", region_name=res_region)
             # Bug 179: delete ALL child policies and WAIT until the engine reports

@@ -10,6 +10,6 @@ urllib3
 # Used by services/_otel_platform.py to emit spans for every API request
 # the workflow Lambda + deployment Lambda + step handlers receive.
 opentelemetry-api>=1.43.0
-opentelemetry-sdk>=1.41.0
+opentelemetry-sdk>=1.43.0
 opentelemetry-exporter-otlp-proto-http>=1.43.0
 opentelemetry-instrumentation-botocore>=0.64b0

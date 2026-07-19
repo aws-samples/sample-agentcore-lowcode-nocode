@@ -2,6 +2,6 @@
 # is import-fragile across minor releases (NagSuppressions availability moved
 # between versions and broke CI on an unpinned `>=` floor), so pin exactly and
 # let Dependabot propose bumps that CI then re-verifies.
-aws-cdk-lib==2.238.0
+aws-cdk-lib==2.261.0
 constructs==10.4.5
 cdk-nag==2.37.55

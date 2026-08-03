@@ -4,6 +4,6 @@
 # let Dependabot propose bumps that CI then re-verifies.
 # NOTE: cdk-nag stays on 2.x — 3.0 removed the NagSuppressions API this stack
 # uses (see stacks/platform/nag_suppressions.py).
-aws-cdk-lib==2.261.0
+aws-cdk-lib==2.262.1
 constructs==10.6.0
 cdk-nag==2.37.55

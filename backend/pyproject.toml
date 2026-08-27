@@ -6,7 +6,10 @@ requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",
     "pydantic>=2.10.0",
-    "boto3>=1.35.0",
+    # 1.43.66 is the first release with the GA `agent-registry-control` /
+    # `agent-registry` service models (Agent Registry left the
+    # `bedrock-agentcore` namespace at GA).
+    "boto3>=1.43.66",
     "uvicorn>=0.32.0",
     "python-dotenv>=1.0.0",
     "mangum>=0.19.0",
@@ -21,6 +24,11 @@ dev = [
     "httpx>=0.28.0",
     "moto[dynamodb]>=5.0.0",
     "requests>=2.31.0",
+    # Exact pin, unlike everything else here: a formatter's output changes between
+    # minor releases, so `>=` would mean `ruff format --check` locally and in CI
+    # could disagree while both were "satisfied". Must match the `version:` pinned
+    # on the ruff-action steps in .github/workflows/ci.yml.
+    "ruff==0.16.4",
 ]
 deploy = [
     "bedrock-agentcore-starter-toolkit",

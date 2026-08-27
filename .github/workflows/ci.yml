@@ -19,11 +19,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      # `version` is pinned deliberately. ruff-action derives it from the nearest
+      # pyproject.toml, and this repo has none at the root (the Python projects are
+      # backend/ and infra/), so it silently resolved to `latest` -- which made this
+      # job's verdict depend on Astral's release date rather than on the commit.
+      # 0.16 started formatting Python blocks *inside* markdown, so PRs began
+      # failing on doc files their authors never touched, and `ruff format --check`
+      # passing locally no longer predicted CI. Keep this equal to the `ruff` pin in
+      # backend/pyproject.toml's dev extras; Dependabot bumps them as a reviewable PR.
       - uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89 # v4.1.0
         with:
+          version: 0.16.4
           args: check .
       - uses: astral-sh/ruff-action@278981a28ce3188b1e39527901f38254bf3aac89 # v4.1.0
         with:
+          version: 0.16.4
           args: format --check .
       # Non-blocking while the backlog of type errors is burned down;
       # flip continue-on-error to false once `npx pyright` is clean.

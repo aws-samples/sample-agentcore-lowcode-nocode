@@ -6,4 +6,4 @@
 # uses (see stacks/platform/nag_suppressions.py).
 aws-cdk-lib==2.261.0
 constructs==10.6.0
-cdk-nag==2.37.55
+cdk-nag==3.0.2

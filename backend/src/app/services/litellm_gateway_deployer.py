@@ -206,10 +206,41 @@ def _headers(api_key: str, servers: list[str] | None = None) -> dict:
 
 
 def _get_json(url: str, api_key: str, servers: list[str] | None = None) -> object:
-    """GET *url* and parse JSON. *url* MUST already be through _validate_outbound_url."""
-    req = urllib.request.Request(url, headers=_headers(api_key, servers), method="GET")
-    # nosemgrep: dynamic-urllib-use-detected -- URL validated by _validate_outbound_url
-    # (https-only + DNS-resolved private/IMDS denylist) before reaching here.
+    """GET *url* and parse JSON, validating the URL here at the sink.
+
+    Callers at the API boundary validate too. This does not rely on that, for two
+    reasons that are not stylistic:
+
+    * A base URL is also read back out of **persisted settings**, so the value
+      arriving here did not necessarily come through the API on this request — a
+      settings row written straight to DynamoDB never saw the boundary check.
+    * A guard enforced only at call sites is one new call site away from being
+      absent, and this is the single point every LiteLLM probe funnels through.
+
+    It narrows but does NOT close the window between resolving a hostname and
+    connecting to it: urlopen resolves DNS again, so a record that changes in
+    between remains a rebinding risk. Closing that needs connect-time IP pinning,
+    which urllib does not expose.
+    """
+    validated = _validate_outbound_url(url, label="LiteLLM URL rejected —")
+    # CodeQL reports py/full-ssrf on the line below, and it is right that the URL is
+    # customer-controlled: the entire feature is "point the platform at YOUR LiteLLM
+    # proxy", so a path from the request body to here exists by design and cannot be
+    # removed without removing the feature. What the query cannot see is that the
+    # line above is a barrier — a validator that raises is not something it models.
+    # So the mitigation is stated here: https-only, every resolved A/AAAA record
+    # checked against the private / link-local / IMDS denylist, plus an optional host
+    # allowlist. Unconditional, at the sink, covered by test_litellm_ssrf_sink.py.
+    # The residual risk is DNS rebinding, documented in the docstring above; no
+    # validation at this layer closes it.
+    #
+    # The alert is dismissed in code scanning ("won't fix") rather than suppressed
+    # here: this repo uses CodeQL default setup, which ignores `# codeql[...]`
+    # comments. One was tried first and had no effect — so if a future reader adds
+    # one expecting it to work, that is why it doesn't.
+    req = urllib.request.Request(validated, headers=_headers(api_key, servers), method="GET")
+    # nosemgrep: dynamic-urllib-use-detected -- validated on the line above
+    # (https-only + DNS-resolved private/IMDS denylist).
     with urllib.request.urlopen(req, timeout=_PROBE_TIMEOUT) as resp:  # noqa: S310
         return json.loads(resp.read().decode("utf-8") or "null")
 
